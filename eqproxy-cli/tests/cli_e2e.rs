@@ -168,6 +168,117 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
 }
 
 #[test]
+fn run_http_mode_proxies_requests_and_rejects_smuggling() {
+    // Backend HTTP real mínimo: responde 200 con eco del cuerpo.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend http");
+    let backend = listener.local_addr().expect("addr backend");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    use std::io::Read;
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                let _ = stream.write_all(response);
+            });
+        }
+    });
+
+    let config = temp_config(
+        "http",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\nmode = \"http\"\n[backend.api]\nserver = \"{backend}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (http)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("leer stderr");
+        assert!(read > 0, "eqproxy cerró stderr sin anunciar bind");
+        if let Some(addr) = line.split("escuchando en ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "no se anunció la dirección");
+
+    // Recorrido real: GET proxificado con respuesta observada.
+    let mut client = TcpStream::connect(proxy_addr.as_str()).expect("connect al proxy");
+    client
+        .write_all(b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .expect("write GET");
+    let mut response = Vec::new();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let _ = client.read_to_end(&mut response);
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 200 OK"), "respuesta: {text}");
+    assert!(text.ends_with("ok"), "cuerpo ecoado: {text}");
+
+    // Caso de error: smuggling CL+TE rechazado con 400 por el binario real.
+    let mut evil = TcpStream::connect(proxy_addr.as_str()).expect("connect 2");
+    evil.write_all(
+        b"POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+    )
+    .expect("write smuggle");
+    let mut rejected = Vec::new();
+    evil.set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let _ = evil.read_to_end(&mut rejected);
+    let rejected = String::from_utf8_lossy(&rejected);
+    assert!(
+        rejected.starts_with("HTTP/1.1 400"),
+        "smuggling debe rechazarse: {rejected}"
+    );
+
+    // SIGINT real → apagado limpio con código 0.
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("ejecutar kill");
+    assert!(kill.success(), "kill -INT debe aceptarse");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy no terminó tras SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "apagado limpio debe salir con 0");
+}
+
+#[test]
 fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
     let backend = start_echo_backend();
     let config = temp_config(

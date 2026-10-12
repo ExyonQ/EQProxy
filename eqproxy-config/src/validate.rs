@@ -132,6 +132,24 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             );
         }
 
+        if listener.client_header_timeout.is_zero() {
+            err(
+                field("client_header_timeout"),
+                "client_header_timeout debe ser mayor que 0".to_owned(),
+                "client_header_timeout = \"5s\"".to_owned(),
+                &section,
+            );
+        }
+
+        if listener.server_header_timeout.is_zero() {
+            err(
+                field("server_header_timeout"),
+                "server_header_timeout debe ser mayor que 0".to_owned(),
+                "server_header_timeout = \"30s\"".to_owned(),
+                &section,
+            );
+        }
+
         if let Ok(addr) = listener.listen.parse::<SocketAddr>() {
             if !addr.ip().is_loopback() {
                 result.warnings.push(format!(

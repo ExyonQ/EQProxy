@@ -10,9 +10,13 @@ shutdown_grace = "10s"
 [listener.web]
 listen = "127.0.0.1:8080"   # IP:PUERTO (puerto 0 = efímero)
 backend = "api"             # referencia a una sección [backend.*]
+mode = "tcp"                # "tcp" (túnel) u "http" (HTTP/1.1 estricto)
 maxconn = 1024              # conexiones simultáneas; al llenarse se rechaza
 connect_timeout = "5s"      # conexión al backend
 idle_timeout = "60s"        # inactividad por dirección del túnel
+# Solo mode = "http": timeouts por fase de mensaje
+client_header_timeout = "5s"   # cabecera de petición (cliente → proxy)
+server_header_timeout = "30s"  # cabecera de respuesta (backend → proxy)
 
 [backend.api]
 server = "127.0.0.1:9000"   # Fase 1: un servidor; balanceo en Fase 2

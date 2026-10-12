@@ -26,6 +26,12 @@ pub struct Metrics {
     pub bytes_client_to_backend: AtomicU64,
     /// Bytes transferidos backend → cliente.
     pub bytes_backend_to_client: AtomicU64,
+    /// Intercambios HTTP/1.1 completados (request + response terminados).
+    pub http_requests_proxied: AtomicU64,
+    /// Peticiones HTTP rechazadas por framing/validación (400/417/431/501/505).
+    pub http_requests_rejected: AtomicU64,
+    /// Cabeceras de mensaje no recibidas dentro de su timeout de fase.
+    pub header_timeouts: AtomicU64,
 }
 
 /// Fotografía inmutable de los contadores.
@@ -39,6 +45,9 @@ pub struct MetricsSnapshot {
     pub idle_timeouts: u64,
     pub bytes_client_to_backend: u64,
     pub bytes_backend_to_client: u64,
+    pub http_requests_proxied: u64,
+    pub http_requests_rejected: u64,
+    pub header_timeouts: u64,
 }
 
 impl Metrics {
@@ -53,6 +62,9 @@ impl Metrics {
             idle_timeouts: self.idle_timeouts.load(Ordering::Relaxed),
             bytes_client_to_backend: self.bytes_client_to_backend.load(Ordering::Relaxed),
             bytes_backend_to_client: self.bytes_backend_to_client.load(Ordering::Relaxed),
+            http_requests_proxied: self.http_requests_proxied.load(Ordering::Relaxed),
+            http_requests_rejected: self.http_requests_rejected.load(Ordering::Relaxed),
+            header_timeouts: self.header_timeouts.load(Ordering::Relaxed),
         }
     }
 
@@ -94,6 +106,11 @@ impl fmt::Display for MetricsSnapshot {
             self.idle_timeouts,
             self.bytes_client_to_backend,
             self.bytes_backend_to_client,
+        )?;
+        write!(
+            f,
+            " http[proxied={} rechazadas={} header_timeouts={}]",
+            self.http_requests_proxied, self.http_requests_rejected, self.header_timeouts
         )
     }
 }

@@ -13,7 +13,7 @@ pub mod validate;
 use std::path::Path;
 
 pub use error::{ConfigError, Location};
-pub use schema::{BackendConfig, Config, ListenerConfig, SCHEMA_VERSION};
+pub use schema::{BackendConfig, Config, ListenerConfig, ListenerMode, SCHEMA_VERSION};
 pub use validate::CheckResult;
 
 /// Carga y parsea un archivo de configuración TOML.
@@ -106,10 +106,15 @@ fn example_for(field_path: &str, cause: &str) -> String {
     }
     match last {
         "listen" | "server" => "listen = \"127.0.0.1:8080\" (formato IP:PUERTO)".to_owned(),
-        "connect_timeout" | "idle_timeout" | "shutdown_grace" => {
+        "connect_timeout"
+        | "idle_timeout"
+        | "shutdown_grace"
+        | "client_header_timeout"
+        | "server_header_timeout" => {
             format!("{last} = \"5s\" (sufijos válidos: ms, s, m, h)")
         }
         "maxconn" => "maxconn = 1024".to_owned(),
+        "mode" => "mode = \"tcp\" (o \"http\")".to_owned(),
         "schema_version" => "schema_version = 1".to_owned(),
         _ => "ver eqproxy.toml.example".to_owned(),
     }

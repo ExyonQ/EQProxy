@@ -16,7 +16,7 @@ use eqproxy_config::error::ConfigError;
 use eqproxy_config::schema::Config;
 use eqproxy_config::validate::{self, CheckResult};
 use eqproxy_core::{Metrics, shutdown};
-use eqproxy_net::{ResolvedListener, bind};
+use eqproxy_net::{ProxyMode, ResolvedListener, bind};
 
 #[derive(Parser)]
 #[command(
@@ -204,9 +204,15 @@ fn resolve(config: &Config) -> Result<Vec<ResolvedListener>, String> {
                 listen,
                 backend_name: listener.backend.clone(),
                 server,
+                mode: match listener.mode {
+                    eqproxy_config::ListenerMode::Tcp => ProxyMode::Tcp,
+                    eqproxy_config::ListenerMode::Http => ProxyMode::Http,
+                },
                 maxconn: listener.maxconn,
                 connect_timeout: listener.connect_timeout,
                 idle_timeout: listener.idle_timeout,
+                client_header_timeout: listener.client_header_timeout,
+                server_header_timeout: listener.server_header_timeout,
             })
         })
         .collect()

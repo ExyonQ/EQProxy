@@ -24,8 +24,20 @@ use tokio::task::JoinSet;
 
 use eqproxy_core::{Metrics, Shutdown};
 
+use crate::http1;
+
 /// Buffer por dirección (SPEC §7.3: 16 KiB).
 pub const READ_BUF: usize = 16 * 1024;
+
+/// Modo de proxy de un listener (A1 `Tcp`, A2 `Http`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProxyMode {
+    /// Túnel TCP sin interpretación.
+    #[default]
+    Tcp,
+    /// Proxy HTTP/1.1 con framing estricto.
+    Http,
+}
 
 /// Listener resuelto (config ya validada: direcciones parseadas, refs íntegras).
 #[derive(Debug, Clone)]
@@ -34,9 +46,14 @@ pub struct ResolvedListener {
     pub listen: SocketAddr,
     pub backend_name: String,
     pub server: SocketAddr,
+    pub mode: ProxyMode,
     pub maxconn: u32,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
+    /// Fase cliente (solo `http`): cabecera de petición.
+    pub client_header_timeout: Duration,
+    /// Fase servidor (solo `http`): cabecera de respuesta.
+    pub server_header_timeout: Duration,
 }
 
 /// Error de arranque del dataplane.
@@ -183,6 +200,11 @@ async fn handle_connection(
         metrics: Arc::clone(&metrics),
     };
     let _ = client.set_nodelay(true);
+
+    if cfg.mode == ProxyMode::Http {
+        http1::serve_http(client, peer, &cfg, metrics).await;
+        return;
+    }
 
     match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(cfg.server)).await {
         Err(_elapsed) => {

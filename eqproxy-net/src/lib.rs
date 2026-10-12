@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod http1;
 pub mod proxy;
 
-pub use proxy::{BoundProxy, ProxyError, READ_BUF, ResolvedListener, bind};
+pub use proxy::{BoundProxy, ProxyError, ProxyMode, READ_BUF, ResolvedListener, bind};

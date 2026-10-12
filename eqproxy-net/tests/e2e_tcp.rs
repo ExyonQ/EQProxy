@@ -50,9 +50,12 @@ fn listener_cfg(
         listen,
         backend_name: "api".to_owned(),
         server,
+        mode: eqproxy_net::ProxyMode::Tcp,
         maxconn,
         connect_timeout,
         idle_timeout,
+        client_header_timeout: Duration::from_secs(5),
+        server_header_timeout: Duration::from_secs(30),
     }
 }
 

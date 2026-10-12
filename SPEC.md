@@ -254,9 +254,13 @@ concurrencia cuando proceda.
      parser de ref sin pérdidas → representación estructurada →
      traducción → validación y generación → `eqproxy.toml` + informe de
      conversión).
-  3. **Estado de servidor DRAIN vs MAINT:** semántica explícita propia,
-     documentada por comparación con `set server ... state drain/maint`.
-  4. (Registro vivo: cada fila de la matriz lo amplía.)
+3. **Estado de servidor DRAIN vs MAINT:** semántica explícita propia,
+   documentada por comparación con `set server ... state drain/maint`.
+4. **Framing HTTP (Fase 2a):** EQProxy rechaza todo mensaje ambiguo (CL+TE,
+   duplicados, TE ≠ `chunked`, absolute-form, obs-fold) en lugar de
+   normalizarlo como puede hacer ref en algunos casos; `CONNECT`/`Upgrade`
+   responden 501 hasta Fase 4. Trailers solo vacíos o sin cabeceras de framing.
+5. (Registro vivo: cada fila de la matriz lo amplía.)
 
 ## 14. Estado y evidencia del proyecto
 
@@ -266,4 +270,5 @@ concurrencia cuando proceda.
 | Especificación y alcance | Diseñado | Este documento |
 | Matriz de paridad | Diseñado | PARITY_MATRIX.md (incompleta por diseño, huecos declarados) |
 | Código Fase 1 (proxy TCP, config TOML, CLI) | **Probado** (2026-10-12) | 30 tests en verde: 19 unit + 6 E2E con sockets reales + 5 E2E por el binario real `eqproxy` (incl. SIGINT). fmt/clippy `-D warnings` en verde; 0 `unsafe` propios (`forbid(unsafe_code)`); cargo-deny y cargo-machete en verde; SBOM en `sbom/` |
+| Código Fase 2a (HTTP/1.1 estricto, T01–T03, timeouts por fase, streaming) | **Probado** (2026-10-12) | 47 tests en verde: 27 unit + 14 E2E con sockets reales (6 TCP + 8 HTTP) + 6 E2E por el binario real (incl. smuggling rechazado con 400 y SIGINT). fmt/clippy `-D warnings` en verde |
 | Benchmarks | **No medidos** | Solo plan (BENCHMARK_PLAN.md) |

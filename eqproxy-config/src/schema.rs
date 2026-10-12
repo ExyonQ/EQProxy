@@ -30,6 +30,25 @@ fn default_shutdown_grace() -> Duration {
     Duration::from_secs(10)
 }
 
+fn default_client_header_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn default_server_header_timeout() -> Duration {
+    Duration::from_secs(30)
+}
+
+/// Modo de proxy de un listener (A1 `tcp`, A2 `http`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ListenerMode {
+    /// Túnel TCP sin interpretación (Fase 1).
+    #[default]
+    Tcp,
+    /// Proxy HTTP/1.1 con framing estricto (Fase 2a).
+    Http,
+}
+
 /// Configuración completa de EQProxy.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +72,9 @@ pub struct Config {
 pub struct ListenerConfig {
     /// Dirección `IP:PUERTO` de escucha (puerto 0 = efímero, útil en tests).
     pub listen: String,
+    /// Modo: `"tcp"` (túnel, por defecto) u `"http"` (HTTP/1.1 estricto).
+    #[serde(default)]
+    pub mode: ListenerMode,
     /// Nombre del backend ([`BackendConfig`] en `Config::backend`).
     pub backend: String,
     /// Conexiones simultáneas máximas; al llenarse se rechaza explícitamente.
@@ -64,6 +86,12 @@ pub struct ListenerConfig {
     /// Timeout de inactividad por dirección (sin bytes en ninguno de los sentidos).
     #[serde(default = "default_idle_timeout", with = "duration")]
     pub idle_timeout: Duration,
+    /// Fase cliente: máximo para recibir la cabecera de petición (solo `http`).
+    #[serde(default = "default_client_header_timeout", with = "duration")]
+    pub client_header_timeout: Duration,
+    /// Fase servidor: máximo para recibir la cabecera de respuesta (solo `http`).
+    #[serde(default = "default_server_header_timeout", with = "duration")]
+    pub server_header_timeout: Duration,
 }
 
 /// Un backend: servidor de origen (Fase 1: un único servidor; balanceo en Fase 2).
