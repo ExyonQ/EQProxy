@@ -26,6 +26,7 @@ cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 | [USER_PAIN_POINTS.md](USER_PAIN_POINTS.md) | Dolores de usuario documentados y requisitos derivados |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | Modelo de amenazas y declaración de no-protecciones |
 | [ROADMAP.md](ROADMAP.md) | Fases 0–9 con criterios de salida verificables |
+| [AGENTS.md](AGENTS.md) | Proceso obligatorio por funcionalidad: implementación real, E2E y auditoría Veyra Proof |
 | [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) | Plan de benchmarks honestos y estudio de tareas operativas |
 | [docs/adr/](docs/adr/) | Registros de decisiones de arquitectura |
 
