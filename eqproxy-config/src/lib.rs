@@ -299,7 +299,6 @@ mod tests {
         }
     }
 
-    #[cfg_attr(miri, ignore = "crea archivos en la FS del SO; miri corre aislado")]
     #[test]
     fn load_enforces_the_size_budget_on_files() {
         let temp = |tag: &str| {
@@ -314,16 +313,12 @@ mod tests {
         let cfg = load(&small).expect("archivo pequeño debe cargar");
         assert_eq!(cfg.schema_version, 1);
 
-        let at = temp("at-limit");
+        let over = temp("over");
         let mut content = String::from("schema_version = 1\n");
         content.push('#');
         content.push_str(&"a".repeat(MAX_CONFIG_BYTES - content.len() - 1));
         content.push('\n');
         assert_eq!(content.len(), MAX_CONFIG_BYTES);
-        std::fs::write(&at, &content).unwrap();
-        load(&at).expect("exactamente en el límite debe cargar");
-
-        let over = temp("over");
         content.push('a');
         std::fs::write(&over, &content).unwrap();
         let err = load(&over).expect_err("un byte más debe rechazarse");
@@ -334,8 +329,32 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(small);
-        let _ = std::fs::remove_file(at);
         let _ = std::fs::remove_file(over);
+    }
+
+    /// El lado «acepta exactamente en el límite» vive separado porque su parse
+    /// de 1 MiB interpretado por miri cuesta >8 min medidos (mismo coste en
+    /// `source_at_the_limit_is_accepted`); la frontera se cubre en la suite
+    /// normal y la CI, y arriba queda el rechazo del presupuesto también
+    /// bajo miri.
+    #[cfg_attr(
+        miri,
+        ignore = "parse de 1 MiB interpretado: >8 min medidos bajo miri; frontera cubierta por la suite normal y CI"
+    )]
+    #[test]
+    fn load_accepts_a_file_at_the_size_limit() {
+        let at = std::env::temp_dir().join(format!(
+            "eqproxy-config-test-{}-at-limit.toml",
+            std::process::id()
+        ));
+        let mut content = String::from("schema_version = 1\n");
+        content.push('#');
+        content.push_str(&"a".repeat(MAX_CONFIG_BYTES - content.len() - 1));
+        content.push('\n');
+        assert_eq!(content.len(), MAX_CONFIG_BYTES);
+        std::fs::write(&at, &content).unwrap();
+        load(&at).expect("exactamente en el límite debe cargar");
+        let _ = std::fs::remove_file(at);
     }
 
     #[test]

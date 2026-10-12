@@ -56,38 +56,46 @@ impl Shutdown {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use std::time::Duration;
 
-    #[cfg_attr(
-        miri,
-        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
-    )]
-    #[tokio::test]
-    async fn trigger_releases_all_waiters() {
-        let (handle, shutdown) = channel();
-        let mut waiter = shutdown.clone();
-        let waiting = tokio::spawn(async move { waiter.wait().await });
-        assert!(!shutdown.is_triggered());
-        handle.trigger();
-        tokio::time::timeout(Duration::from_secs(1), waiting)
-            .await
-            .expect("wait() debe retornar tras trigger()")
-            .expect("la tarea no debe fallar");
-        assert!(shutdown.is_triggered());
-        assert!(handle.is_triggered());
+    /// Ejecuta un futuro en un runtime de un solo hilo **sin driver IO**
+    /// (mio/kqueue): los tests solo usan timers y canales en memoria, así que
+    /// corren también bajo miri, que no emula ese FFI del SO.
+    fn sin_driver_io<F: Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime tokio")
+            .block_on(fut)
     }
 
-    #[cfg_attr(
-        miri,
-        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
-    )]
-    #[tokio::test]
-    async fn wait_returns_immediately_if_already_triggered() {
-        let (handle, shutdown) = channel();
-        handle.trigger();
-        let mut waiter = shutdown;
-        tokio::time::timeout(Duration::from_secs(1), waiter.wait())
-            .await
-            .expect("wait() sobre señal ya disparada debe ser inmediato");
+    #[test]
+    fn trigger_releases_all_waiters() {
+        sin_driver_io(async {
+            let (handle, shutdown) = channel();
+            let mut waiter = shutdown.clone();
+            let waiting = tokio::spawn(async move { waiter.wait().await });
+            assert!(!shutdown.is_triggered());
+            handle.trigger();
+            tokio::time::timeout(Duration::from_secs(1), waiting)
+                .await
+                .expect("wait() debe retornar tras trigger()")
+                .expect("la tarea no debe fallar");
+            assert!(shutdown.is_triggered());
+            assert!(handle.is_triggered());
+        })
+    }
+
+    #[test]
+    fn wait_returns_immediately_if_already_triggered() {
+        sin_driver_io(async {
+            let (handle, shutdown) = channel();
+            handle.trigger();
+            let mut waiter = shutdown;
+            tokio::time::timeout(Duration::from_secs(1), waiter.wait())
+                .await
+                .expect("wait() sobre señal ya disparada debe ser inmediato");
+        })
     }
 }

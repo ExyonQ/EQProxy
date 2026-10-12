@@ -170,7 +170,10 @@ async fn send_and_read(addr: SocketAddr, request: &[u8]) -> String {
     String::from_utf8_lossy(&response).into_owned()
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_get_roundtrip_and_keepalive() {
     let backend = start_http_backend().await;
@@ -210,7 +213,10 @@ async fn http1_get_roundtrip_and_keepalive() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_post_body_streams_end_to_end() {
     let backend = start_http_backend().await;
@@ -247,7 +253,10 @@ async fn http1_post_body_streams_end_to_end() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_chunked_body_streams_end_to_end() {
     let backend = start_http_backend().await;
@@ -271,7 +280,10 @@ async fn http1_chunked_body_streams_end_to_end() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_smuggling_corpus_is_rejected_before_backend() {
     let backend = start_http_backend().await;
@@ -326,7 +338,10 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_header_timeout_returns_408_and_counts() {
     let backend = start_http_backend().await;
@@ -364,7 +379,10 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_server_header_timeout_returns_504() {
     let backend = start_silent_backend().await;
@@ -395,7 +413,10 @@ async fn http1_server_header_timeout_returns_504() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_abort_cancels_upstream_promptly() {
     // A19: el abort del cliente a mitad de cuerpo debe cancelar el upstream
@@ -464,7 +485,10 @@ async fn http1_client_abort_cancels_upstream_promptly() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_response_without_framing_is_eof_delimited() {
     // Backend HTTP/1.0-style: respuesta sin Content-Length → cuerpo hasta EOF.

@@ -52,7 +52,7 @@ fn start_echo_backend() -> std::net::SocketAddr {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_accepts_a_good_config() {
@@ -85,7 +85,7 @@ fn validate_accepts_a_good_config() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_reports_file_line_field_cause_example() {
@@ -124,7 +124,7 @@ fn validate_reports_file_line_field_cause_example() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_reports_syntax_errors_with_line() {
@@ -148,7 +148,7 @@ fn validate_reports_syntax_errors_with_line() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
 )]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
@@ -185,7 +185,7 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
 )]
 #[test]
 fn run_http_mode_proxies_requests_and_rejects_smuggling() {
@@ -300,7 +300,7 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
 )]
 #[test]
 fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {

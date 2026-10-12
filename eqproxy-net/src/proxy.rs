@@ -346,61 +346,69 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use tokio::io::AsyncWriteExt;
 
-    #[cfg_attr(
-        miri,
-        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
-    )]
-    #[tokio::test]
-    async fn copy_dir_moves_bytes_and_propagates_eof() {
-        let (mut client, server) = tokio::io::duplex(64);
-        let bytes = Arc::new(AtomicU64::new(0));
-        let idles = Arc::new(AtomicU64::new(0));
-        let task_bytes = Arc::clone(&bytes);
-        let task_idles = Arc::clone(&idles);
-
-        let copier = tokio::spawn(async move {
-            copy_dir(
-                server,
-                tokio::io::sink(),
-                Duration::from_secs(5),
-                &task_bytes,
-                &task_idles,
-            )
-            .await
-        });
-        client.write_all(b"hola").await.expect("write");
-        drop(client); // EOF
-        let copied = tokio::time::timeout(Duration::from_secs(2), copier)
-            .await
-            .expect("el copier debe terminar")
-            .expect("join")
-            .expect("sin error en EOF");
-        assert_eq!(copied, 4);
-        assert_eq!(bytes.load(Ordering::Relaxed), 4);
-        assert_eq!(idles.load(Ordering::Relaxed), 0);
+    /// Ejecuta un futuro en un runtime de un solo hilo **sin driver IO**
+    /// (mio/kqueue): los tests solo usan timers y duplex en memoria, así que
+    /// corren también bajo miri, que no emula ese FFI del SO.
+    fn sin_driver_io<F: Future>(fut: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("runtime tokio")
+            .block_on(fut)
     }
 
-    #[cfg_attr(
-        miri,
-        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
-    )]
-    #[tokio::test]
-    async fn copy_dir_times_out_when_reader_is_silent() {
-        let (_client, server) = tokio::io::duplex(64);
-        let bytes = AtomicU64::new(0);
-        let idles = AtomicU64::new(0);
-        let result = copy_dir(
-            server,
-            tokio::io::sink(),
-            Duration::from_millis(50),
-            &bytes,
-            &idles,
-        )
-        .await;
-        let err = result.expect_err("debe expirar por inactividad");
-        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
-        assert_eq!(idles.load(Ordering::Relaxed), 1);
+    #[test]
+    fn copy_dir_moves_bytes_and_propagates_eof() {
+        sin_driver_io(async {
+            let (mut client, server) = tokio::io::duplex(64);
+            let bytes = Arc::new(AtomicU64::new(0));
+            let idles = Arc::new(AtomicU64::new(0));
+            let task_bytes = Arc::clone(&bytes);
+            let task_idles = Arc::clone(&idles);
+
+            let copier = tokio::spawn(async move {
+                copy_dir(
+                    server,
+                    tokio::io::sink(),
+                    Duration::from_secs(5),
+                    &task_bytes,
+                    &task_idles,
+                )
+                .await
+            });
+            client.write_all(b"hola").await.expect("write");
+            drop(client); // EOF
+            let copied = tokio::time::timeout(Duration::from_secs(2), copier)
+                .await
+                .expect("el copier debe terminar")
+                .expect("join")
+                .expect("sin error en EOF");
+            assert_eq!(copied, 4);
+            assert_eq!(bytes.load(Ordering::Relaxed), 4);
+            assert_eq!(idles.load(Ordering::Relaxed), 0);
+        })
+    }
+
+    #[test]
+    fn copy_dir_times_out_when_reader_is_silent() {
+        sin_driver_io(async {
+            let (_client, server) = tokio::io::duplex(64);
+            let bytes = AtomicU64::new(0);
+            let idles = AtomicU64::new(0);
+            let result = copy_dir(
+                server,
+                tokio::io::sink(),
+                Duration::from_millis(50),
+                &bytes,
+                &idles,
+            )
+            .await;
+            let err = result.expect_err("debe expirar por inactividad");
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+            assert_eq!(idles.load(Ordering::Relaxed), 1);
+        })
     }
 }

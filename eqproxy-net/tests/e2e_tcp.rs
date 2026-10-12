@@ -77,7 +77,10 @@ async fn start_proxy(
     (addr, handle, serve)
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn echo_roundtrip_through_proxy_updates_metrics() {
     let backend = start_echo().await;
@@ -121,7 +124,10 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn maxconn_rejects_excess_connections_explicitly() {
     let backend = start_echo().await;
@@ -158,7 +164,10 @@ async fn maxconn_rejects_excess_connections_explicitly() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connect_timeout_fails_fast_and_counts() {
     // 192.0.2.0/24 (TEST-NET-1) no enruta: la conexión al backend nunca completa.
@@ -201,7 +210,10 @@ async fn connect_timeout_fails_fast_and_counts() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_timeout_closes_silent_connection() {
     let backend = start_echo().await;
@@ -236,7 +248,10 @@ async fn idle_timeout_closes_silent_connection() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
     let backend = start_echo().await;
@@ -286,7 +301,10 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
         .expect("tarea serve sin pánico");
 }
 
-#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
+#[cfg_attr(
+    miri,
+    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bind_is_all_or_nothing() {
     // Ocupa un puerto con un socket ajeno; el bind del proxy debe fallar entero.
