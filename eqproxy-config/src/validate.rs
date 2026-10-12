@@ -6,7 +6,7 @@ use std::path::Path;
 
 use crate::error::{ConfigError, Location};
 use crate::find_line;
-use crate::schema::{Config, SCHEMA_VERSION};
+use crate::schema::{Config, MAX_SECTIONS, SCHEMA_VERSION};
 
 /// Resultado de validar una configuración completa.
 #[derive(Debug, Default)]
@@ -27,6 +27,22 @@ impl CheckResult {
 /// Valida `config` (parseada) contra el texto `source` para poder ubicar líneas.
 pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
     let mut result = CheckResult::default();
+
+    let sections = config.listener.len() + config.backend.len();
+    if sections > MAX_SECTIONS {
+        result.errors.push(ConfigError {
+            file: file.to_path_buf(),
+            location: None,
+            field: None,
+            cause: format!(
+                "demasiadas secciones: {sections} entre [listener.*] y [backend.*] (máximo {MAX_SECTIONS})"
+            ),
+            example: format!(
+                "reduce a {MAX_SECTIONS} secciones combinadas; parte la configuración por servicios (ADR-0002)"
+            ),
+        });
+    }
+
     let mut err = |field: String, cause: String, example: String, needle: &str| {
         result.errors.push(ConfigError {
             file: file.to_path_buf(),
@@ -250,6 +266,38 @@ server = "127.0.0.1:9000"
         let result = check_source("schema_version = 99\n");
         assert!(!result.is_valid());
         assert_eq!(result.errors[0].field.as_deref(), Some("schema_version"));
+    }
+
+    #[test]
+    fn too_many_sections_are_rejected_with_budget_reason() {
+        let mut source = String::from("schema_version = 1\n");
+        for i in 0..(MAX_SECTIONS + 1) {
+            source.push_str(&format!(
+                "[listener.l{i}]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n"
+            ));
+        }
+        source.push_str("[backend.api]\nserver = \"127.0.0.1:1\"\n");
+        let result = check_source(&source);
+        assert!(!result.is_valid());
+        let err = result
+            .errors
+            .iter()
+            .find(|e| e.cause.contains("demasiadas secciones"))
+            .expect("debe reportar el presupuesto de secciones");
+        assert!(err.example.contains("ADR-0002"), "ejemplo: {}", err.example);
+    }
+
+    #[test]
+    fn sections_at_the_budget_are_accepted() {
+        let mut source = String::from("schema_version = 1\n");
+        for i in 0..(MAX_SECTIONS - 1) {
+            source.push_str(&format!(
+                "[listener.l{i}]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n"
+            ));
+        }
+        source.push_str("[backend.api]\nserver = \"127.0.0.1:1\"\n");
+        let result = check_source(&source);
+        assert!(result.is_valid(), "errores: {:?}", result.errors);
     }
 
     #[test]

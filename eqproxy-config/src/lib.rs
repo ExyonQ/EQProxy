@@ -13,7 +13,10 @@ pub mod validate;
 use std::path::Path;
 
 pub use error::{ConfigError, Location};
-pub use schema::{BackendConfig, Config, ListenerConfig, ListenerMode, SCHEMA_VERSION};
+pub use schema::{
+    BackendConfig, Config, ListenerConfig, ListenerMode, MAX_CONFIG_BYTES, MAX_SECTIONS,
+    SCHEMA_VERSION,
+};
 pub use validate::CheckResult;
 
 /// Carga y parsea un archivo de configuración TOML.
@@ -22,6 +25,17 @@ pub use validate::CheckResult;
 /// [`check`]; este parseo solo garantiza estructura y tipos.
 pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
     let path = path.as_ref();
+    let meta = std::fs::metadata(path).map_err(|e| ConfigError {
+        file: path.to_path_buf(),
+        location: None,
+        field: None,
+        cause: format!("no se pudo leer el archivo: {e}"),
+        example: "crea un eqproxy.toml (ver eqproxy.toml.example) y pasa --config <ruta>"
+            .to_owned(),
+    })?;
+    if meta.len() > MAX_CONFIG_BYTES as u64 {
+        return Err(oversized(path, meta.len() as usize));
+    }
     let source = std::fs::read_to_string(path).map_err(|e| ConfigError {
         file: path.to_path_buf(),
         location: None,
@@ -35,6 +49,9 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
 
 /// Parsea texto TOML ya leído. `file` solo se usa para los mensajes de error.
 pub fn parse_str(source: &str, file: &Path) -> Result<Config, ConfigError> {
+    if source.len() > MAX_CONFIG_BYTES {
+        return Err(oversized(file, source.len()));
+    }
     let deserializer = toml::de::Deserializer::new(source);
     match serde_path_to_error::deserialize(deserializer) {
         Ok(config) => Ok(config),
@@ -57,6 +74,18 @@ pub fn parse_str(source: &str, file: &Path) -> Result<Config, ConfigError> {
                 cause,
             })
         }
+    }
+}
+
+/// Error de configuración excedida del presupuesto de recursos (ADR-0002).
+fn oversized(file: &Path, size: usize) -> ConfigError {
+    ConfigError {
+        file: file.to_path_buf(),
+        location: None,
+        field: None,
+        cause: format!("configuración demasiado grande: {size} bytes (máximo {MAX_CONFIG_BYTES})"),
+        example: "reduce el archivo o divídelo por servicios; el límite es 1 MiB (ADR-0002)"
+            .to_owned(),
     }
 }
 
@@ -144,6 +173,29 @@ mod tests {
     fn parse_str_returns_config_on_valid_toml() {
         let source = "schema_version = 1\n";
         let cfg = parse_str(source, &PathBuf::from("t.toml")).expect("debe parsear");
+        assert_eq!(cfg.schema_version, 1);
+    }
+
+    #[test]
+    fn oversized_source_is_rejected_with_actionable_error() {
+        let file = PathBuf::from("grande.toml");
+        let source = "x".repeat(MAX_CONFIG_BYTES + 1);
+        let err = parse_str(&source, &file).expect_err("debe rechazar");
+        assert!(
+            err.cause.contains("demasiado grande"),
+            "causa: {}",
+            err.cause
+        );
+        assert!(err.example.contains("1 MiB"), "ejemplo: {}", err.example);
+    }
+
+    #[test]
+    fn source_at_the_limit_is_accepted() {
+        let file = PathBuf::from("limite.toml");
+        let mut source = String::from("schema_version = 1\n");
+        source.push_str(&"#".repeat(MAX_CONFIG_BYTES - source.len()));
+        assert_eq!(source.len(), MAX_CONFIG_BYTES);
+        let cfg = parse_str(&source, &file).expect("en el límite debe parsear");
         assert_eq!(cfg.schema_version, 1);
     }
 }

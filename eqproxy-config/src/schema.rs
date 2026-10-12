@@ -14,6 +14,14 @@ use crate::duration;
 /// Versión de esquema soportada por este binario.
 pub const SCHEMA_VERSION: u32 = 1;
 
+/// Presupuesto de recursos (ADR-0002): tamaño máximo del archivo de
+/// configuración. Un config mayor es rechazado antes de parsear.
+pub const MAX_CONFIG_BYTES: usize = 1_048_576;
+
+/// Presupuesto de recursos (ADR-0002): máximo de secciones
+/// `[listener.*]` + `[backend.*]` combinadas.
+pub const MAX_SECTIONS: usize = 1024;
+
 fn default_maxconn() -> u32 {
     1024
 }

@@ -1,7 +1,7 @@
 # ADR-0002: Formato canónico de configuración
 
-- Estado: **Propuesta — pendiente de aprobación** (el estudio cierra en Fase 0;
-  la decisión final se presenta al responsable del proyecto)
+- Estado: **Aceptado** (2026-10-12, decisión delegada al responsable del
+  proyecto: «Solucionalo tú»)
 - Fecha: 2026-10-12
 - Relacionado: [SPEC.md](../../SPEC.md) §Configuración
 
@@ -80,11 +80,21 @@ evaluando alternativas primero.
 4. Secretos solo por referencia; `config export` los sustituye por `***`.
 5. JSON Schema derivable con schemars para editores y CI.
 
-## Qué queda pendiente de aprobación
+## Decisión (2026-10-12)
 
-- Confirmar TOML frente a YAML (el único criterio a favor de YAML sería una
-  restricción organizativa de ecosistema, no técnica).
-- Límite de tamaño de config y número de reglas (presupuesto de recursos).
+- **TOML confirmado** frente a YAML: el único criterio a favor de YAML sería
+  una restricción organizativa de ecosistema, no técnica, y no existe.
+- **Presupuesto de recursos aprobado y verificado con tests:**
+  - Tamaño máximo de config: **1 MiB** (`MAX_CONFIG_BYTES`); se rechaza antes
+    de parsear, con error accionable (archivo + causa + ejemplo).
+  - Máximo de secciones `[listener.*]` + `[backend.*]` combinadas: **1024**
+    (`MAX_SECTIONS`); se rechaza en la validación semántica con el motivo
+    «demasiadas secciones» y ejemplo de corrección.
+  - Límites vivos en `eqproxy-config` (`load`/`parse_str`/`check`), no solo en
+    documentación; tests: `oversized_source_is_rejected_with_actionable_error`,
+    `source_at_the_limit_is_accepted`,
+    `too_many_sections_are_rejected_with_budget_reason`,
+    `sections_at_the_budget_are_accepted`.
 
 ## Consecuencias
 
