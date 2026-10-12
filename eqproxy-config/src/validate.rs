@@ -189,12 +189,55 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
 mod tests {
     use super::*;
     use crate::parse_str;
+    use crate::schema::{BackendConfig, ListenerConfig, ListenerMode};
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn check_source(source: &str) -> CheckResult {
         let file = PathBuf::from("eqproxy.toml");
         let config = parse_str(source, &file).expect("toml válido");
         check(&config, source, &file)
+    }
+
+    /// Config con `listeners` [listener.*] y `backends` [backend.*] construida
+    /// directamente: el presupuesto vive en `check`, y parsear miles de
+    /// secciones TOML bajo el intérprete de miri es coste puro.
+    fn config_with_sections(listeners: usize, backends: usize) -> Config {
+        use std::collections::BTreeMap;
+        let mut config = Config {
+            schema_version: SCHEMA_VERSION,
+            listener: BTreeMap::new(),
+            backend: BTreeMap::new(),
+            shutdown_grace: Duration::from_secs(10),
+        };
+        for i in 0..backends {
+            config.backend.insert(
+                format!("b{i}"),
+                BackendConfig {
+                    server: "127.0.0.1:9000".to_owned(),
+                },
+            );
+        }
+        for i in 0..listeners {
+            config.listener.insert(
+                format!("l{i}"),
+                ListenerConfig {
+                    listen: "127.0.0.1:0".to_owned(),
+                    mode: ListenerMode::Tcp,
+                    backend: "b0".to_owned(),
+                    maxconn: 1024,
+                    connect_timeout: Duration::from_secs(5),
+                    idle_timeout: Duration::from_secs(60),
+                    client_header_timeout: Duration::from_secs(5),
+                    server_header_timeout: Duration::from_secs(30),
+                },
+            );
+        }
+        config
+    }
+
+    fn check_config(config: &Config) -> CheckResult {
+        check(config, "", Path::new("eqproxy.toml"))
     }
 
     #[test]
@@ -270,14 +313,7 @@ server = "127.0.0.1:9000"
 
     #[test]
     fn too_many_sections_are_rejected_with_budget_reason() {
-        let mut source = String::from("schema_version = 1\n");
-        for i in 0..(MAX_SECTIONS + 1) {
-            source.push_str(&format!(
-                "[listener.l{i}]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n"
-            ));
-        }
-        source.push_str("[backend.api]\nserver = \"127.0.0.1:1\"\n");
-        let result = check_source(&source);
+        let result = check_config(&config_with_sections(MAX_SECTIONS + 1, 1));
         assert!(!result.is_valid());
         let err = result
             .errors
@@ -289,15 +325,44 @@ server = "127.0.0.1:9000"
 
     #[test]
     fn sections_at_the_budget_are_accepted() {
-        let mut source = String::from("schema_version = 1\n");
-        for i in 0..(MAX_SECTIONS - 1) {
-            source.push_str(&format!(
-                "[listener.l{i}]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n"
-            ));
-        }
-        source.push_str("[backend.api]\nserver = \"127.0.0.1:1\"\n");
-        let result = check_source(&source);
+        let result = check_config(&config_with_sections(MAX_SECTIONS - 1, 1));
         assert!(result.is_valid(), "errores: {:?}", result.errors);
+    }
+
+    #[test]
+    fn budget_counts_listeners_and_backends_by_their_sum() {
+        // 1025 [listener.*] sin [backend.*]: la suma (1025) excede el
+        // presupuesto aunque el producto sea 0 — cuenta secciones combinadas.
+        let result = check_config(&config_with_sections(MAX_SECTIONS + 1, 0));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("demasiadas secciones")),
+            "esperaba error de presupuesto: {:?}",
+            result.errors
+        );
+    }
+
+    #[test]
+    fn maxconn_descriptor_warning_fires_only_above_65535() {
+        let config_with = |maxconn: u32| {
+            format!(
+                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\nmaxconn = {maxconn}\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n"
+            )
+        };
+        let at = check_source(&config_with(65_535));
+        assert!(
+            !at.warnings.iter().any(|w| w.contains("descriptores")),
+            "a 65535 no debe avisar: {:?}",
+            at.warnings
+        );
+        let above = check_source(&config_with(65_536));
+        assert!(
+            above.warnings.iter().any(|w| w.contains("descriptores")),
+            "a 65536 debe avisar: {:?}",
+            above.warnings
+        );
     }
 
     #[test]

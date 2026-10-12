@@ -58,6 +58,10 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
+    #[cfg_attr(
+        miri,
+        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
+    )]
     #[tokio::test]
     async fn trigger_releases_all_waiters() {
         let (handle, shutdown) = channel();
@@ -73,6 +77,10 @@ mod tests {
         assert!(handle.is_triggered());
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
+    )]
     #[tokio::test]
     async fn wait_returns_immediately_if_already_triggered() {
         let (handle, shutdown) = channel();

@@ -79,6 +79,20 @@ testkit) empiezan como **módulos** dentro de `eqproxy-net`/`eqproxy-core`.
    suministro C); se reabriría solo ante un requisito FIPS/compatibilidad
    concreto.
 
+## Política semver (pre-1.0)
+
+- Los crates son `0.1.0` **sin publicar**: no hay estabilidad de API hasta la
+  primera publicación; el único consumidor es este workspace.
+- Los tipos públicos susceptibles de crecer llevan `#[non_exhaustive]` desde
+  ya (p. ej. `ResolvedListener`) y se construyen con constructores públicos:
+  añadir campos no rompe a los consumidores. Es la corrección de la violación
+  de semver detectada por `cargo-semver-checks` contra el baseline git
+  (campos añadidos a struct exhaustivo).
+- `cargo-semver-checks` queda SKIPPED justificado mientras no exista una
+  versión publicada que sirva de baseline; a partir de la primera publicación
+  el baseline es el registro y la revisión de API pública es obligatoria en
+  cada release.
+
 ## Consecuencias
 
 - Fases 1–2 sobre 4 crates; cada separación futura exige cumplir la regla

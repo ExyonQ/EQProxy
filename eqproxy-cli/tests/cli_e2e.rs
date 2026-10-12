@@ -50,6 +50,10 @@ fn start_echo_backend() -> std::net::SocketAddr {
     addr
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+)]
 #[test]
 fn validate_accepts_a_good_config() {
     let backend = start_echo_backend();
@@ -79,6 +83,10 @@ fn validate_accepts_a_good_config() {
     );
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+)]
 #[test]
 fn validate_reports_file_line_field_cause_example() {
     // [listener.web] está en la línea 3; el backend referenciado no existe.
@@ -114,6 +122,10 @@ fn validate_reports_file_line_field_cause_example() {
     }
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+)]
 #[test]
 fn validate_reports_syntax_errors_with_line() {
     let config = temp_config("syntax", "schema_version = 1\n[listener.web\n");
@@ -134,6 +146,10 @@ fn validate_reports_syntax_errors_with_line() {
     assert!(stderr.contains("ejemplo:"), "stderr:\n{stderr}");
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+)]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
     let cases: &[(&[&str], &str)] = &[
@@ -167,6 +183,10 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
     }
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+)]
 #[test]
 fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     // Backend HTTP real mínimo: responde 200 con eco del cuerpo.
@@ -278,6 +298,10 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     assert_eq!(status.code(), Some(0), "apagado limpio debe salir con 0");
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets del SO; miri corre aislado"
+)]
 #[test]
 fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
     let backend = start_echo_backend();

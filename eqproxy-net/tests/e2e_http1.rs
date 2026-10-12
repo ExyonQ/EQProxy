@@ -103,18 +103,18 @@ fn http_listener_cfg(
     client_header_timeout: Duration,
     server_header_timeout: Duration,
 ) -> ResolvedListener {
-    ResolvedListener {
-        name: "web".to_owned(),
+    ResolvedListener::new(
+        "web",
         listen,
-        backend_name: "api".to_owned(),
+        "api",
         server,
-        mode: ProxyMode::Http,
-        maxconn: 64,
-        connect_timeout: Duration::from_secs(2),
-        idle_timeout: Duration::from_secs(5),
+        ProxyMode::Http,
+        64,
+        Duration::from_secs(2),
+        Duration::from_secs(5),
         client_header_timeout,
         server_header_timeout,
-    }
+    )
 }
 
 async fn start_proxy(
@@ -135,6 +135,26 @@ async fn start_proxy(
     (addr, handle, serve)
 }
 
+/// Lee una respuesta completa (hasta el fin de cabecera), tolerando lecturas
+/// cortas de TCP: un solo `read()` no garantiza una respuesta entera. Las
+/// respuestas del fixture a GET son `Content-Length: 0`, así que el fin de
+/// cabecera es también el fin del mensaje.
+async fn read_one_response(client: &mut TcpStream) -> String {
+    let mut acc = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+            .await
+            .expect("respuesta a tiempo")
+            .expect("read");
+        assert!(n > 0, "EOF antes de una respuesta completa: {acc:?}");
+        acc.extend_from_slice(&buf[..n]);
+        if acc.windows(4).any(|w| w == b"\r\n\r\n") {
+            return String::from_utf8_lossy(&acc).into_owned();
+        }
+    }
+}
+
 async fn send_and_read(addr: SocketAddr, request: &[u8]) -> String {
     let mut client = tokio::time::timeout(WAIT, TcpStream::connect(addr))
         .await
@@ -150,6 +170,7 @@ async fn send_and_read(addr: SocketAddr, request: &[u8]) -> String {
     String::from_utf8_lossy(&response).into_owned()
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_get_roundtrip_and_keepalive() {
     let backend = start_http_backend().await;
@@ -165,24 +186,16 @@ async fn http1_get_roundtrip_and_keepalive() {
     let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
     let get = b"GET /x HTTP/1.1\r\nHost: t\r\n\r\n";
     client.write_all(get).await.expect("write");
-    let mut buf = vec![0u8; 256];
-    let n = tokio::time::timeout(WAIT, client.read(&mut buf))
-        .await
-        .expect("respuesta a tiempo")
-        .expect("read");
-    let first = String::from_utf8_lossy(&buf[..n]).into_owned();
-    assert!(first.starts_with("HTTP/1.1 200 OK"), "respuesta: {first}");
+    let first = read_one_response(&mut client).await;
+    assert!(first.starts_with("HTTP/1.1 200 OK"), "respuesta: {first:?}");
 
     // Keep-alive: segunda petición sobre la MISMA conexión cliente.
     client.write_all(get).await.expect("write 2");
-    let n = tokio::time::timeout(WAIT, client.read(&mut buf))
-        .await
-        .expect("respuesta 2 a tiempo")
-        .expect("read 2");
-    let second = String::from_utf8_lossy(&buf[..n]).into_owned();
+    let second = read_one_response(&mut client).await;
     assert!(
         second.starts_with("HTTP/1.1 200 OK"),
-        "respuesta 2: {second}"
+        "respuesta 2: {second:?} métricas={:?}",
+        metrics.snapshot()
     );
 
     drop(client);
@@ -197,6 +210,7 @@ async fn http1_get_roundtrip_and_keepalive() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_post_body_streams_end_to_end() {
     let backend = start_http_backend().await;
@@ -233,6 +247,7 @@ async fn http1_post_body_streams_end_to_end() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_chunked_body_streams_end_to_end() {
     let backend = start_http_backend().await;
@@ -256,6 +271,7 @@ async fn http1_chunked_body_streams_end_to_end() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_smuggling_corpus_is_rejected_before_backend() {
     let backend = start_http_backend().await;
@@ -310,6 +326,7 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_header_timeout_returns_408_and_counts() {
     let backend = start_http_backend().await;
@@ -347,6 +364,7 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_server_header_timeout_returns_504() {
     let backend = start_silent_backend().await;
@@ -377,6 +395,7 @@ async fn http1_server_header_timeout_returns_504() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_abort_cancels_upstream_promptly() {
     // A19: el abort del cliente a mitad de cuerpo debe cancelar el upstream
@@ -445,6 +464,7 @@ async fn http1_client_abort_cancels_upstream_promptly() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_response_without_framing_is_eof_delimited() {
     // Backend HTTP/1.0-style: respuesta sin Content-Length → cuerpo hasta EOF.

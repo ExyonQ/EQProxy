@@ -189,6 +189,10 @@ mod tests {
         assert!(err.example.contains("1 MiB"), "ejemplo: {}", err.example);
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "parse de 1 MiB interpretado: coste desproporcionado (>8 min); frontera cubierta por tests normales y CI"
+    )]
     #[test]
     fn source_at_the_limit_is_accepted() {
         let file = PathBuf::from("limite.toml");
@@ -197,5 +201,147 @@ mod tests {
         assert_eq!(source.len(), MAX_CONFIG_BYTES);
         let cfg = parse_str(&source, &file).expect("en el límite debe parsear");
         assert_eq!(cfg.schema_version, 1);
+    }
+
+    #[test]
+    fn offset_location_handles_line_boundaries() {
+        let source = "ab\ncd";
+        assert_eq!(
+            offset_location(source, 0),
+            Some(Location {
+                line: 1,
+                column: Some(1)
+            })
+        );
+        assert_eq!(
+            offset_location(source, 3),
+            Some(Location {
+                line: 2,
+                column: Some(1)
+            })
+        );
+        assert_eq!(
+            offset_location(source, 5),
+            Some(Location {
+                line: 2,
+                column: Some(3)
+            })
+        );
+        assert_eq!(offset_location(source, 6), None);
+    }
+
+    #[test]
+    fn example_for_gives_field_specific_examples() {
+        for (field, cause, expected) in [
+            (
+                "listener.web.listen",
+                "missing field `listen`",
+                "listen = \"127.0.0.1:8080\"",
+            ),
+            (
+                "listener.web.backend",
+                "missing field `backend`",
+                "backend = \"api\"",
+            ),
+            (
+                "backend.api.server",
+                "missing field `server`",
+                "server = \"127.0.0.1:9000\"",
+            ),
+            (
+                "schema_version",
+                "missing field `schema_version`",
+                "schema_version = 1",
+            ),
+            (
+                "listener.web.nombre",
+                "missing field `nombre`",
+                "verifica los campos obligatorios en eqproxy.toml.example",
+            ),
+            (
+                "listener.web.listen",
+                "unknown field `foo`",
+                "elimina o corrige el nombre del campo; los campos válidos están en eqproxy.toml.example",
+            ),
+            (
+                "listener.web.listen",
+                "invalid string",
+                "listen = \"127.0.0.1:8080\" (formato IP:PUERTO)",
+            ),
+            (
+                "backend.api.server",
+                "invalid string",
+                "listen = \"127.0.0.1:8080\" (formato IP:PUERTO)",
+            ),
+            (
+                "listener.web.connect_timeout",
+                "invalid string",
+                "connect_timeout = \"5s\" (sufijos válidos: ms, s, m, h)",
+            ),
+            ("listener.web.maxconn", "invalid integer", "maxconn = 1024"),
+            (
+                "listener.web.mode",
+                "unknown variant",
+                "mode = \"tcp\" (o \"http\")",
+            ),
+            ("schema_version", "invalid integer", "schema_version = 1"),
+            (
+                "listener.web.nombre",
+                "invalid string",
+                "ver eqproxy.toml.example",
+            ),
+        ] {
+            assert_eq!(
+                example_for(field, cause),
+                expected,
+                "campo {field}, causa {cause}"
+            );
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "crea archivos en la FS del SO; miri corre aislado")]
+    #[test]
+    fn load_enforces_the_size_budget_on_files() {
+        let temp = |tag: &str| {
+            std::env::temp_dir().join(format!(
+                "eqproxy-config-test-{}-{tag}.toml",
+                std::process::id()
+            ))
+        };
+
+        let small = temp("small");
+        std::fs::write(&small, "schema_version = 1\n").unwrap();
+        let cfg = load(&small).expect("archivo pequeño debe cargar");
+        assert_eq!(cfg.schema_version, 1);
+
+        let at = temp("at-limit");
+        let mut content = String::from("schema_version = 1\n");
+        content.push('#');
+        content.push_str(&"a".repeat(MAX_CONFIG_BYTES - content.len() - 1));
+        content.push('\n');
+        assert_eq!(content.len(), MAX_CONFIG_BYTES);
+        std::fs::write(&at, &content).unwrap();
+        load(&at).expect("exactamente en el límite debe cargar");
+
+        let over = temp("over");
+        content.push('a');
+        std::fs::write(&over, &content).unwrap();
+        let err = load(&over).expect_err("un byte más debe rechazarse");
+        assert!(
+            err.cause.contains("demasiado grande"),
+            "causa: {}",
+            err.cause
+        );
+
+        let _ = std::fs::remove_file(small);
+        let _ = std::fs::remove_file(at);
+        let _ = std::fs::remove_file(over);
+    }
+
+    #[test]
+    fn schema_defaults_match_the_documented_values() {
+        let source = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n";
+        let cfg = parse_str(source, &PathBuf::from("t.toml")).expect("debe parsear");
+        assert_eq!(cfg.listener["web"].maxconn, 1024, "default maxconn");
     }
 }

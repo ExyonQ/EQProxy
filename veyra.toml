@@ -1,0 +1,87 @@
+# Auditoría Veyra Proof — EQProxy.
+#
+# Los escenarios E2E ejercitan el binario `eqproxy` construido por cargo a
+# través de su interfaz pública (argv + stdin) y comparan lo observado
+# (exit, stdout, stderr) con lo declarado aquí. Sin expectativas observables
+# un escenario es un hallazgo (E2E00), no un pass.
+
+[e2e]
+binaries = ["eqproxy"]
+timeout_seconds = 60
+
+# Recorrido feliz real: una config válida se acepta y reporta el resumen.
+# /dev/stdin permite entregar la config por stdin sin rutas del checkout.
+[[e2e.scenarios]]
+name = "validate-acepta-config-valida"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+
+[listener.web]
+listen = "127.0.0.1:8080"
+backend = "app"
+
+[backend.app]
+server = "127.0.0.1:9000"
+'''
+expect_exit = 0
+expect_stdout_regex = "config OK: 1 listener\\(es\\), 1 backend\\(s\\)"
+
+# Error accionable: schema_version no soportado → exit 1 con campo y ejemplo.
+[[e2e.scenarios]]
+name = "validate-reporta-schema-version-no-soportado"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 99
+'''
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "schema_version = 99 no soportado por este binario"
+
+# Entrada inválida real: TOML con error de sintaxis → línea y ejemplo.
+[[e2e.scenarios]]
+name = "validate-reporta-error-de-sintaxis-con-linea"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+listener.web listen =
+'''
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "error de configuración en /dev/stdin:[0-9]+"
+
+# Archivo inexistente: fallo explícito con causa y ejemplo; nunca éxito
+# silencioso ni pánico.
+[[e2e.scenarios]]
+name = "validate-con-config-inexistente-falla"
+argv = ["config", "validate", "--config", "no-existe.toml"]
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "no se pudo leer el archivo"
+
+# El dataplane no arranca a medias sin config.
+[[e2e.scenarios]]
+name = "run-con-config-inexistente-falla"
+argv = ["run", "--config", "no-existe.toml"]
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "no se pudo leer el archivo"
+
+# Funcionalidad no implementada: exit 2 explícito (nunca simula éxito).
+[[e2e.scenarios]]
+name = "comando-no-implementado-sale-con-2"
+argv = ["config", "explain", "--config", "eqproxy.toml"]
+expect_failure = true
+expect_exit = 2
+expect_stderr_regex = "no está implementado todavía"
+
+# Mutants acotado a la lógica crítica de configuración (presupuesto de
+# recursos, validación semántica y errores accionables). Un glob sin
+# mutantes sería un OK falso: los prefijos de ruta son del workspace.
+[mutants]
+paths = [
+    "eqproxy-config/src/validate.rs",
+    "eqproxy-config/src/lib.rs",
+    "eqproxy-config/src/schema.rs",
+]
+timeout_seconds = 120

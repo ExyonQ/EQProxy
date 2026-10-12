@@ -40,6 +40,10 @@ pub enum ProxyMode {
 }
 
 /// Listener resuelto (config ya validada: direcciones parseadas, refs íntegras).
+///
+/// `#[non_exhaustive]`: añadir campos no es un cambio rupturante para los
+/// consumidores (política semver de ADR-0004). Se construye con [`Self::new`].
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ResolvedListener {
     pub name: String,
@@ -54,6 +58,37 @@ pub struct ResolvedListener {
     pub client_header_timeout: Duration,
     /// Fase servidor (solo `http`): cabecera de respuesta.
     pub server_header_timeout: Duration,
+}
+
+impl ResolvedListener {
+    /// Construye un listener resuelto con todos sus campos actuales.
+    #[allow(clippy::too_many_arguments)]
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        listen: SocketAddr,
+        backend_name: impl Into<String>,
+        server: SocketAddr,
+        mode: ProxyMode,
+        maxconn: u32,
+        connect_timeout: Duration,
+        idle_timeout: Duration,
+        client_header_timeout: Duration,
+        server_header_timeout: Duration,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            listen,
+            backend_name: backend_name.into(),
+            server,
+            mode,
+            maxconn,
+            connect_timeout,
+            idle_timeout,
+            client_header_timeout,
+            server_header_timeout,
+        }
+    }
 }
 
 /// Error de arranque del dataplane.
@@ -313,6 +348,10 @@ mod tests {
     use super::*;
     use tokio::io::AsyncWriteExt;
 
+    #[cfg_attr(
+        miri,
+        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
+    )]
     #[tokio::test]
     async fn copy_dir_moves_bytes_and_propagates_eof() {
         let (mut client, server) = tokio::io::duplex(64);
@@ -343,6 +382,10 @@ mod tests {
         assert_eq!(idles.load(Ordering::Relaxed), 0);
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "construye un runtime tokio (driver IO kqueue): miri no emula ese FFI"
+    )]
     #[tokio::test]
     async fn copy_dir_times_out_when_reader_is_silent() {
         let (_client, server) = tokio::io::duplex(64);

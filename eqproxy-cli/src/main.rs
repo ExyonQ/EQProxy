@@ -199,21 +199,21 @@ fn resolve(config: &Config) -> Result<Vec<ResolvedListener>, String> {
                     listener.backend, backend.server
                 )
             })?;
-            Ok(ResolvedListener {
-                name: name.clone(),
+            Ok(ResolvedListener::new(
+                name.clone(),
                 listen,
-                backend_name: listener.backend.clone(),
+                listener.backend.clone(),
                 server,
-                mode: match listener.mode {
+                match listener.mode {
                     eqproxy_config::ListenerMode::Tcp => ProxyMode::Tcp,
                     eqproxy_config::ListenerMode::Http => ProxyMode::Http,
                 },
-                maxconn: listener.maxconn,
-                connect_timeout: listener.connect_timeout,
-                idle_timeout: listener.idle_timeout,
-                client_header_timeout: listener.client_header_timeout,
-                server_header_timeout: listener.server_header_timeout,
-            })
+                listener.maxconn,
+                listener.connect_timeout,
+                listener.idle_timeout,
+                listener.client_header_timeout,
+                listener.server_header_timeout,
+            ))
         })
         .collect()
 }

@@ -45,18 +45,18 @@ fn listener_cfg(
     connect_timeout: Duration,
     idle_timeout: Duration,
 ) -> ResolvedListener {
-    ResolvedListener {
-        name: name.to_owned(),
+    ResolvedListener::new(
+        name,
         listen,
-        backend_name: "api".to_owned(),
+        "api",
         server,
-        mode: eqproxy_net::ProxyMode::Tcp,
+        eqproxy_net::ProxyMode::Tcp,
         maxconn,
         connect_timeout,
         idle_timeout,
-        client_header_timeout: Duration::from_secs(5),
-        server_header_timeout: Duration::from_secs(30),
-    }
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    )
 }
 
 /// Arranca el proxy y devuelve (dirección real, handle de apagado, tarea serve).
@@ -77,6 +77,7 @@ async fn start_proxy(
     (addr, handle, serve)
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn echo_roundtrip_through_proxy_updates_metrics() {
     let backend = start_echo().await;
@@ -120,6 +121,7 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn maxconn_rejects_excess_connections_explicitly() {
     let backend = start_echo().await;
@@ -156,6 +158,7 @@ async fn maxconn_rejects_excess_connections_explicitly() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connect_timeout_fails_fast_and_counts() {
     // 192.0.2.0/24 (TEST-NET-1) no enruta: la conexión al backend nunca completa.
@@ -198,6 +201,7 @@ async fn connect_timeout_fails_fast_and_counts() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_timeout_closes_silent_connection() {
     let backend = start_echo().await;
@@ -232,6 +236,7 @@ async fn idle_timeout_closes_silent_connection() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
     let backend = start_echo().await;
@@ -281,6 +286,7 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
         .expect("tarea serve sin pánico");
 }
 
+#[cfg_attr(miri, ignore = "requiere sockets del SO; miri corre aislado")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bind_is_all_or_nothing() {
     // Ocupa un puerto con un socket ajeno; el bind del proxy debe fallar entero.
