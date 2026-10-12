@@ -72,7 +72,7 @@ impl Metrics {
     /// (el llamador debe rechazar de forma explícita, nunca encolar sin límite).
     pub fn try_acquire_connection(&self, maxconn: u32) -> bool {
         self.connections_active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
                 if active < u64::from(maxconn) {
                     Some(active + 1)
                 } else {
@@ -86,7 +86,7 @@ impl Metrics {
     pub fn release_connection(&self) {
         let _ = self
             .connections_active
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |v| {
                 Some(v.saturating_sub(1))
             });
         self.connections_completed.fetch_add(1, Ordering::Relaxed);
