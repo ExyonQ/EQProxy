@@ -265,5 +265,5 @@ concurrencia cuando proceda.
 | Investigación Fase 0 (ref, dolor usuario, ecosistema Rust) | Probado* | Fuentes con URL en docs; *verificado por lectura de fuentes, no por ejecución |
 | Especificación y alcance | Diseñado | Este documento |
 | Matriz de paridad | Diseñado | PARITY_MATRIX.md (incompleta por diseño, huecos declarados) |
-| Código Fase 1 (proxy TCP, config TOML, CLI) | **Probado** (2026-10-12) | 30 tests en verde: 24 unit + 6 E2E con sockets reales + 5 E2E por el binario real `eqproxy` (incl. SIGINT). fmt/clippy `-D warnings` en verde; 0 `unsafe` propios (`forbid(unsafe_code)`); cargo-deny y cargo-machete en verde; SBOM en `sbom/` |
+| Código Fase 1 (proxy TCP, config TOML, CLI) | **Probado** (2026-10-12) | 30 tests en verde: 19 unit + 6 E2E con sockets reales + 5 E2E por el binario real `eqproxy` (incl. SIGINT). fmt/clippy `-D warnings` en verde; 0 `unsafe` propios (`forbid(unsafe_code)`); cargo-deny y cargo-machete en verde; SBOM en `sbom/` |
 | Benchmarks | **No medidos** | Solo plan (BENCHMARK_PLAN.md) |
