@@ -1,0 +1,21 @@
+[package]
+name = "eqproxy-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "CLI de EQProxy: run, config validate y comandos de operación"
+
+[[bin]]
+name = "eqproxy"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+tokio = { workspace = true }
+eqproxy-core = { path = "../eqproxy-core", version = "0.1.0" }
+eqproxy-config = { path = "../eqproxy-config", version = "0.1.0" }
+eqproxy-net = { path = "../eqproxy-net", version = "0.1.0" }
+
+[lints]
+workspace = true

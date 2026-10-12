@@ -1,0 +1,15 @@
+[package]
+name = "eqproxy-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Dataplane de EQProxy: listeners, conexiones y proxy TCP con límites"
+
+[dependencies]
+eqproxy-core = { path = "../eqproxy-core", version = "0.1.0" }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true
