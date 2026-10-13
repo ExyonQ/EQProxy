@@ -7,8 +7,8 @@ Proxy inverso TCP/HTTP de observabilidad mínima, escrito en Rust seguro
 
 Fase 2a — proxy HTTP/1.1 real (framing estricto, timeouts por fase,
 cancelación por señal). Consulta [SPEC.md](SPEC.md) para el comportamiento
-especificado, [PARITY_MATRIX.md](PARITY_MATRIX.md) para la paridad con el
-conversor de referencia y [ROADMAP.md](ROADMAP.md) para el plan.
+especificado, la matriz de paridad (documentación interna) y
+[ROADMAP.md](ROADMAP.md) para el plan.
 
 ## Compilar
 
@@ -30,7 +30,7 @@ eqproxy run --config eqproxy.toml
 
 Comandos planificados que hoy salen con exit 2 explícito («no está
 implementado todavía», nunca éxito simulado): `config import`
-(conversor ref, Fase 8) y `config explain/diff/plan/apply/rollback`
+(conversor del proxy de referencia, Fase 8) y `config explain/diff/plan/apply/rollback`
 (Fase 3).
 
 Formato canónico documentado en [docs/adr/0002-formato-configuracion.md](docs/adr/0002-formato-configuracion.md);
@@ -92,5 +92,5 @@ un runtime sin driver IO (mio/kqueue sí es FFI no emulado en macOS,
 
 ## Proceso de desarrollo
 
-Cada funcionalidad sigue el proceso obligatorio de [AGENTS.md](AGENTS.md):
-auditoría Veyra Proof con evidencia reproducible antes de cerrar.
+Cada funcionalidad sigue el proceso obligatorio del proyecto (documentación
+interna): auditoría Veyra Proof con evidencia reproducible antes de cerrar.

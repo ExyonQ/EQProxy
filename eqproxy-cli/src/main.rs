@@ -76,18 +76,9 @@ enum ConfigCommand {
     },
     /// Revierte a la configuración aplicada anterior (Fase 3)
     Rollback,
-    /// Conversor de configuración de otros proxies a EQProxy
+    /// Conversor de configuración del proxy de referencia a EQProxy (Fase 8)
     Import {
-        #[command(subcommand)]
-        source: ImportSource,
-    },
-}
-
-#[derive(Subcommand)]
-enum ImportSource {
-    /// Convierte config-de-referencia a eqproxy.toml (Fase 8: conversor ref → EQProxy)
-    ref {
-        /// Archivo de origen (config-de-referencia)
+        /// Archivo de origen (configuración del proxy de referencia)
         #[arg(long)]
         input: PathBuf,
         /// Archivo de destino (eqproxy.toml)
@@ -118,9 +109,7 @@ fn config_command(command: ConfigCommand) -> u8 {
         ConfigCommand::Plan { .. } => not_implemented("config plan", "Fase 3"),
         ConfigCommand::Apply { .. } => not_implemented("config apply", "Fase 3"),
         ConfigCommand::Rollback => not_implemented("config rollback", "Fase 3"),
-        ConfigCommand::Import { source } => match source {
-            ImportSource::ref { .. } => not_implemented("config import ref", "Fase 8"),
-        },
+        ConfigCommand::Import { .. } => not_implemented("config import", "Fase 8"),
     }
 }
 

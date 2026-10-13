@@ -2,12 +2,12 @@
 
 - Versión del documento: 0.1 (Fase 0) — **plan, no resultados. No se ha medido nada.**
 - Fecha: 2026-10-12
-- Oponente fijado: **ref 3.4.6 OSS** (build de referencia, ADR-0003);
-  binario real registrado con `ref -vv` en cada ejecución.
+- Oponente fijado: **el proxy de referencia 3.4.6 OSS** (build de referencia, ADR-0003);
+  binario real registrado con `-vv` en cada ejecución.
 
 ## 0. Objetivo de producto (decisión del usuario, 2026-10-12)
 
-Igualar o superar a ref 3.4.6 LTS en los escenarios de este plan en:
+Igualar o superar al proxy de referencia 3.4.6 LTS en los escenarios de este plan en:
 **RPS, conexiones (sostenidas/aceptadas), memoria, CPU y latencias P50, P95 y
 P99** (se añade P99.9 como métrica de cola larga). Esto es un **objetivo con
 criterio de aceptación**, no un resultado: solo se declara alcanzado cuando
@@ -32,15 +32,15 @@ favorables.
 
 ```
 Fecha y commit de EQProxy:            <sha> / estado (Fase X)
-ref:                              3.4.6 + salida de `ref -vv`
+Proxy de referencia:                3.4.6 + salida de `-vv`
 Hardware:                             CPU (modelo, núcleos, SMT, frecuencia/turbo),
                                       RAM, disco, NIC
 SO y kernel:                          distro, versión exacta, cmdline, governor,
                                       aislamiento irqbalance/numa
-Afinidad de CPU:                      taskset/cpuset para generador, EQProxy, ref, backends
+Afinidad de CPU:                      taskset/cpuset para generador, EQProxy, el proxy de referencia, backends
 Límites de red:                       ulimit -n, somaxconn, rmem/wmem, ephemeral ports
-Versiones y flags de compilación:     EQProxy: cargo profile + flags; ref: -vv
-Configuración completa:               pegada íntegra (EQProxy y ref)
+Versiones y flags de compilación:     EQProxy: cargo profile + flags; el proxy de referencia: -vv
+Configuración completa:               pegada íntegra (EQProxy y el proxy de referencia)
 TLS:                                  versión, cifrados, tamaño de clave, cert de prueba, sesión tickets on/off
 Generador:                            herramienta + versión + flags exactos
 Dataset:                              tamaño/distribución de payloads, mix de rutas, % keep-alive
@@ -54,7 +54,7 @@ Equivalencia obligatoria: mismos backends (servidor de eco/origen propio,
 versionado), misma topología (máquinas separadas generador/proxy/backend cuando
 sea posible; si no, se declara la limitación).
 
-| ID | Escenario | Objetivo | Métricas objetivo (≥ ref) | Notas |
+| ID | Escenario | Objetivo | Métricas objetivo (≥ el proxy de referencia) | Notas |
 |---|---|---|---|---|
 | S-TCP-01 | TCP passthrough, conexiones nuevas, alta tasa | A1 | RPS/conexiones, CPU, latencia P50/P95/P99 | — |
 | S-TCP-02 | TCP, conexiones largas con streaming bidireccional | A1, A19 | Conexiones sostenidas, memoria/conexión, CPU | — |
@@ -79,14 +79,14 @@ sea posible; si no, se declara la limitación).
 
 | Métrica | Cómo se mide | Objetivo |
 |---|---|---|
-| RPS / throughput | Generador (histograma completo publicado) | ≥ ref (Mejor o Comparable) |
-| Conexiones (aceptadas/s y sostenidas) | Generador + `ss`/contadores | ≥ ref |
-| Latencia P50/P95/P99 (+P99.9) | Histogramas del generador, corregido de coordinated omission | ≥ ref (menor es mejor) |
-| CPU | `perf stat`/cgroup: ciclos, instrucciones, % por proceso | ≤ ref |
-| Memoria | RSS máx y en régimen, + `heaptrack` si se investiga | ≤ ref |
+| RPS / throughput | Generador (histograma completo publicado) | ≥ el proxy de referencia (Mejor o Comparable) |
+| Conexiones (aceptadas/s y sostenidas) | Generador + `ss`/contadores | ≥ el proxy de referencia |
+| Latencia P50/P95/P99 (+P99.9) | Histogramas del generador, corregido de coordinated omission | ≥ el proxy de referencia (menor es mejor) |
+| CPU | `perf stat`/cgroup: ciclos, instrucciones, % por proceso | ≤ el proxy de referencia |
+| Memoria | RSS máx y en régimen, + `heaptrack` si se investiga | ≤ el proxy de referencia |
 | Errores | Por clase (timeout, 5xx, rechazos) | 0 diferencias injustificadas |
 | Colas y timeouts | Métricas internas de ambos productos | Comparables |
-| Recuperación | Tiempo hasta recuperar p99 tras S-FAIL-01 | ≤ ref |
+| Recuperación | Tiempo hasta recuperar p99 tras S-FAIL-01 | ≤ el proxy de referencia |
 | Impacto de recargas | Δ p99 y errores durante S-CFG-01 | Documentado y acotado (PP-04/05) |
 
 Objetivo de producto (usuario): Mejor o Comparable en **todas** las métricas
@@ -125,7 +125,7 @@ se reporta igualmente (se publican también los escenarios que pierdan).
 
 ## 7. Estudio de tareas operativas (UX, brief §13)
 
-Comparar EQProxy vs ref 3.4.6 en tareas reales; **no** se generaliza a
+Comparar EQProxy vs el proxy de referencia 3.4.6 en tareas reales; **no** se generaliza a
 “todos los usuarios” desde pruebas internas.
 
 | ID | Tarea | Métricas |
@@ -139,7 +139,7 @@ Comparar EQProxy vs ref 3.4.6 en tareas reales; **no** se generaliza a
 | T-07 | Revertir el cambio | tiempo, éxito de recuperación |
 | T-08 | Drenar un servidor | tiempo, error cometido, éxito |
 | T-09 | Detectar una regla incorrecta | tiempo, uso de `explain`/stats, acierto |
-| T-10 | Migrar una config ref compatible | tiempo, directivas no soportadas identificadas, éxito |
+| T-10 | Migrar una config compatible con el proxy de referencia | tiempo, directivas no soportadas identificadas, éxito |
 
 Metodología: participantes con experiencia declarada (novatos/expertos),
 orden de herramientas contrarrestado, tareas cronometradas, cuestionario corto

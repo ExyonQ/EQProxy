@@ -58,8 +58,8 @@ en crate propio **solo si** (a) tiene una frontera de API que queremos estabiliz
 pesadas que no queremos en el dataplane (p. ej. `eqproxy-plugins` con wasmtime),
 o (c) pruebas que deben poder fallar sin tumbar el workspace. Casos previstos:
 `eqproxy-observability` (Fase 3), `eqproxy-control` + `eqproxy-plugins`
-(Fases 6–7), `eqproxy-ref-import` (Fase 8: **parser de configuración de
-ref** + **conversor**, la herramienta de migración ref → EQProxy). Resto de nombres del brief (http/routing/balancer/health/state/
+(Fases 6–7), `eqproxy-config-import` (Fase 8: **parser de configuración del
+proxy de referencia** + **conversor**, la herramienta de migración del proxy de referencia → EQProxy). Resto de nombres del brief (http/routing/balancer/health/state/
 testkit) empiezan como **módulos** dentro de `eqproxy-net`/`eqproxy-core`.
 
 ## Alternativas consideradas
@@ -100,9 +100,9 @@ testkit) empiezan como **módulos** dentro de `eqproxy-net`/`eqproxy-core`.
 - HTTP/3 es **alcance obligatorio** (cliente, sobre QUIC); llega en Fase 5 y
   se mantiene etiquetado experimental hasta superar las pruebas de
   interoperación del plan de pruebas. HTTP/3 hacia backend queda como
-  extensión experimental (ref solo lo ofrece como experimental desde
+  extensión experimental (el proxy de referencia solo lo ofrece como experimental desde
   3.3+, ver ADR-0003).
-- El objetivo de rendimiento (igualar o superar a ref 3.4.6 en RPS,
+- El objetivo de rendimiento (igualar o superar al proxy de referencia 3.4.6 en RPS,
   conexiones, memoria, CPU y latencias P50/P95/P99 en los escenarios de
   BENCHMARK_PLAN.md) es un **objetivo de producto con criterio de aceptación**,
   no un resultado afirmado: solo se declara alcanzado cuando existan

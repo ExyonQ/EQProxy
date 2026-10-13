@@ -8,14 +8,14 @@
 
 EQProxy es un proxy inverso y balanceador de carga en Rust con dos objetivos:
 
-1. **Paridad funcional progresiva** con ref OSS (referencia fijada:
+1. **Paridad funcional progresiva** con el proxy de referencia OSS (referencia fijada:
    3.4.6 LTS primaria, 3.0.29 LTS legacy — ver [ADR-0003](docs/adr/0003-referencia-multiversion.md)).
 2. **Mejoras verificables** en diagnóstico, experiencia de configuración,
    administración, extensibilidad y seguridad.
 
-“Superar a ref” es una **hipótesis que se valida con pruebas
+“Superar al proxy de referencia” es una **hipótesis que se valida con pruebas
 reproducibles**, no una conclusión (brief, sección 15). Objetivo de producto
-explícito (decisión del usuario, 2026-10-12): **igualar o superar a ref
+explícito (decisión del usuario, 2026-10-12): **igualar o superar al proxy de referencia
 3.4.6 LTS en RPS, conexiones, memoria, CPU y latencias P50/P95/P99** en los
 escenarios de [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md). Esto es un objetivo con
 criterio de aceptación, **no un resultado afirmado**: sin mediciones aún.
@@ -66,13 +66,14 @@ Reglas:
   crate, **sin excepciones** (decisión del usuario, 2026-10-12). El `unsafe` y
   la FFI viven solo dentro de dependencias, inventariados y auditados como
   riesgo residual ([THREAT_MODEL.md](THREAT_MODEL.md) §5).
-- No hay paridad con ref Enterprise ni **ref One** (ALOHA, Fusion):
+- No hay paridad con las ediciones comerciales del proxy de referencia
+  (Enterprise, plataforma One, ALOHA, Fusion):
   **excluidos del alcance de paridad** por decisión (2026-10-12); solo se
-  documenta la exclusión en [PARITY_MATRIX.md](PARITY_MATRIX.md) §E.
-- No hay compatibilidad total con la sintaxis de config de ref. La
+  documenta la exclusión en la matriz de paridad (documentación interna) §E.
+- No hay compatibilidad total con la sintaxis de config del proxy de referencia. La
   migración se hace con el **conversor de configuración** (herramienta de
-  migración; CLI `eqproxy config import ref --input config-de-referencia --output
-  eqproxy.toml`, módulo `eqproxy-ref-import`), que convierte las
+  migración; CLI `eqproxy config import --input config-de-referencia --output
+  eqproxy.toml`, módulo `eqproxy-config-import`), que convierte las
   directivas compatibles, informa de las que requieren revisión y **rechaza
   explícitamente** las que no se pueden traducir sin alterar el comportamiento.
   Nunca se omiten directivas en silencio: «archivo generado correctamente» ≠
@@ -196,11 +197,11 @@ Diseñado (alcance); implementación en Fase 7. Vía única:
 - **Lua queda descartado** por la política de código 100 % safe (decisión del
   usuario, 2026-10-12): mlua es FFI C con `unsafe` sustancial y Lua no es un
   sandbox para código hostil. Si algún día se necesita compatibilidad con la
-  API de Lua de ref, sería en un proceso aislado fuera del binario y con un
+  API de Lua del proxy de referencia, sería en un proceso aislado fuera del binario y con un
   ADR nuevo.
 
 Para cada plugin se define (plantilla de plugin): puntos de extensión (fetch,
-converter, action, service, task — equivalentes a los de ref), modelo de
+converter, action, service, task — equivalentes a los del proxy de referencia), modelo de
 ejecución (nunca tareas bloqueantes arbitrarias en workers del dataplane; un
 timeout **no** cancela mágicamente un bloqueo; aislamiento en otro proceso
 cuando el plugin pueda bloquear), capacidades permitidas (red y archivos
@@ -226,7 +227,7 @@ procedimiento de reporte de vulnerabilidades.
 Estrategia completa en [ROADMAP.md](ROADMAP.md) §Invariantes y
 [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md): unitarias, integración con sockets
 reales, end-to-end, property-based, fuzzing (parsers propios, config, reglas),
-pruebas diferenciales frente a ref donde la semántica deba coincidir,
+pruebas diferenciales frente al proxy de referencia donde la semántica deba coincidir,
 conformidad de protocolos, carga sostenida, inyección de fallos, renovación de
 certificados, cambios de config bajo tráfico, clientes/backends lentos, caídas
 de backends, streaming largo, DNS cambiante, agotamiento de recursos,
@@ -238,27 +239,27 @@ equivalente), Miri **solo** para componentes compatibles (no prueba la
 ausencia de bugs del servicio completo), sanitizers/herramientas de
 concurrencia cuando proceda.
 
-## 13. Registro de diferencias semánticas vs ref
+## 13. Registro de diferencias semánticas vs el proxy de referencia
 
-- Toda capacidad de [PARITY_MATRIX.md](PARITY_MATRIX.md) declara la semántica
+- Toda capacidad de la matriz de paridad declara la semántica
   que preserva y las diferencias conocidas. “Función parecida” ≠ “compatible”.
 - Las diferencias semánticas documentadas (selección inicial, a crecer):
-  1. **Recarga de configuración:** ref crea un proceso nuevo y hereda
+  1. **Recarga de configuración:** El proxy de referencia crea un proceso nuevo y hereda
      sockets; EQProxy aplica snapshots en caliente dentro del proceso. Las
      métricas **no** se reinician en una aplicación de config (diferencia
      intencionada; ver PP-03). El “reemplazo de proceso” se contempla solo
      para cambios que lo requieran.
   2. **Formato de configuración:** TOML canónico (propuesto, ADR-0002), no la
-     sintaxis ref; el conversor ref → EQProxy traduce un subconjunto
+     sintaxis del proxy de referencia; el conversor del proxy de referencia → EQProxy traduce un subconjunto
      con informe de equivalencia por directiva (pipeline: `config-de-referencia` →
-     parser de ref sin pérdidas → representación estructurada →
+     parser del proxy de referencia sin pérdidas → representación estructurada →
      traducción → validación y generación → `eqproxy.toml` + informe de
      conversión).
 3. **Estado de servidor DRAIN vs MAINT:** semántica explícita propia,
    documentada por comparación con `set server ... state drain/maint`.
 4. **Framing HTTP (Fase 2a):** EQProxy rechaza todo mensaje ambiguo (CL+TE,
    duplicados, TE ≠ `chunked`, absolute-form, obs-fold) en lugar de
-   normalizarlo como puede hacer ref en algunos casos; `CONNECT`/`Upgrade`
+   normalizarlo como puede hacer el proxy de referencia en algunos casos; `CONNECT`/`Upgrade`
    responden 501 hasta Fase 4. Trailers solo vacíos o sin cabeceras de framing.
 5. (Registro vivo: cada fila de la matriz lo amplía.)
 
@@ -266,9 +267,9 @@ concurrencia cuando proceda.
 
 | Área | Estado | Evidencia |
 |---|---|---|
-| Investigación Fase 0 (ref, dolor usuario, ecosistema Rust) | Probado* | Fuentes con URL en docs; *verificado por lectura de fuentes, no por ejecución |
+| Investigación Fase 0 (el proxy de referencia, dolor usuario, ecosistema Rust) | Probado* | Fuentes con URL en docs; *verificado por lectura de fuentes, no por ejecución |
 | Especificación y alcance | Diseñado | Este documento |
-| Matriz de paridad | Diseñado | PARITY_MATRIX.md (incompleta por diseño, huecos declarados) |
+| Matriz de paridad | Diseñado | Documentación interna (incompleta por diseño, huecos declarados) |
 | Código Fase 1 (proxy TCP, config TOML, CLI) | **Probado** (2026-10-12) | 30 tests en verde: 19 unit + 6 E2E con sockets reales + 5 E2E por el binario real `eqproxy` (incl. SIGINT). fmt/clippy `-D warnings` en verde; 0 `unsafe` propios (`forbid(unsafe_code)`); cargo-deny y cargo-machete en verde; SBOM en `sbom/` |
 | Código Fase 2a (HTTP/1.1 estricto, T01–T03, timeouts por fase, streaming) | **Probado** (2026-10-12) | 47 tests en verde: 27 unit + 14 E2E con sockets reales (6 TCP + 8 HTTP) + 6 E2E por el binario real (incl. smuggling rechazado con 400 y SIGINT). fmt/clippy `-D warnings` en verde |
 | Benchmarks | **No medidos** | Solo plan (BENCHMARK_PLAN.md) |

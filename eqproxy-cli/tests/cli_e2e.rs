@@ -161,10 +161,8 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
         (&["config", "apply", "--config", "x.toml"], "config apply"),
         (&["config", "rollback"], "config rollback"),
         (
-            &[
-                "config", "import", "ref", "--input", "a.cfg", "--output", "b.toml",
-            ],
-            "config import ref",
+            &["config", "import", "--input", "a.cfg", "--output", "b.toml"],
+            "config import",
         ),
         (&["doctor"], "eqproxy doctor"),
     ];

@@ -22,7 +22,7 @@ evaluando alternativas primero.
 | C3 | Sin parser propio | ¿Existe crate mantenida (MIT/Apache) que haga el parsing? |
 | C4 | Ambigüedad semántica | ¿Dos textos distintos producen significados distintos, o hay coerciones/alias ocultos? |
 | C5 | Comentarios y ergonomía de edición | ¿El formato soporta comentarios para operadores humanos? |
-| C6 | Migración desde ref | ¿La estructura sección→tabla mapea sin fricción? |
+| C6 | Migración desde el proxy de referencia | ¿La estructura sección→tabla mapea sin fricción? |
 | C7 | Ecosistema y herramientas | Editores, linters, generación de esquema (schemars/jsonschema). |
 | C8 | Secretos | ¿Se pueden referenciar/aislar secretos sin exponerlos en diffs? |
 
@@ -33,7 +33,8 @@ evaluando alternativas primero.
   `serde_path_to_error` aporta el camino del campo. C3 sí. C4 sí: gramática
   no ambigua, sin coerciones de tipo sorprendentes, sin anclas. C5 sí
   (comentarios `#`). C6 alta: `[frontend.web]`, `[[backend.api.server]]`
-  mapean directamente a las secciones tipo ref. C7 alto (estándar Rust).
+  mapean directamente a las secciones tipo las del proxy de referencia. C7 alto
+  (estándar Rust).
   C8 resolvible con `secret_ref = "file:///..."` / variables de entorno
   referenciadas, nunca literales (validación semántica lo haría fallar).
 - Contra: arrays-de-tablas anidados son verbosos para listas de reglas largas.
@@ -45,12 +46,12 @@ evaluando alternativas primero.
   mensajes ambiguos" del modelo de amenazas. C2 posible pero los errores
   semánticos post-parse siguen siendo difíciles de ubicar. Rechazado.
 
-### C) DSL tipo ref (texto `frontend x / mode tcp / ...`)
+### C) DSL tipo configuración de referencia (texto `frontend x / mode tcp / ...`)
 - C6 máxima, pero **C3 negativo**: exige escribir y mantener un parser propio,
   que el brief desaconseja explícitamente. Rechazado como formato canónico.
-  **Nota:** la migración desde archivos ref se cubre mediante el
-  **conversor de configuración** (herramienta de migración ref → EQProxy,
-  Fase 8), que usa un **parser de configuración de ref** como etapa interna
+  **Nota:** la migración desde archivos del proxy de referencia se cubre mediante el
+  **conversor de configuración** (herramienta de migración del proxy de referencia → EQProxy,
+  Fase 8), que usa un **parser de configuración del proxy de referencia** como etapa interna
   (gramática de líneas; parser propio justificado porque no existe una
   biblioteca mantenida estándar para esa gramática; sujeto a fuzzing) y traduce
   a TOML con clasificación ternaria de directivas e informe de conversión. Eso
@@ -99,7 +100,7 @@ evaluando alternativas primero.
 ## Consecuencias
 
 - Si se aprueba: la Fase 1 implementa `eqproxy-config` sobre TOML y el
-  conversor ref → EQProxy (Fase 8) traduce a TOML clasificando cada
+  conversor del proxy de referencia → EQProxy (Fase 8) traduce a TOML clasificando cada
   directiva: convertida / requiere revisión / rechazada explícitamente (nunca
   omitida en silencio; «archivo generado» ≠ «migración funcionalmente
   equivalente»).
