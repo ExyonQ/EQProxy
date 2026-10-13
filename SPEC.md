@@ -1,4 +1,288 @@
-# SPEC.md — Especificación de ExyonQ Proxy (EQProxy)
+# SPEC.md — ExyonQ Proxy (EQProxy) Specification
+
+Language: **English** · [Español](#español)
+
+- Document version: 0.1 (Phase 0)
+- Date: 2026-10-12
+- Project state: **Phase 0 — Research and scope. No code exists.**
+
+## 1. Purpose
+
+EQProxy is a reverse proxy and load balancer in Rust with two goals:
+
+1. **Progressive functional parity** with the OSS reference proxy (pinned
+   reference: 3.4.6 LTS primary, 3.0.29 LTS legacy — see
+   [ADR-0003](docs/adr/0003-referencia-multiversion.md)).
+2. **Verifiable improvements** in diagnostics, configuration experience,
+   administration, extensibility and security.
+
+"Beating the reference proxy" is a **hypothesis validated with reproducible
+tests**, not a conclusion (brief, section 15). Explicit product goal (user
+decision, 2026-10-12): **match or beat the reference proxy 3.4.6 LTS on RPS,
+connections, memory, CPU and P50/P95/P99 latencies** in the scenarios of
+[BENCHMARK_PLAN.md](BENCHMARK_PLAN.md). This is a goal with an acceptance
+criterion, **not an asserted result**: no measurements yet.
+
+## 2. State taxonomy (mandatory)
+
+Every artifact in this project uses exactly these states, in this order:
+
+| State | Meaning |
+|---|---|
+| **Designed** | Decided and documented. No code that runs it. |
+| **Implemented** | Code that does it exists, in the tree. |
+| **Compiled** | `cargo build --release` passes on the tier 1 platform. |
+| **Tested** | Automated tests (unit + integration with real sockets) pass. |
+| **Validated under load** | Measured with the BENCHMARK_PLAN.md protocol; raw data published. |
+| **Production ready** | All of the above + hardening, long-running tests and external review (Phase 9). |
+
+Rules:
+- "Designed (scope)" = designed only at scope level in this phase; the detailed
+  design comes with its phase.
+- A state is never promoted without the corresponding evidence. If a test
+  cannot be run, it is marked **pending** with its exact command.
+- Forbidden: mocks as evidence of real network, TLS or storage behaviour (unit
+  test mocks are labelled as such).
+
+## 3. Goals
+
+1. Efficient and reliable dataplane (priority: correctness first).
+2. Typed, validatable and understandable configuration (see §7 and [ADR-0002](docs/adr/0002-formato-configuracion.md)).
+3. Diagnostics that explain traffic decisions (explain/trace mode, §8).
+4. Safe and atomic configuration updates with respect to the visible view.
+5. Accessible administration: CLI, API and web panel (the proxy never depends
+   on the panel to run).
+6. Extensions with explicit permissions and limits (WASM, §10).
+7. Integrated observability (metrics, structured logs, tracing).
+8. Recovery and rollback.
+9. Reproducible tests (brief section 11 → [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) and ROADMAP).
+10. Documentation oriented to real tasks.
+11. **HTTP/3 (QUIC) to clients: mandatory requirement** (user decision,
+    2026-10-12), implemented in Phase 5 and labelled experimental until it
+    passes interoperability tests.
+
+## 4. Non-goals (explicit)
+
+- It is not a WAF. It does not promise total DDoS protection (rate limiting is
+  not anti-DDoS).
+- We do not implement our own cryptography; we do not parse complex protocols
+  with our own code if maintained libraries exist.
+- All our own Rust code is **safe**: `#![forbid(unsafe_code)]` in every crate,
+  **no exceptions** (user decision, 2026-10-12). `unsafe` and FFI live only
+  inside dependencies, inventoried and audited as residual risk
+  ([THREAT_MODEL.md](THREAT_MODEL.md) §5).
+- There is no parity with the commercial editions of the reference proxy
+  (Enterprise, the One platform, ALOHA, Fusion): **excluded from parity scope**
+  by decision (2026-10-12); the exclusion is only documented in the parity
+  matrix (internal documentation) §E.
+- There is no full compatibility with the reference proxy's config syntax.
+  Migration is done with the **configuration converter** (migration tool; CLI
+  `eqproxy config import --input reference-config --output eqproxy.toml`,
+  `eqproxy-config-import` crate), which converts compatible directives, reports
+  those needing review and **explicitly rejects** those that cannot be
+  translated without altering behaviour. Directives are never silently
+  dropped: "file generated correctly" ≠ "functionally equivalent migration".
+- Distributed "atomic" multi-instance updates are not promised without a
+  protocol that guarantees them.
+
+## 5. Priorities (inviolable)
+
+**correctness → security → operability → performance → feature breadth.**
+
+Isolation, resource limits or correct semantics are never sacrificed to win a
+benchmark. If EQProxy loses a scenario, the loss is recorded and profiled
+before optimizing.
+
+## 6. Support platform
+
+See [ADR-0001](docs/adr/0001-plataforma-produccion.md): tier 1 production on
+**Linux x86_64 glibc**; experimental tier 2 (aarch64, macOS, musl); Windows
+unsupported.
+
+## 7. Architecture
+
+### 7.1 Plane separation
+
+- **Dataplane** (`eqproxy-net`): client traffic. It does not depend on the
+  panel or on admin storage to serve already-configured traffic. A control
+  plane failure does **not** stop configured traffic.
+- **Control plane** (`eqproxy-config`, `eqproxy-cli`, later `eqproxy-control`):
+  validation, planning, application and administration.
+
+### 7.2 Configuration snapshots
+
+- Each config application produces an **immutable, coherent snapshot** (shared
+  `Arc`) that the dataplane reads without per-request locking.
+- No per-request storage accesses when not needed.
+- Activation is **atomic with respect to the visible configuration**: either
+  the complete new config is visible, or the complete previous one (transition
+  by snapshot swap). Change classification: hot-applicable / require draining /
+  require process replacement / unsupported (classification table in phase 3;
+  the API and the CLI share the same validation).
+- If preparing a change fails, nothing is activated (prior resource
+  compilation: listeners, pools, certs). Irreversible external effects (e.g. an
+  already-issued drain order) are **not promised to be revertible**.
+
+### 7.3 Resource budgets (design; to be validated by measurement)
+
+Visible assumptions: HTTP/1.1 proxying, 16 KiB buffers per direction, active
+connections without compression or caching.
+
+| Scenario | Design budget (unmeasured) | Assumption | Validated in |
+|---|---|---|---|
+| TCP proxy connection | ≤ 36 KiB/connection (2 × 16 KiB buffers + ~4 KiB state) | bidirectional streaming | Phase 2 (memory bench) |
+| HTTP/1.1 connection | ≤ 48 KiB/connection (2 buffers + state + parser) | keep-alive to backend | Phase 2 (memory bench) |
+| FDs | 2 FDs per proxied connection + listeners + admin. E.g. maxconn 100 000 → ≥ 200 000 FDs + 10 % margin | `ulimit -n` limit documented in `eqproxy doctor` | Phase 1 |
+| Queues | Bounded queue per backend (`maxqueue`); rejection with 503/explicit timeout when full; **never unlimited queues** | burst traffic | Phase 3 |
+| Tasks | 1 task per connection (not per request on keep-alive); task cap = connection cap | — | Phase 1 |
+| Metric cardinality | Labels bounded by config (frontend/backend/server); labelling with URLs, client IPs or tokens is forbidden | — | Phase 3 |
+
+Behaviour on exhaustion: exhausting FDs, memory or queues produces explicit
+rejection (clear error + metric + log), never a process that "returns simulated
+success". The numbers above are design targets; they are revised with profiling
+data (no "optimization" without evidence).
+
+### 7.4 Crate workspace
+
+See [ADR-0004](docs/adr/0004-stack-red-y-layout-crates.md): 4 initial crates
+(`eqproxy-core`, `eqproxy-config`, `eqproxy-net`, `eqproxy-cli`); new crates
+only under the documented separation rule.
+
+## 8. Explainable diagnostics (explain/trace mode)
+
+Designed (scope); implementation in Phases 3–4. The explain mode for a request
+(real, sampled, or **simulated with no external effects**) must show:
+
+1. Listener and frontend used.
+2. Rules evaluated, in order; rules that matched and why.
+3. Selected backend and reason; selected server and its state (UP/DOWN/DRAIN/MAINT).
+4. Per-phase timings (accept, TLS handshake, request, backend connect, TTFB, transfer).
+5. Retries and redistributions.
+6. The concrete timeout that fired (client, connect, server, tunnel…).
+7. Error origin when determinable: client, proxy, network or backend.
+8. Explicit difference between *successful health check* and *functional
+   application success*.
+
+Requirements of the diagnostic mode:
+- Off or sampled by default; bounded in memory and time.
+- Protected by permissions (authenticated control plane).
+- Redacted: no tokens, cookies or personal data in the clear.
+- **Simulation ≠ execution**: rule simulation issues no requests and has no
+  external effects, and is labelled as a simulation in its output.
+
+Associated observability: structured logs (JSON), correlation identifiers,
+operational events, metrics exportable in a standard format (Prometheus),
+`tracing` integration where it helps. Diagnostics propose concrete actions
+without asserting undemonstrated causes.
+
+## 9. Administration and web panel
+
+Designed (scope); implementation in Phase 6. The panel exposes: listener/backend
+state, server health, connections/queues/latencies, change history, diffs
+between configurations, validation before applying, certificate management,
+drain/maintenance, authorised request diagnostics, alerts and multi-instance
+management (desired vs applied revisions, drift).
+
+Panel security (detail in [THREAT_MODEL.md](THREAT_MODEL.md)):
+authentication, RBAC, write auditing, session and CSRF protection, strict
+separation between public endpoint and administration, minimal permissions,
+concurrency control on write operations (optimistic concurrency with revision),
+forbidden to expose secrets, documented data retention policy. **The panel is
+not a requirement to operate the proxy.**
+
+Multi-instance: nothing that is not atomic is declared "atomic"; behaviour
+under network partitions and partial failures is documented.
+
+## 10. Extensions (WASM)
+
+Designed (scope); implementation in Phase 7. Single route:
+
+- **WASM (wasmtime)** for untrusted plugins: fuel/epoch interruption, per-store
+  memory limits, deadlines.
+- **Lua is discarded** by the 100 % safe code policy (user decision,
+  2026-10-12): mlua is C FFI with substantial `unsafe`, and Lua is not a
+  sandbox for hostile code. If compatibility with the reference proxy's Lua API
+  is ever needed, it would be in an isolated process outside the binary and
+  with a new ADR.
+
+For each plugin (plugin template) is defined: extension points (fetch,
+converter, action, service, task — equivalent to the reference proxy's),
+execution model (never arbitrary blocking tasks on dataplane workers; a timeout
+does **not** magically cancel a block; isolation in another process when the
+plugin may block), allowed capabilities (network and files **denied by
+default**), instruction budget, deadlines, cancellation, fail-open/fail-closed
+policy **per extension**, plugin API versioning, pre-activation validation and
+isolation tests.
+
+Rules: plugins do not run on every request by default; the cost with and
+without plugins is measured (BENCHMARK_PLAN.md, scenario S-PLG-01). WASM is
+not presented as perfect isolation: host capabilities, residual risks and
+runtime dependency are documented.
+
+## 11. Security
+
+See [THREAT_MODEL.md](THREAT_MODEL.md). Cross-cutting principles: per-phase and
+per-protocol limits, consistent HTTP message normalization, safe rejection of
+ambiguous messages (request smuggling: ambiguous framing is rejected, never
+"guessed"), secret protection, dependency and license inventory, vulnerability
+reporting procedure.
+
+## 12. Testing and verification
+
+Full strategy in [ROADMAP.md](ROADMAP.md) §Invariants and
+[BENCHMARK_PLAN.md](BENCHMARK_PLAN.md): unit, integration with real sockets,
+end-to-end, property-based, fuzzing (own parsers, config, rules), differential
+tests against the reference proxy where semantics must match, protocol
+conformance, sustained load, fault injection, certificate renewal, config
+changes under traffic, slow clients/backends, backend failures, long streaming,
+changing DNS, resource exhaustion, restart/recovery, plugins exceeding limits.
+
+Tools and their declared limits: `cargo fmt`, `cargo clippy`,
+`cargo test`, dependency and license audit (`cargo-deny` or equivalent), Miri
+**only** for compatible components (it does not prove the absence of bugs in
+the whole service), sanitizers/concurrency tools where appropriate.
+
+## 13. Semantic difference log vs the reference proxy
+
+- Every capability in the parity matrix declares the semantics it preserves and
+  the known differences. "Similar feature" ≠ "compatible".
+- Documented semantic differences (initial selection, to grow):
+  1. **Configuration reload:** the reference proxy spawns a new process and
+     inherits sockets; EQProxy applies hot snapshots within the process.
+     Metrics are **not** reset on a config application (intentional
+     difference; see PP-03). "Process replacement" is only contemplated for
+     changes that require it.
+  2. **Configuration format:** canonical TOML (proposed, ADR-0002), not the
+     reference proxy's syntax; the reference proxy → EQProxy converter
+     translates a subset with a per-directive equivalence report (pipeline:
+     `reference-config` → lossless reference proxy parser → structured
+     representation → translation → validation and generation → `eqproxy.toml`
+     + conversion report).
+  3. **Server state DRAIN vs MAINT:** own explicit semantics, documented by
+     comparison with `set server ... state drain/maint`.
+  4. **HTTP framing (Phase 2a):** EQProxy rejects every ambiguous message
+     (CL+TE, duplicates, TE ≠ `chunked`, absolute-form, obs-fold) instead of
+     normalizing it as the reference proxy may do in some cases;
+     `CONNECT`/`Upgrade` answer 501 until Phase 4. Trailers only empty or
+     without framing headers.
+  5. (Living log: each matrix row extends it.)
+
+## 14. Project state and evidence
+
+| Area | State | Evidence |
+|---|---|---|
+| Phase 0 research (the reference proxy, user pain, Rust ecosystem) | Tested* | Sources with URL in docs; *verified by reading sources, not by execution |
+| Specification and scope | Designed | This document |
+| Parity matrix | Designed | Internal documentation (incomplete by design, gaps declared) |
+| Phase 1 code (TCP proxy, TOML config, CLI) | **Tested** (2026-10-12) | 30 tests green: 19 unit + 6 E2E with real sockets + 5 E2E through the real `eqproxy` binary (incl. SIGINT). fmt/clippy `-D warnings` green; 0 own `unsafe` (`forbid(unsafe_code)`); cargo-deny and cargo-machete green; SBOM in `sbom/` |
+| Phase 2a code (strict HTTP/1.1, T01–T03, per-phase timeouts, streaming) | **Tested** (2026-10-12) | 47 tests green: 27 unit + 14 E2E with real sockets (6 TCP + 8 HTTP) + 6 E2E through the real binary (incl. smuggling rejected with 400 and SIGINT). fmt/clippy `-D warnings` green |
+| Benchmarks | **Not measured** | Plan only (BENCHMARK_PLAN.md) |
+
+---
+
+# Español
+
+Idioma: [English](#specmd--exyonq-proxy-eqproxy-specification) · **Español**
 
 - Versión del documento: 0.1 (Fase 0)
 - Fecha: 2026-10-12
