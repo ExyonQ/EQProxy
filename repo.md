@@ -21,15 +21,17 @@ Binario: `target/release/eqproxy`.
 ## Uso rápido
 
 ```bash
-# Validar una configuración
-eqproxy config check --config eqproxy.toml
+# Validar una configuración (errores con archivo, línea, campo, causa y ejemplo)
+eqproxy config validate --config eqproxy.toml
 
-# Convertir un config-de-referencia al formato canónico TOML
-eqproxy config import ref --input config-de-referencia --output eqproxy.toml
-
-# Arrancar el proxy
-eqproxy serve --config eqproxy.toml
+# Arrancar el dataplane
+eqproxy run --config eqproxy.toml
 ```
+
+Comandos planificados que hoy salen con exit 2 explícito («no está
+implementado todavía», nunca éxito simulado): `config import`
+(conversor ref, Fase 8) y `config explain/diff/plan/apply/rollback`
+(Fase 3).
 
 Formato canónico documentado en [docs/adr/0002-formato-configuracion.md](docs/adr/0002-formato-configuracion.md);
 el ejemplo completo vive en [eqproxy.toml.example](eqproxy.toml.example).
