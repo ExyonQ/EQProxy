@@ -11,6 +11,16 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_eqproxy"))
 }
 
+/// Certificados de test compartidos con los e2e de eqproxy-net.
+const FIXTURE_CERT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../eqproxy-net/tests/fixtures/cert.pem"
+);
+const FIXTURE_KEY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../eqproxy-net/tests/fixtures/key.pem"
+);
+
 fn temp_config(name: &str, contents: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "eqproxy-cli-e2e-{}-{name}.toml",
@@ -388,4 +398,212 @@ fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
     let all = format!("{rest}{remainder}");
     assert!(all.contains("apagado completado"), "stderr final:\n{all}");
     assert!(all.contains("METRICAS"), "debe reportar métricas:\n{all}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_accepts_phase2b_config_with_tls_servers_and_health_checks() {
+    let config = temp_config(
+        "phase2b",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             [listener.web.tls]\n\
+             cert = \"{FIXTURE_CERT}\"\n\
+             key = \"{FIXTURE_KEY}\"\n\
+             alpn = [\"http/1.1\"]\n\
+             min_version = \"1.2\"\n\
+             [backend.api]\n\
+             servers = [{{ addr = \"127.0.0.1:9000\", weight = 2 }}, {{ addr = \"127.0.0.1:9001\" }}]\n\
+             balance = \"roundrobin\"\n\
+             proxy_protocol = \"v1\"\n\
+             [backend.api.health_check]\n\
+             interval = \"2s\"\n\
+             timeout = \"1s\"\n\
+             fall = 3\n\
+             rise = 2\n\
+             [backend.api.tls]\n\
+             verify = true\n\
+             ca_file = \"{FIXTURE_CERT}\"\n\
+             server_name = \"localhost\"\n"
+        ),
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("ejecutar eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "la config 2b completa debe validarse; stderr: {stderr}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("config OK: 1 listener(es), 1 backend(s)"),
+        "stdout: {stdout}"
+    );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_rejects_server_and_servers_together() {
+    let config = temp_config(
+        "both",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9000\"\nservers = [{ addr = \"127.0.0.1:9001\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("ejecutar eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "server + servers debe rechazarse; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("campo `backend.api.servers`"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("excluyentes"), "stderr: {stderr}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_reports_missing_cert_file_with_actionable_error() {
+    let config = temp_config(
+        "no-cert",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"/no/existe/cert.pem\"\nkey = \"/no/existe/key.pem\"\n[backend.api]\nserver = \"127.0.0.1:9000\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("ejecutar eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "un cert inexistente debe rechazarse; stderr: {stderr}"
+    );
+    assert!(stderr.contains("listener.web.tls.cert"), "stderr: {stderr}");
+    assert!(stderr.contains("no se pudo leer"), "stderr: {stderr}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_with_tls_termination_proxies_real_traffic() {
+    let backend = start_echo_backend();
+    let config = temp_config(
+        "tls-run",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             idle_timeout = \"1s\"\n\
+             [listener.web.tls]\n\
+             cert = \"{FIXTURE_CERT}\"\n\
+             key = \"{FIXTURE_KEY}\"\n\
+             alpn = [\"http/1.1\"]\n\
+             [backend.api]\n\
+             server = \"{backend}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("leer stderr");
+        assert!(read > 0, "eqproxy cerró stderr sin anunciar bind");
+        if let Some(addr) = line.split("escuchando en ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "no se anunció la dirección TLS");
+
+    // Cliente TLS real (openssl s_client) contra el listener con termination:
+    // el eco debe volver por el túnel cifrado.
+    let mut client = Command::new("openssl")
+        .args([
+            "s_client",
+            "-connect",
+            proxy_addr.as_str(),
+            "-quiet",
+            "-ign_eof",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn openssl s_client (necesario para el e2e TLS)");
+    client
+        .stdin
+        .take()
+        .expect("stdin del cliente TLS")
+        .write_all(b"ping")
+        .expect("write TLS");
+    let output = client.wait_with_output().expect("esperar s_client");
+    let echoed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        echoed.contains("ping"),
+        "el eco TLS debe volver íntegro; stdout: {echoed}"
+    );
+
+    // SIGINT real → apagado limpio con código 0.
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("ejecutar kill");
+    assert!(kill.success(), "kill -INT debe aceptarse");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy no terminó tras SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "el apagado limpio debe salir con 0");
 }

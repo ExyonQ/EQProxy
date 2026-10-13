@@ -148,6 +148,25 @@ See [ADR-0004](docs/adr/0004-stack-red-y-layout-crates.md): 4 initial crates
 (`eqproxy-core`, `eqproxy-config`, `eqproxy-net`, `eqproxy-cli`); new crates
 only under the documented separation rule.
 
+### 7.5 TLS, balancing and health checks (Phase 2b)
+
+- **TLS termination (A11):** per-listener certificate chain + private key
+  (PEM); the handshake is part of the client phase (`client_header_timeout`).
+  Min TLS 1.2; ALPN explicit per listener (A14).
+- **Backend TLS (A12):** per-backend; certificate **and hostname verified by
+  default** (Mozilla roots + `ca_file` for private CAs). The SNI/verified name
+  defaults to the server's IP literal, overridable with `server_name`.
+  The handshake is bounded by `connect_timeout`.
+- **Balancing (B1/B7):** one shared balancer per backend (also shared between
+  listeners referencing it): smooth weighted round-robin, `weight` 0..=256.
+- **Health checks (B11 TCP):** one task per backend with checks configured;
+  `interval`/`timeout`/`fall`/`rise`. Servers start up; `fall` consecutive
+  failures take a server down, `rise` consecutive successes bring it back.
+- **No servers available:** HTTP answers 503 before touching any server; TCP
+  closes the connection immediately. Both count `no_available_server`.
+- **PROXY protocol v1 (A9 send):** header written to the chosen server before
+  the payload (inside the TLS stream when backend TLS is on).
+
 ## 8. Explainable diagnostics (explain/trace mode)
 
 Designed (scope); implementation in Phases 3–4. The explain mode for a request
@@ -265,7 +284,21 @@ the whole service), sanitizers/concurrency tools where appropriate.
      normalizing it as the reference proxy may do in some cases;
      `CONNECT`/`Upgrade` answer 501 until Phase 4. Trailers only empty or
      without framing headers.
-  5. (Living log: each matrix row extends it.)
+  5. **TLS and ALPN (Phase 2b):** only TLS 1.2/1.3 (TLS 1.0/1.1 never);
+     ALPN offers only the configured protocols (only `http/1.1` in this phase)
+     and the handshake **fails** when there is no common protocol instead of
+     negotiating nothing silently. Backend TLS verifies certificate **and
+     hostname by default** (Mozilla roots + `ca_file`); `verify = false` is an
+     explicit opt-out with documented risk (THREAT_MODEL).
+  6. **Load balancing (Phase 2b):** smooth weighted round-robin (deterministic;
+     ties broken by configuration order) instead of the reference proxy's WRR
+     variant; `weight = 0` means drained (never picked, still health-checked).
+  7. **Health checks (Phase 2b, TCP):** a check is a TCP connect; check OK ≠
+     functional success (§8.8). HTTP checks with `expect` come in Phase 3.
+  8. **PROXY protocol (Phase 2b):** send-only v1 (header before the payload;
+     `PROXY UNKNOWN` for mixed families); reception and its trust policy come
+     in Phase 3 (never trust PROXY from unauthorized sources).
+  9. (Living log: each matrix row extends it.)
 
 ## 14. Project state and evidence
 
@@ -276,6 +309,7 @@ the whole service), sanitizers/concurrency tools where appropriate.
 | Parity matrix | Designed | Internal documentation (incomplete by design, gaps declared) |
 | Phase 1 code (TCP proxy, TOML config, CLI) | **Tested** (2026-10-12) | 30 tests green: 19 unit + 6 E2E with real sockets + 5 E2E through the real `eqproxy` binary (incl. SIGINT). fmt/clippy `-D warnings` green; 0 own `unsafe` (`forbid(unsafe_code)`); cargo-deny and cargo-machete green; SBOM in `sbom/` |
 | Phase 2a code (strict HTTP/1.1, T01–T03, per-phase timeouts, streaming) | **Tested** (2026-10-12) | 47 tests green: 27 unit + 14 E2E with real sockets (6 TCP + 8 HTTP) + 6 E2E through the real binary (incl. smuggling rejected with 400 and SIGINT). fmt/clippy `-D warnings` green |
+| Phase 2b code (TLS termination/backend TLS/ALPN, weighted RR, TCP health checks, PROXY v1 send) | **Tested** (2026-10-13) | 93 tests green: 57 unit + 26 E2E with real sockets (6 TCP + 8 HTTP + 12 Phase 2b) + 10 E2E through the real `eqproxy` binary (incl. real TLS traffic via `openssl s_client`). Veyra audit ACCEPTED + EvoForge slice eval F=1. Details in the 0.2.0 delivery |
 | Benchmarks | **Not measured** | Plan only (BENCHMARK_PLAN.md) |
 
 ---
@@ -428,6 +462,27 @@ Ver [ADR-0004](docs/adr/0004-stack-red-y-layout-crates.md): 4 crates iniciales
 (`eqproxy-core`, `eqproxy-config`, `eqproxy-net`, `eqproxy-cli`); nuevos crates
 solo bajo la regla de separación documentada.
 
+### 7.5 TLS, balanceo y health checks (Fase 2b)
+
+- **TLS termination (A11):** cadena de certificados + clave privada por
+  listener (PEM); el handshake vive en la fase cliente
+  (`client_header_timeout`). Mínimo TLS 1.2; ALPN explícito por listener (A14).
+- **TLS a backends (A12):** por backend; certificado **y nombre verificados por
+  defecto** (raíces Mozilla + `ca_file` para CAs privadas). El nombre
+  verificado/SNI por defecto es la IP del servidor, configurable con
+  `server_name`. El handshake está acotado por `connect_timeout`.
+- **Balanceo (B1/B7):** un balancer compartido por backend (también entre
+  listeners que lo referencian): roundrobin ponderado suave, `weight` 0..=256.
+- **Health checks (B11 TCP):** un task por backend con checks configurados;
+  `interval`/`timeout`/`fall`/`rise`. Los servidores arrancan operativos; `fall`
+  fallos consecutivos derriban un servidor y `rise` éxitos consecutivos lo
+  levantan.
+- **Sin servidores disponibles:** HTTP responde 503 antes de tocar ningún
+  servidor; TCP cierra la conexión al instante. Ambos cuentan
+  `no_available_server`.
+- **PROXY protocol v1 (A9 envío):** cabecera escrita al servidor elegido antes
+  del payload (dentro del stream TLS si el backend usa TLS).
+
 ## 8. Diagnóstico explicable (modo explain/trace)
 
 Diseñado (alcance); implementación en Fases 3–4. El modo explain de una
@@ -544,8 +599,23 @@ concurrencia cuando proceda.
 4. **Framing HTTP (Fase 2a):** EQProxy rechaza todo mensaje ambiguo (CL+TE,
    duplicados, TE ≠ `chunked`, absolute-form, obs-fold) en lugar de
    normalizarlo como puede hacer el proxy de referencia en algunos casos; `CONNECT`/`Upgrade`
-   responden 501 hasta Fase 4. Trailers solo vacíos o sin cabeceras de framing.
-5. (Registro vivo: cada fila de la matriz lo amplía.)
+   responden 501 hasta Fase 4. Trailers solo vacíos o sin cabeceras de framing.  5. **TLS y ALPN (Fase 2b):** solo TLS 1.2/1.3 (TLS 1.0/1.1 nunca); ALPN
+     ofrece solo los protocolos configurados (solo `http/1.1` en esta fase) y
+     el handshake **falla** cuando no hay protocolo común en vez de negociar
+     nada en silencio. El TLS a backends verifica certificado **y nombre por
+     defecto** (raíces Mozilla + `ca_file`); `verify = false` es un opt-out
+     explícito con riesgo documentado (THREAT_MODEL).
+  6. **Balanceo (Fase 2b):** roundrobin ponderado suave (determinista; empates
+     en orden de configuración) en lugar de la variante WRR del proxy de
+     referencia; `weight = 0` significa drenado (nunca seleccionado, sí
+     comprobado).
+  7. **Health checks (Fase 2b, TCP):** un check es una conexión TCP; check OK ≠
+     éxito funcional (§8.8). Los checks HTTP con `expect` llegan en Fase 3.
+  8. **PROXY protocol (Fase 2b):** solo envío v1 (cabecera antes del payload;
+     `PROXY UNKNOWN` para familias mixtas); la recepción y su política de
+     confianza llegan en Fase 3 (nunca confiar en PROXY de fuentes no
+     autorizadas).
+  9. (Registro vivo: cada fila de la matriz lo amplía.)
 
 ## 14. Estado y evidencia del proyecto
 

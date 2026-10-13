@@ -6,13 +6,15 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: Phase 2a (2026-10-13).** A real TCP and HTTP/1.1 proxy exists
-> (crates `eqproxy-core/config/net/cli`): strict framing, per-phase timeouts
-> and signal cancellation; typed TOML configuration with actionable errors and
-> the `eqproxy` CLI, with 58 tests green (including E2E over real sockets and
-> the real binary). No TLS or HTTP/2 yet. Release v0.1.0 published (binaries
-> and multi-arch image). Performance: **not measured** — the only valid
-> sentence about benchmarks is "Not measured".
+> **Status: Phase 2b (2026-10-13).** A real TCP and HTTP/1.1 proxy exists
+> (crates `eqproxy-core/config/net/cli`): strict framing, per-phase timeouts,
+> signal cancellation, **TLS termination and backend TLS (verification on by
+> default), ALPN h1, weighted round-robin with TCP health checks and PROXY
+> protocol v1 send**, typed TOML configuration with actionable errors and the
+> `eqproxy` CLI, with 93 tests green (including E2E over real sockets and the
+> real binary). No HTTP/2 yet. Release v0.2.0 published (binaries and
+> multi-arch image). Performance: **not measured** — the only valid sentence
+> about benchmarks is "Not measured".
 
 ## Quick start
 
@@ -71,13 +73,15 @@ funcional progresiva frente al proxy de referencia y mejoras verificables en
 diagnóstico,
 configuración, administración, extensibilidad y seguridad.
 
-> **Estado: Fase 2a (2026-10-13).** Existe un proxy TCP y HTTP/1.1 real
-> (crates `eqproxy-core/config/net/cli`): framing estricto, timeouts por fase
-> y cancelación por señal; configuración TOML tipada con errores accionables y
-> CLI `eqproxy`, con 58 tests en verde (incl. E2E con sockets reales y el
-> binario real). Sin TLS ni HTTP/2 aún. Release v0.1.0 publicada (binarios e
-> imagen multi-arquitectura). Rendimiento: **no medido** — la única frase
-> válida sobre benchmarks es «No medido».
+> **Estado: Fase 2b (2026-10-13).** Existe un proxy TCP y HTTP/1.1 real
+> (crates `eqproxy-core/config/net/cli`): framing estricto, timeouts por fase,
+> cancelación por señal, **TLS termination y TLS a backends (verificación
+> activada por defecto), ALPN h1, roundrobin ponderado con health checks TCP y
+> envío de PROXY protocol v1**, configuración TOML tipada con errores
+> accionables y CLI `eqproxy`, con 93 tests en verde (incl. E2E con sockets
+> reales y el binario real). Sin HTTP/2 aún. Release v0.2.0 publicada
+> (binarios e imagen multi-arquitectura). Rendimiento: **no medido** — la
+> única frase válida sobre benchmarks es «No medido».
 
 ## Uso rápido
 

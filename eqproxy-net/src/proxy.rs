@@ -3,7 +3,8 @@
 //! Semántica (documentada y testeada):
 //! - `maxconn` por listener: al llenarse, la conexión se **rechaza** (cierre
 //!   inmediato + contador); nunca hay colas ilimitadas (SPEC §7.3).
-//! - `connect_timeout`: máximo para establecer la conexión al backend.
+//! - `connect_timeout`: máximo para establecer la conexión al backend (e
+//!   incluye el handshake TLS hacia él).
 //! - `idle_timeout`: por dirección; si no hay bytes en esa dirección durante la
 //!   ventana, se cierra con EOF hacia su par y se cuenta `idle_timeouts`.
 //! - Apagado gradual: se deja de aceptar, las conexiones vivas terminan dentro
@@ -11,6 +12,11 @@
 //! - `bind` es "o todo o nada": si un listener no puede abrirse, se cierran los
 //!   demás y se devuelve error (preparación de recursos previa a la activación,
 //!   SPEC §7.2).
+//!
+//! Fase 2b: TLS termination (A11, handshake en la fase cliente), TLS hacia
+//! backends (A12), balanceo RR ponderado (B1/B7) con health checks TCP (B11) y
+//! envío de PROXY protocol v1 (A9). Sin servidores disponibles: HTTP → 503,
+//! TCP → cierre (contado en `no_available_server`).
 
 use std::io;
 use std::net::SocketAddr;
@@ -24,10 +30,19 @@ use tokio::task::JoinSet;
 
 use eqproxy_core::{Metrics, Shutdown};
 
+use crate::balancer::{Balancer, ResolvedServer};
+use crate::health::{self, HealthCheck};
 use crate::http1;
+use crate::proxy_proto::{self, ProxyProtocolMode};
+use crate::tls::{self, ClientTls};
 
 /// Buffer por dirección (SPEC §7.3: 16 KiB).
 pub const READ_BUF: usize = 16 * 1024;
+
+/// Lector de una mitad de stream ya separada (TCP o TLS).
+pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
+/// Escritor de una mitad de stream ya separada (TCP o TLS).
+pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
 /// Modo de proxy de un listener (A1 `Tcp`, A2 `Http`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -37,6 +52,75 @@ pub enum ProxyMode {
     Tcp,
     /// Proxy HTTP/1.1 con framing estricto.
     Http,
+}
+
+/// Backend resuelto: servidores, balanceo, TLS y PROXY protocol.
+///
+/// Compartido entre listeners que referencian el mismo backend (un único
+/// [`Balancer`] y una única máquina de salud por backend).
+#[derive(Debug)]
+pub struct ResolvedBackend {
+    pub name: String,
+    pub servers: Vec<ResolvedServer>,
+    pub proxy_protocol: ProxyProtocolMode,
+    pub tls: Option<ClientTls>,
+    pub health_check: Option<HealthCheck>,
+    pub balancer: Arc<Balancer>,
+}
+
+impl ResolvedBackend {
+    /// Backend de un solo servidor con ajustes por defecto (compat 0.1.0).
+    #[must_use]
+    pub fn single(name: impl Into<String>, server: SocketAddr) -> Self {
+        Self::new(
+            name,
+            vec![ResolvedServer {
+                addr: server,
+                weight: 1,
+            }],
+            3,
+            2,
+        )
+    }
+
+    /// Backend con servidores ponderados y umbrales `fall`/`rise` (B11).
+    #[must_use]
+    pub fn new(
+        name: impl Into<String>,
+        servers: Vec<ResolvedServer>,
+        fall: u32,
+        rise: u32,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            balancer: Arc::new(Balancer::new(servers.clone(), fall, rise)),
+            servers,
+            proxy_protocol: ProxyProtocolMode::None,
+            tls: None,
+            health_check: None,
+        }
+    }
+
+    /// Envío de PROXY protocol v1 hacia los servidores (A9).
+    #[must_use]
+    pub fn with_proxy_protocol(mut self, mode: ProxyProtocolMode) -> Self {
+        self.proxy_protocol = mode;
+        self
+    }
+
+    /// TLS hacia los servidores (A12).
+    #[must_use]
+    pub fn with_tls(mut self, tls: ClientTls) -> Self {
+        self.tls = Some(tls);
+        self
+    }
+
+    /// Health check TCP activo (B11).
+    #[must_use]
+    pub fn with_health_check(mut self, check: HealthCheck) -> Self {
+        self.health_check = Some(check);
+        self
+    }
 }
 
 /// Listener resuelto (config ya validada: direcciones parseadas, refs íntegras).
@@ -49,19 +133,25 @@ pub struct ResolvedListener {
     pub name: String,
     pub listen: SocketAddr,
     pub backend_name: String,
-    pub server: SocketAddr,
+    /// Backend destino (servidores + balanceo + TLS + PROXY).
+    pub backend: Arc<ResolvedBackend>,
     pub mode: ProxyMode,
     pub maxconn: u32,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
-    /// Fase cliente (solo `http`): cabecera de petición.
+    /// Fase cliente (solo `http`): cabecera de petición. También cubre el
+    /// handshake TLS del cliente (A11).
     pub client_header_timeout: Duration,
     /// Fase servidor (solo `http`): cabecera de respuesta.
     pub server_header_timeout: Duration,
+    /// TLS termination en este listener (A11). `None` = TCP plano.
+    pub server_tls: Option<tls::ServerTls>,
 }
 
 impl ResolvedListener {
-    /// Construye un listener resuelto con todos sus campos actuales.
+    /// Construye un listener con un backend de un solo servidor (compat 0.1.0).
+    /// Usa [`Self::with_backend`] para balanceo/TLS/PROXY y
+    /// [`Self::with_server_tls`] para TLS termination.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -76,18 +166,35 @@ impl ResolvedListener {
         client_header_timeout: Duration,
         server_header_timeout: Duration,
     ) -> Self {
+        let backend_name = backend_name.into();
         Self {
             name: name.into(),
             listen,
-            backend_name: backend_name.into(),
-            server,
+            backend: Arc::new(ResolvedBackend::single(backend_name.clone(), server)),
+            backend_name,
             mode,
             maxconn,
             connect_timeout,
             idle_timeout,
             client_header_timeout,
             server_header_timeout,
+            server_tls: None,
         }
+    }
+
+    /// Sustituye el backend por uno completo (multi-servidor, TLS, PROXY, …).
+    #[must_use]
+    pub fn with_backend(mut self, backend: Arc<ResolvedBackend>) -> Self {
+        self.backend_name = backend.name.clone();
+        self.backend = backend;
+        self
+    }
+
+    /// Activa TLS termination en el listener (A11).
+    #[must_use]
+    pub fn with_server_tls(mut self, server_tls: tls::ServerTls) -> Self {
+        self.server_tls = Some(server_tls);
+        self
     }
 }
 
@@ -100,6 +207,15 @@ pub enum ProxyError {
         addr: SocketAddr,
         source: io::Error,
     },
+}
+
+/// Por qué no se pudo abrir el stream hacia el backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutboundError {
+    /// Todos los servidores están caídos o drenados (HTTP → 503, TCP → cierre).
+    NoServer,
+    /// El servidor elegido no aceptó la conexión/handshake (HTTP → 502).
+    Connect,
 }
 
 #[derive(Debug)]
@@ -154,6 +270,23 @@ impl BoundProxy {
 
     /// Sirve hasta la señal de apagado; después drena hasta `grace`.
     pub async fn serve(self, mut shutdown: Shutdown, grace: Duration) -> Result<(), ProxyError> {
+        // Health checks (B11): un task por backend con checks configurados,
+        // compartido entre los listeners del mismo backend (mismo Arc).
+        let mut health_tasks = JoinSet::new();
+        let mut seen: Vec<Arc<Balancer>> = Vec::new();
+        for bound in &self.listeners {
+            let backend = &bound.cfg.backend;
+            let Some(check) = backend.health_check else {
+                continue;
+            };
+            let balancer = Arc::clone(&backend.balancer);
+            if seen.iter().any(|s| Arc::ptr_eq(s, &balancer)) {
+                continue;
+            }
+            seen.push(Arc::clone(&balancer));
+            health_tasks.spawn(health::run(balancer, check, shutdown.clone()));
+        }
+
         let mut acceptors = JoinSet::new();
         for bound in self.listeners {
             let metrics = Arc::clone(&self.metrics);
@@ -169,6 +302,7 @@ impl BoundProxy {
         })
         .await;
         acceptors.abort_all();
+        health_tasks.abort_all();
 
         // Drenado: las conexiones vivas pueden terminar dentro de la ventana.
         let deadline = tokio::time::Instant::now() + grace;
@@ -225,6 +359,95 @@ impl Drop for ConnectionGuard {
     }
 }
 
+/// Conecta al backend elegido por el balancer: TCP + TLS opcional (A12) +
+/// cabecera PROXY v1 opcional (A9). Devuelve las mitades listas para bombear.
+pub async fn connect_backend(
+    cfg: &ResolvedListener,
+    peer: SocketAddr,
+    local: SocketAddr,
+    metrics: &Metrics,
+) -> Result<(BoxRead, BoxWrite), OutboundError> {
+    let backend = &cfg.backend;
+    let addr = backend.balancer.pick().ok_or_else(|| {
+        metrics.no_available_server.fetch_add(1, Ordering::Relaxed);
+        OutboundError::NoServer
+    })?;
+
+    let socket = match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(addr)).await {
+        Ok(Ok(socket)) => socket,
+        Ok(Err(err)) => {
+            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "ERROR [{}] no se pudo conectar a {} (par {peer}): {err}",
+                cfg.name, addr
+            );
+            return Err(OutboundError::Connect);
+        }
+        Err(_elapsed) => {
+            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "ERROR [{}] connect timeout hacia {} (par {peer}) tras {:?}",
+                cfg.name, addr, cfg.connect_timeout
+            );
+            return Err(OutboundError::Connect);
+        }
+    };
+    let _ = socket.set_nodelay(true);
+
+    if let Some(client_tls) = &backend.tls {
+        let name = tls::server_name_for(client_tls, addr);
+        let handshake = tokio::time::timeout(
+            cfg.connect_timeout,
+            client_tls.connector.connect(name, socket),
+        );
+        let mut stream = match handshake.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                metrics
+                    .tls_handshake_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "ERROR [{}] handshake TLS fallido hacia {} (par {peer}): {err}",
+                    cfg.name, addr
+                );
+                return Err(OutboundError::Connect);
+            }
+            Err(_elapsed) => {
+                metrics
+                    .tls_handshake_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "ERROR [{}] handshake TLS timeout hacia {} (par {peer}) tras {:?}",
+                    cfg.name, addr, cfg.connect_timeout
+                );
+                return Err(OutboundError::Connect);
+            }
+        };
+        if backend.proxy_protocol == ProxyProtocolMode::V1
+            && proxy_proto::write_v1(&mut stream, peer, local)
+                .await
+                .is_err()
+        {
+            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(OutboundError::Connect);
+        }
+        let (read, write) = tokio::io::split(stream);
+        Ok((Box::new(read), Box::new(write)))
+    } else {
+        let mut socket = socket;
+        if backend.proxy_protocol == ProxyProtocolMode::V1
+            && proxy_proto::write_v1(&mut socket, peer, local)
+                .await
+                .is_err()
+        {
+            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(OutboundError::Connect);
+        }
+        let (read, write) = socket.into_split();
+        Ok((Box::new(read), Box::new(write)))
+    }
+}
+
 async fn handle_connection(
     client: TcpStream,
     peer: SocketAddr,
@@ -235,38 +458,79 @@ async fn handle_connection(
         metrics: Arc::clone(&metrics),
     };
     let _ = client.set_nodelay(true);
+    let local = client.local_addr().unwrap_or(cfg.listen);
+
+    // TLS termination (A11): el handshake vive en la fase cliente.
+    let (client_read, client_write): (BoxRead, BoxWrite) = if let Some(server_tls) = &cfg.server_tls
+    {
+        let handshake = tokio::time::timeout(
+            cfg.client_header_timeout,
+            server_tls.acceptor.accept(client),
+        );
+        let stream = match handshake.await {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                metrics
+                    .tls_handshake_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "ERROR [{}] handshake TLS de cliente fallido (par {peer}): {err}",
+                    cfg.name
+                );
+                return;
+            }
+            Err(_elapsed) => {
+                metrics
+                    .tls_handshake_failures
+                    .fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "ERROR [{}] handshake TLS de cliente timeout (par {peer}) tras {:?}",
+                    cfg.name, cfg.client_header_timeout
+                );
+                return;
+            }
+        };
+        let (read, write) = tokio::io::split(stream);
+        (Box::new(read), Box::new(write))
+    } else {
+        let (read, write) = client.into_split();
+        (Box::new(read), Box::new(write))
+    };
 
     if cfg.mode == ProxyMode::Http {
-        http1::serve_http(client, peer, &cfg, metrics).await;
+        http1::serve_http(client_read, client_write, peer, local, &cfg, metrics).await;
         return;
     }
 
-    match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(cfg.server)).await {
-        Err(_elapsed) => {
-            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+    match connect_backend(&cfg, peer, local, &metrics).await {
+        Ok((server_read, server_write)) => {
+            pump(
+                (client_read, client_write),
+                (server_read, server_write),
+                cfg.idle_timeout,
+                &metrics,
+            )
+            .await;
+        }
+        Err(OutboundError::NoServer) => {
             eprintln!(
-                "ERROR [{}] connect timeout hacia {} (par {peer}) tras {:?}",
-                cfg.name, cfg.server, cfg.connect_timeout
+                "ERROR [{}] sin servidores disponibles (par {peer}): conexión cerrada",
+                cfg.name
             );
         }
-        Ok(Err(err)) => {
-            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-            eprintln!(
-                "ERROR [{}] no se pudo conectar a {} (par {peer}): {err}",
-                cfg.name, cfg.server
-            );
-        }
-        Ok(Ok(server)) => {
-            let _ = server.set_nodelay(true);
-            pump(client, server, cfg.idle_timeout, &metrics).await;
-        }
+        Err(OutboundError::Connect) => {}
     }
 }
 
 /// Bomba bidireccional independiente por dirección.
-async fn pump(client: TcpStream, server: TcpStream, idle: Duration, metrics: &Metrics) {
-    let (client_read, client_write) = client.into_split();
-    let (server_read, server_write) = server.into_split();
+async fn pump(
+    client: (BoxRead, BoxWrite),
+    server: (BoxRead, BoxWrite),
+    idle: Duration,
+    metrics: &Metrics,
+) {
+    let (client_read, client_write) = client;
+    let (server_read, server_write) = server;
 
     let c2b = copy_dir(
         client_read,

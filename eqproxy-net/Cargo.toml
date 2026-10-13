@@ -7,9 +7,13 @@ authors.workspace = true
 description = "Dataplane de EQProxy: listeners, conexiones y proxy TCP con límites"
 
 [dependencies]
-eqproxy-core = { path = "../eqproxy-core", version = "0.1.0" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.2.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pki-types = "1"
+webpki-roots = "1"
 
 [lints]
 workspace = true

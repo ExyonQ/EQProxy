@@ -24,11 +24,10 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
-use tokio::net::TcpStream;
 
 use eqproxy_core::Metrics;
 
-use crate::proxy::{READ_BUF, ResolvedListener};
+use crate::proxy::{OutboundError, READ_BUF, ResolvedListener, connect_backend};
 
 /// Tamaño máximo de la cabecera de mensaje (línea final incluida) (T03).
 pub const MAX_HEAD_BYTES: usize = 16 * 1024;
@@ -707,14 +706,21 @@ async fn write_error<W: AsyncWrite + Unpin>(writer: &mut W, status: u16, reason:
 }
 
 /// Sirve una conexión cliente HTTP/1.1 completa (keep-alive incluido).
-pub async fn serve_http(
-    client: TcpStream,
-    _peer: SocketAddr,
+///
+/// Recibe las mitades del stream cliente (TCP plano o TLS ya aceptado) y las
+/// direcciones del par para PROXY protocol (A9). Sin servidores disponibles el
+/// intercambio recibe 503; si el servidor elegido falla, 502 (SPEC §7.4).
+pub async fn serve_http<CR, CW>(
+    client_read: CR,
+    client_write: CW,
+    peer: SocketAddr,
+    local: SocketAddr,
     cfg: &ResolvedListener,
     metrics: Arc<Metrics>,
-) {
-    let _ = client.set_nodelay(true);
-    let (client_read, client_write) = client.into_split();
+) where
+    CR: AsyncRead + Unpin,
+    CW: AsyncWrite + Unpin,
+{
     let mut client_read = BufReader::new(client_read);
     let mut client_write = client_write;
     let mut first_exchange = true;
@@ -755,17 +761,19 @@ pub async fn serve_http(
         };
 
         // --- Conexión backend por intercambio (A16: pool en Fase 3) ---
-        let backend =
-            match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(cfg.server)).await {
-                Ok(Ok(socket)) => socket,
-                _ => {
-                    metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-                    write_error(&mut client_write, 502, "bad gateway").await;
-                    return;
-                }
-            };
-        let _ = backend.set_nodelay(true);
-        let (backend_read, backend_write) = backend.into_split();
+        let (backend_read, backend_write) = match connect_backend(cfg, peer, local, &metrics).await
+        {
+            Ok(halves) => halves,
+            Err(OutboundError::NoServer) => {
+                // Todos los servidores caídos/drenados (B11): 503 explícito.
+                write_error(&mut client_write, 503, "service unavailable").await;
+                return;
+            }
+            Err(OutboundError::Connect) => {
+                write_error(&mut client_write, 502, "bad gateway").await;
+                return;
+            }
+        };
         let mut backend_read = BufReader::new(backend_read);
         let mut backend_write = backend_write;
         let mut from_client = Prefixed {

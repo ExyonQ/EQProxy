@@ -16,7 +16,11 @@ use eqproxy_config::error::ConfigError;
 use eqproxy_config::schema::Config;
 use eqproxy_config::validate::{self, CheckResult};
 use eqproxy_core::{Metrics, shutdown};
-use eqproxy_net::{ProxyMode, ResolvedListener, bind};
+use eqproxy_net::health::HealthCheck;
+use eqproxy_net::tls::{self, TlsVersion};
+use eqproxy_net::{
+    ProxyMode, ProxyProtocolMode, ResolvedBackend, ResolvedListener, ResolvedServer, bind,
+};
 
 #[derive(Parser)]
 #[command(
@@ -158,6 +162,12 @@ fn validate(path: &Path) -> u8 {
         );
         return 1;
     }
+    // La resolución carga certificados/CLaves y verifica que la config sea
+    // utilizable de verdad (direcciones, TLS, balanceo), no solo parseable.
+    if let Err(msg) = resolve(&config, base_dir(path)) {
+        eprintln!("error: configuración inconsistente tras validar: {msg}");
+        return 1;
+    }
     println!(
         "config OK: {} listener(es), {} backend(s) en {}",
         config.listener.len(),
@@ -167,7 +177,65 @@ fn validate(path: &Path) -> u8 {
     0
 }
 
-fn resolve(config: &Config) -> Result<Vec<ResolvedListener>, String> {
+/// Directorio base para rutas relativas de la config (certs, claves, CAs).
+fn base_dir(path: &Path) -> &Path {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+/// Resuelve la config validada al modelo del dataplane: direcciones
+/// parseadas, backends compartidos (un [`Balancer`] por backend), TLS cargado
+/// desde PEM y health checks. `base_dir` base de las rutas relativas.
+fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, String> {
+    let mut backends: std::collections::BTreeMap<String, Arc<ResolvedBackend>> =
+        std::collections::BTreeMap::new();
+    for (name, backend) in &config.backend {
+        let servers: Vec<ResolvedServer> = backend
+            .server_entries()
+            .into_iter()
+            .map(|(addr, weight)| {
+                let addr: SocketAddr = addr.parse().map_err(|_| {
+                    format!("backend.{name} dirección inválida: «{addr}» (se espera IP:PUERTO)")
+                })?;
+                Ok(ResolvedServer { addr, weight })
+            })
+            .collect::<Result<_, String>>()?;
+        let (fall, rise) = backend
+            .health_check
+            .as_ref()
+            .map(|hc| (hc.fall, hc.rise))
+            .unwrap_or((3, 2));
+        let mut resolved = ResolvedBackend::new(name.clone(), servers, fall, rise)
+            .with_proxy_protocol(match backend.proxy_protocol {
+                eqproxy_config::schema::ProxyProtocolMode::None => ProxyProtocolMode::None,
+                eqproxy_config::schema::ProxyProtocolMode::V1 => ProxyProtocolMode::V1,
+            });
+        if let Some(hc) = &backend.health_check {
+            resolved = resolved.with_health_check(HealthCheck {
+                interval: hc.interval,
+                timeout: hc.timeout,
+            });
+        }
+        if let Some(client_tls) = &backend.tls {
+            let ca = client_tls
+                .ca_file
+                .as_deref()
+                .map(|ca| read_pem(base_dir, &format!("backend.{name}.tls.ca_file"), ca))
+                .transpose()?;
+            let tls = tls::client_config(
+                ca.as_deref(),
+                client_tls.verify,
+                client_tls.server_name.as_deref(),
+                &client_tls.alpn,
+                tls_version(client_tls.min_version),
+            )
+            .map_err(|e| format!("backend.{name}.tls: {e}"))?;
+            resolved = resolved.with_tls(tls);
+        }
+        backends.insert(name.clone(), Arc::new(resolved));
+    }
+
     config
         .listener
         .iter()
@@ -176,23 +244,17 @@ fn resolve(config: &Config) -> Result<Vec<ResolvedListener>, String> {
                 .listen
                 .parse()
                 .map_err(|_| format!("listener.{name}.listen inválido: «{}»", listener.listen))?;
-            let backend = config.backend.get(&listener.backend).ok_or_else(|| {
+            let backend = backends.get(&listener.backend).ok_or_else(|| {
                 format!(
                     "listener.{name}.backend inexistente: «{}»",
                     listener.backend
                 )
             })?;
-            let server: SocketAddr = backend.server.parse().map_err(|_| {
-                format!(
-                    "backend.{}.server inválido: «{}»",
-                    listener.backend, backend.server
-                )
-            })?;
-            Ok(ResolvedListener::new(
+            let mut resolved = ResolvedListener::new(
                 name.clone(),
                 listen,
                 listener.backend.clone(),
-                server,
+                backend.servers[0].addr,
                 match listener.mode {
                     eqproxy_config::ListenerMode::Tcp => ProxyMode::Tcp,
                     eqproxy_config::ListenerMode::Http => ProxyMode::Http,
@@ -202,9 +264,45 @@ fn resolve(config: &Config) -> Result<Vec<ResolvedListener>, String> {
                 listener.idle_timeout,
                 listener.client_header_timeout,
                 listener.server_header_timeout,
-            ))
+            )
+            .with_backend(Arc::clone(backend));
+            if let Some(server_tls) = &listener.tls {
+                let cert = read_pem(
+                    base_dir,
+                    &format!("listener.{name}.tls.cert"),
+                    &server_tls.cert,
+                )?;
+                let key = read_pem(
+                    base_dir,
+                    &format!("listener.{name}.tls.key"),
+                    &server_tls.key,
+                )?;
+                let acceptor = tls::server_config(
+                    &cert,
+                    &key,
+                    &server_tls.alpn,
+                    tls_version(server_tls.min_version),
+                )
+                .map_err(|e| format!("listener.{name}.tls: {e}"))?;
+                resolved = resolved.with_server_tls(acceptor);
+            }
+            Ok(resolved)
         })
         .collect()
+}
+
+fn tls_version(version: eqproxy_config::schema::TlsVersion) -> TlsVersion {
+    match version {
+        eqproxy_config::schema::TlsVersion::V1_2 => TlsVersion::V1_2,
+        eqproxy_config::schema::TlsVersion::V1_3 => TlsVersion::V1_3,
+    }
+}
+
+/// Lee un PEM (cert, clave o CA) con error accionable si no existe.
+fn read_pem(base_dir: &Path, field: &str, path: &str) -> Result<Vec<u8>, String> {
+    let full = base_dir.join(path);
+    std::fs::read(&full)
+        .map_err(|e| format!("{field} «{path}»: no se pudo leer {} — {e}", full.display()))
 }
 
 async fn run(path: PathBuf, metrics_interval: String) -> u8 {
@@ -235,7 +333,7 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         return 1;
     }
 
-    let listeners = match resolve(&config) {
+    let listeners = match resolve(&config, base_dir(&path)) {
         Ok(listeners) => listeners,
         Err(msg) => {
             eprintln!("error: configuración inconsistente tras validar: {msg}");

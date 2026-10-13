@@ -32,6 +32,10 @@ pub struct Metrics {
     pub http_requests_rejected: AtomicU64,
     /// Cabeceras de mensaje no recibidas dentro de su timeout de fase.
     pub header_timeouts: AtomicU64,
+    /// Handshakes TLS fallidos (cliente al listener o proxy hacia backend).
+    pub tls_handshake_failures: AtomicU64,
+    /// Conexiones sin servidor disponible (todos los backends caídos/drenados).
+    pub no_available_server: AtomicU64,
 }
 
 /// Fotografía inmutable de los contadores.
@@ -48,6 +52,8 @@ pub struct MetricsSnapshot {
     pub http_requests_proxied: u64,
     pub http_requests_rejected: u64,
     pub header_timeouts: u64,
+    pub tls_handshake_failures: u64,
+    pub no_available_server: u64,
 }
 
 impl Metrics {
@@ -65,6 +71,8 @@ impl Metrics {
             http_requests_proxied: self.http_requests_proxied.load(Ordering::Relaxed),
             http_requests_rejected: self.http_requests_rejected.load(Ordering::Relaxed),
             header_timeouts: self.header_timeouts.load(Ordering::Relaxed),
+            tls_handshake_failures: self.tls_handshake_failures.load(Ordering::Relaxed),
+            no_available_server: self.no_available_server.load(Ordering::Relaxed),
         }
     }
 
@@ -111,6 +119,11 @@ impl fmt::Display for MetricsSnapshot {
             f,
             " http[proxied={} rechazadas={} header_timeouts={}]",
             self.http_requests_proxied, self.http_requests_rejected, self.header_timeouts
+        )?;
+        write!(
+            f,
+            " tls[handshakes_fallidas={}] sin_servidor={}",
+            self.tls_handshake_failures, self.no_available_server
         )
     }
 }

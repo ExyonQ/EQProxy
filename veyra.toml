@@ -75,6 +75,91 @@ expect_failure = true
 expect_exit = 2
 expect_stderr_regex = "no está implementado todavía"
 
+# Fase 2b: servidores con pesos y health check se aceptan y resumen.
+[[e2e.scenarios]]
+name = "validate-acepta-servers-pesos-y-health-check"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:8080"
+backend = "api"
+[backend.api]
+servers = [{ addr = "127.0.0.1:9000", weight = 3 }, { addr = "127.0.0.1:9001" }]
+balance = "roundrobin"
+proxy_protocol = "v1"
+[backend.api.health_check]
+interval = "2s"
+timeout = "1s"
+fall = 3
+rise = 2
+'''
+expect_exit = 0
+expect_stdout_regex = "config OK: 1 listener\\(es\\), 1 backend\\(s\\)"
+
+# `server` y `servers` son excluyentes: error accionable con el campo.
+[[e2e.scenarios]]
+name = "validate-rechaza-server-y-servers"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[backend.api]
+server = "127.0.0.1:9000"
+servers = [{ addr = "127.0.0.1:9001" }]
+'''
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "backend.api.servers.*excluyentes"
+
+# Peso fuera de rango (HAProxy: 0..=256) → error con rango y ejemplo.
+[[e2e.scenarios]]
+name = "validate-rechaza-peso-fuera-de-rango"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[backend.api]
+servers = [{ addr = "127.0.0.1:9000", weight = 257 }]
+'''
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "weight = 257 fuera de rango"
+
+# ALPN duplicado (A14): la lista debe ser un conjunto.
+[[e2e.scenarios]]
+name = "validate-rechaza-alpn-duplicado"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:8080"
+backend = "api"
+[listener.web.tls]
+cert = "c.pem"
+key = "k.pem"
+alpn = ["http/1.1", "http/1.1"]
+[backend.api]
+server = "127.0.0.1:9000"
+'''
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "ALPN duplicado"
+
+# Health check con umbrales 0: inválido (fall/rise ≥ 1).
+[[e2e.scenarios]]
+name = "validate-rechaza-health-check-cero"
+argv = ["config", "validate", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[backend.api]
+server = "127.0.0.1:9000"
+[backend.api.health_check]
+fall = 0
+rise = 0
+'''
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "health_check.fall debe ser al menos 1"
+
 # Mutants acotado a la lógica crítica de configuración (presupuesto de
 # recursos, validación semántica y errores accionables). Un glob sin
 # mutantes sería un OK falso: los prefijos de ruta son del workspace.

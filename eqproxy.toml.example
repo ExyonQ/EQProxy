@@ -1,4 +1,4 @@
-# Ejemplo de configuración de EQProxy (Fase 1).
+# Ejemplo de configuración de EQProxy (Fase 2b).
 #
 # Errores de validación: archivo, línea, campo, causa y ejemplo de corrección.
 
@@ -18,5 +18,35 @@ idle_timeout = "60s"        # inactividad por dirección del túnel
 client_header_timeout = "5s"   # cabecera de petición (cliente → proxy)
 server_header_timeout = "30s"  # cabecera de respuesta (backend → proxy)
 
+# TLS termination (A11): opcional. Sin esta sección el listener es TCP plano.
+#[listener.web.tls]
+#cert = "certs/fullchain.pem"  # cadena PEM (hoja primero)
+#key = "certs/privkey.pem"     # clave privada PEM (PKCS#8/PKCS#1/SEC1)
+#alpn = ["http/1.1"]           # ALPN ofrecido (A14); vacío = sin ALPN
+#min_version = "1.2"           # "1.2" (por defecto) o "1.3"
+
 [backend.api]
-server = "127.0.0.1:9000"   # Fase 1: un servidor; balanceo en Fase 2
+# Un servidor (compat 0.1.0) …
+server = "127.0.0.1:9000"
+# … o varios con peso (B1/B7). `server` y `servers` son excluyentes.
+#servers = [
+#  { addr = "10.0.0.1:9000", weight = 3 },   # weight 0..=256; 0 = drenado
+#  { addr = "10.0.0.2:9000", weight = 1 },
+#]
+#balance = "roundrobin"        # Fase 2b: solo roundrobin ponderado
+#proxy_protocol = "v1"         # envía PROXY protocol v1 a los servidores (A9)
+
+# Health check TCP activo (B11). Ausente = todos los servidores operativos.
+#[backend.api.health_check]
+#interval = "2s"   # entre ciclos de comprobación
+#timeout = "1s"    # por intento de conexión
+#fall = 3          # fallos consecutivos → servidor caído
+#rise = 2          # éxitos consecutivos → servidor operativo
+
+# TLS hacia los servidores (A12). Ausente = TCP plano.
+#[backend.api.tls]
+#verify = true               # verificación de certificado y nombre (por defecto)
+#ca_file = "certs/ca.pem"    # CA adicionales (CAs privadas)
+#server_name = "api.internal"  # SNI/verificación; por defecto el host de `addr`
+#alpn = ["http/1.1"]
+#min_version = "1.2"
