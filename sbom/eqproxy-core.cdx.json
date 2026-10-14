@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:4bd32077-c90f-468b-b5e6-f539c79992c1",
+  "serialNumber": "urn:uuid:e846ea35-8175-44b9-9813-ace41467fb5f",
   "metadata": {
-    "timestamp": "2026-10-14T16:55:32.778752000Z",
+    "timestamp": "2026-10-14T20:42:02.107348000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -19,25 +19,25 @@
     ],
     "component": {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-core",
-      "version": "0.3.0",
-      "description": "Tipos compartidos de EQProxy: métricas y apagado gradual",
+      "version": "0.4.0",
+      "description": "Shared EQProxy types: metrics and graceful shutdown",
       "scope": "required",
       "licenses": [
         {
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-core@0.3.0?download_url=file://.",
+      "purl": "pkg:cargo/eqproxy-core@0.4.0?download_url=file://.",
       "components": [
         {
           "type": "library",
-          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0 bin-target-0",
+          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.0 bin-target-0",
           "name": "eqproxy_core",
-          "version": "0.3.0",
-          "purl": "pkg:cargo/eqproxy-core@0.3.0?download_url=file://.#src/lib.rs"
+          "version": "0.4.0",
+          "purl": "pkg:cargo/eqproxy-core@0.4.0?download_url=file://.#src/lib.rs"
         }
       ]
     },
@@ -320,16 +320,16 @@
     },
     {
       "type": "library",
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.8",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.9",
       "author": "David Tolnay <dtolnay@gmail.com>",
       "name": "syn",
-      "version": "3.0.8",
+      "version": "3.0.9",
       "description": "Parser for Rust source code",
       "scope": "required",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "01016da373cd8f7ef12624f796309f5c31ba8d646dd08856c02cd741d823c622"
+          "content": "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
         }
       ],
       "licenses": [
@@ -337,7 +337,7 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/syn@3.0.8",
+      "purl": "pkg:cargo/syn@3.0.9",
       "externalReferences": [
         {
           "type": "documentation",
@@ -382,16 +382,16 @@
     },
     {
       "type": "library",
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3",
       "author": "Tokio Contributors <team@tokio.rs>",
       "name": "tokio",
-      "version": "1.53.2",
+      "version": "1.53.3",
       "description": "An event-driven, non-blocking I/O platform for writing asynchronous I/O backed applications. ",
       "scope": "required",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+          "content": "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
         }
       ],
       "licenses": [
@@ -399,7 +399,7 @@
           "expression": "MIT"
         }
       ],
-      "purl": "pkg:cargo/tokio@1.53.2",
+      "purl": "pkg:cargo/tokio@1.53.3",
       "externalReferences": [
         {
           "type": "website",
@@ -445,9 +445,9 @@
   ],
   "dependencies": [
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.0",
       "dependsOn": [
-        "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2"
+        "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3"
       ]
     },
     {
@@ -497,7 +497,7 @@
       ]
     },
     {
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.8",
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.9",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.107",
         "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.47",
@@ -509,11 +509,11 @@
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.107",
         "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.47",
-        "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.8"
+        "registry+https://github.com/rust-lang/crates.io-index#syn@3.0.9"
       ]
     },
     {
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2",
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#bytes@1.12.1",
         "registry+https://github.com/rust-lang/crates.io-index#libc@0.2.190",

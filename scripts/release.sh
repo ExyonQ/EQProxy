@@ -1,0 +1,216 @@
+#!/bin/bash
+# Release pipeline for EQProxy (v0.4.0+).
+#
+# Builds four release binaries, regenerates the SBOM, and E2E-verifies
+# EVERY artifact (real binary, real sockets, observable results) BEFORE
+# any checksum is recorded. Nothing here is a smoke test: each binary
+# must validate, explain, diff and proxy live traffic.
+#
+# Outputs (gitignored): dist/eqproxy-{darwin,linux}-{amd64,arm64},
+# dist/SHA256SUMS.txt, sbom/*.cdx.json.
+#
+# Registry push and GitHub release are intentionally NOT executed here:
+# they need the operator's credentials. On success this script prints
+# the exact commands to run.
+#
+# Usage: ./scripts/release.sh
+# Env:   RUST_IMAGE (default rust:1.97-bookworm) for the Linux builds.
+set -euo pipefail
+
+VER="0.4.0"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+DIST="$ROOT/dist"
+RUST_IMAGE="${RUST_IMAGE:-rust:1.97-bookworm}"
+
+log() { printf '==> %s\n' "$*"; }
+fail() { printf 'release FAILED: %s\n' "$*" >&2; exit 1; }
+
+GOOD_CONFIG='schema_version = 1
+[listener.web]
+listen = "127.0.0.1:0"
+backend = "api"
+[backend.api]
+server = "127.0.0.1:9"
+'
+
+# --- per-binary E2E verification (real behavior, observable results) ---
+# $1 = "native", $2 = host path of the binary. Linux binaries are
+# verified by the container blocks further below, never by fakes.
+verify_cli() {
+    local mode="$1" bin="$2"
+    [ "$mode" = "native" ] || fail "verify_cli supports native only"
+    local run
+    run() { "$bin" "$@"; }
+    log "E2E $bin: --version"
+    run --version | grep -q "eqproxy $VER" || fail "$bin reports wrong version"
+    log "E2E $bin: validate accepts good config"
+    printf '%s' "$GOOD_CONFIG" | run config validate --config /dev/stdin \
+        | grep -q "config OK: 1 listener(s), 1 backend(s)" \
+        || fail "$bin validate happy path"
+    log "E2E $bin: validate rejects missing file with exit 1"
+    if run config validate --config /nonexistent-e2e.toml 2>/tmp/e2e-err.txt; then
+        fail "$bin accepted a missing file"
+    fi
+    grep -q "could not read the file" /tmp/e2e-err.txt \
+        || fail "$bin missing-file error not actionable"
+    log "E2E $bin: explain simulates without side effects"
+    printf '%s' "$GOOD_CONFIG" | run config explain --config /dev/stdin \
+        | grep -q "simulation: true (no requests issued, no state changed)" \
+        || fail "$bin explain report"
+    log "E2E $bin: diff finds no differences on identical input"
+    printf '%s' "$GOOD_CONFIG" > /tmp/e2e-left.toml
+    cp /tmp/e2e-left.toml /tmp/e2e-right.toml
+    run config diff /tmp/e2e-left.toml /tmp/e2e-right.toml 2>/dev/null \
+        | grep -q "no differences" || fail "$bin diff identical"
+}
+
+# Waits until 127.0.0.1:$1 accepts TCP (bounded); fails with logs on timeout.
+wait_for_port() {
+    local port="$1" label="$2" i
+    for i in $(seq 1 50); do
+        if python3 -c "import socket,sys; socket.create_connection(('127.0.0.1',$port),timeout=1).close()" 2>/dev/null; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    fail "$label never listened on 127.0.0.1:$port"
+}
+
+# Live traffic through a natively-executed binary (python backend). Ports
+# are probed free at runtime: fixed ports risk stale holders (e.g. a
+# lingering userland proxy), which must fail loudly, never be assumed.
+verify_live_native() {
+    local bin="$1"
+    local port backend_port
+    read -r port backend_port <<< "$(python3 -c "import socket
+a=socket.socket(); a.bind(('127.0.0.1',0)); p1=a.getsockname()[1]; a.close()
+b=socket.socket(); b.bind(('127.0.0.1',0)); p2=b.getsockname()[1]; b.close()
+print(p1,p2)")"
+    log "E2E $bin: live proxied traffic on 127.0.0.1:$port"
+    mkdir -p /tmp/e2e-www && echo "hello-release-e2e" > /tmp/e2e-www/index.html
+    python3 -m http.server "$backend_port" --directory /tmp/e2e-www \
+        >/tmp/e2e-backend.log 2>&1 &
+    local backend_pid=$!
+    wait_for_port "$backend_port" "backend"
+    cat > /tmp/e2e-proxy.toml <<EOF
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:$port"
+mode = "http"
+backend = "api"
+[backend.api]
+server = "127.0.0.1:$backend_port"
+EOF
+    "$bin" run --config /tmp/e2e-proxy.toml >/tmp/e2e-proxy.log 2>&1 &
+    local proxy_pid=$!
+    wait_for_port "$port" "proxy $bin"
+    local body
+    body="$(curl -s "http://127.0.0.1:$port/")" \
+        || fail "$bin live traffic: curl failed"
+    kill "$proxy_pid" "$backend_pid" 2>/dev/null || true
+    [ "$body" = "hello-release-e2e" ] \
+        || fail "$bin live traffic mismatch: $body"
+    log "E2E $bin: live traffic OK"
+}
+
+# Live traffic for a Linux dist binary inside containers (backend nginx,
+# static IPs: dynamic DNS is Phase 4, B16, so hostnames stay rejected).
+verify_live_linux() {
+    local platform="$1" bin_host="$2" verdict="$3"
+    local net="eqrel-${platform##*/}"
+    log "E2E $bin_host: live proxied traffic ($platform)"
+    docker network create --subnet 172.22.0.0/24 "$net" >/dev/null
+    docker run -d --network "$net" --ip 172.22.0.10 --name eqrel-back \
+        nginx:alpine >/dev/null
+    sleep 2
+    cat > /tmp/e2e-proxy.toml <<'EOF'
+schema_version = 1
+[listener.web]
+listen = "0.0.0.0:18082"
+mode = "http"
+backend = "api"
+[backend.api]
+server = "172.22.0.10:80"
+EOF
+    docker run -d --network "$net" --ip 172.22.0.20 --name eqrel-prox \
+        -p 18082:18082 \
+        -v "$bin_host:/eqproxy:ro" -v /tmp/e2e-proxy.toml:/c.toml:ro \
+        --platform "$platform" --entrypoint /eqproxy \
+        debian:bookworm-slim run --config /c.toml >/dev/null
+    sleep 4
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/)"
+    docker rm -f eqrel-prox eqrel-back >/dev/null
+    docker network rm "$net" >/dev/null
+    [ "$code" = "200" ] || fail "$bin_host live traffic HTTP $code"
+    log "E2E $bin_host: live traffic OK ($verdict)"
+}
+
+mkdir -p "$DIST"
+
+log "checking version pins"
+grep -q "version = \"$VER\"" "$ROOT/Cargo.toml" \
+    || fail "workspace version is not $VER"
+
+log "building darwin binaries (native toolchain)"
+for target in aarch64-apple-darwin x86_64-apple-darwin; do
+    (cd "$ROOT" && cargo build --release --locked -p eqproxy-cli \
+        --target "$target") || fail "build $target"
+done
+cp "$ROOT/target/aarch64-apple-darwin/release/eqproxy" "$DIST/eqproxy-darwin-arm64"
+cp "$ROOT/target/x86_64-apple-darwin/release/eqproxy" "$DIST/eqproxy-darwin-amd64"
+
+log "building linux binaries (locked, in $RUST_IMAGE per arch)"
+for arch in amd64 arm64; do
+    docker buildx build --platform "linux/$arch" --file "$ROOT/docker/Dockerfile" \
+        --target export --output "type=local,dest=$DIST/linux-$arch-tmp" "$ROOT" \
+        || fail "linux/$arch image build"
+    mv "$DIST/linux-$arch-tmp/eqproxy" "$DIST/eqproxy-linux-$arch"
+    rm -rf "$DIST/linux-$arch-tmp"
+done
+
+log "verifying darwin-arm64 (native)"
+verify_cli native "$DIST/eqproxy-darwin-arm64"
+verify_live_native "$DIST/eqproxy-darwin-arm64"
+
+log "verifying darwin-amd64 (Rosetta)"
+if arch -x86_64 true 2>/dev/null; then
+    verify_cli native "$DIST/eqproxy-darwin-amd64"
+    verify_live_native "$DIST/eqproxy-darwin-amd64"
+else
+    fail "Rosetta missing: darwin-amd64 NOT EXECUTED is not acceptable for release"
+fi
+
+for arch in arm64 amd64; do
+    bin="$DIST/eqproxy-linux-$arch"
+    log "verifying linux-$arch (container)"
+    docker run --rm --platform "linux/$arch" \
+        -v "$DIST:/d:ro" -v /tmp:/tmp \
+        --entrypoint /bin/bash debian:bookworm-slim -c "
+            set -e
+            /d/eqproxy-linux-$arch --version | grep -q 'eqproxy $VER'
+            printf '%s' '$GOOD_CONFIG' | /d/eqproxy-linux-$arch config validate --config /dev/stdin | grep -q 'config OK'
+        " || fail "$bin container CLI verification"
+    verify_live_linux "linux/$arch" "$bin" "HTTP 200"
+done
+
+log "regenerating SBOM (JSON, one file per crate into sbom/)"
+(cd "$ROOT" && cargo cyclonedx --all --format json) || fail "SBOM regeneration"
+for crate in eqproxy-core eqproxy-config eqproxy-net eqproxy-cli; do
+    mv "$ROOT/$crate/$crate.cdx.json" "$ROOT/sbom/$crate.cdx.json"
+done
+
+log "writing SHA256SUMS (only after every artifact passed)"
+(cd "$DIST" && shasum -a 256 eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+    eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt)
+cat "$DIST/SHA256SUMS.txt"
+
+log "release artifacts ready in $DIST"
+printf '%s\n' \
+    "" \
+    "Next (operator, needs credentials — NOT run by this script):" \
+    "  docker buildx build --file docker/Dockerfile \\" \
+    "    --platform linux/amd64,linux/arm64 \\" \
+    "    --tag ghcr.io/ExyonQ/eqproxy:$VER --tag ghcr.io/ExyonQ/eqproxy:latest --push ." \
+    "  git tag v$VER && git push origin v$VER" \
+    "  gh release create v$VER dist/* sbom/*.cdx.json --title v$VER --notes-file CHANGELOG.md"

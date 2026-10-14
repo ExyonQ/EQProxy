@@ -162,7 +162,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "eqproxy-cli"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "clap",
  "eqproxy-config",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-config"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_path_to_error",
@@ -182,14 +182,14 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "eqproxy-net"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "eqproxy-core",
  "rustls",
@@ -511,9 +511,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "3.0.8"
+version = "3.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01016da373cd8f7ef12624f796309f5c31ba8d646dd08856c02cd741d823c622"
+checksum = "d78c8dee4c7bf0e14673097256fed6142ce9d3b85a408189d07482442145823b"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -542,9 +542,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "bytes",
  "libc",
