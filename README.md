@@ -14,9 +14,10 @@ diagnostics, configuration, administration, extensibility and security.
 > `eqproxy` CLI, with 96 tests green (including E2E over real sockets, the
 > real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.3.0
 > published (binaries and multi-arch image). Performance (first runs vs
-> 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): S-TCP-01 Comparable;
-> S-H1-01/S-TLS-01 Worse under sustained concurrency — per-exchange backend
-> dialing exhausts ephemeral ports (pool ships in Phase 3).
+> 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): after the A16 backend
+> keep-alive pool landed, S-TCP-01, S-H1-01 and S-TLS-01 measure
+> **Comparable** (zero non-2xx; tails comparable, H1/TLS at or below the
+> reference).
 
 > **Docs language:** from v0.3.0, documentation is published in English only.
 > Frozen Spanish sections below are kept as of v0.2.0 and are not updated.

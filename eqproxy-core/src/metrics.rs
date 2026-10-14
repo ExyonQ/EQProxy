@@ -36,6 +36,10 @@ pub struct Metrics {
     pub tls_handshake_failures: AtomicU64,
     /// Conexiones sin servidor disponible (todos los backends caídos/drenados).
     pub no_available_server: AtomicU64,
+    /// Conexiones a backend reutilizadas del pool keep-alive (A16).
+    pub backend_connections_reused: AtomicU64,
+    /// Conexiones a backend recién marcadas (no reutilizadas).
+    pub backend_connections_opened: AtomicU64,
 }
 
 /// Fotografía inmutable de los contadores.
@@ -54,6 +58,8 @@ pub struct MetricsSnapshot {
     pub header_timeouts: u64,
     pub tls_handshake_failures: u64,
     pub no_available_server: u64,
+    pub backend_connections_reused: u64,
+    pub backend_connections_opened: u64,
 }
 
 impl Metrics {
@@ -73,6 +79,8 @@ impl Metrics {
             header_timeouts: self.header_timeouts.load(Ordering::Relaxed),
             tls_handshake_failures: self.tls_handshake_failures.load(Ordering::Relaxed),
             no_available_server: self.no_available_server.load(Ordering::Relaxed),
+            backend_connections_reused: self.backend_connections_reused.load(Ordering::Relaxed),
+            backend_connections_opened: self.backend_connections_opened.load(Ordering::Relaxed),
         }
     }
 
@@ -124,6 +132,11 @@ impl fmt::Display for MetricsSnapshot {
             f,
             " tls[handshakes_fallidas={}] sin_servidor={}",
             self.tls_handshake_failures, self.no_available_server
+        )?;
+        write!(
+            f,
+            " pool[reutilizadas={} abiertas={}]",
+            self.backend_connections_reused, self.backend_connections_opened
         )
     }
 }

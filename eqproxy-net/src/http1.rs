@@ -21,13 +21,13 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
 
 use eqproxy_core::Metrics;
 
-use crate::proxy::{OutboundError, READ_BUF, ResolvedListener, connect_backend};
+use crate::proxy::{OutboundError, READ_BUF, ResolvedListener, checkout_or_connect};
 
 /// Tamaño máximo de la cabecera de mensaje (línea final incluida) (T03).
 pub const MAX_HEAD_BYTES: usize = 16 * 1024;
@@ -767,10 +767,9 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
-        // --- Conexión backend por intercambio (A16: pool en Fase 3) ---
-        let (backend_read, backend_write) = match connect_backend(cfg, peer, local, &metrics).await
-        {
-            Ok(halves) => halves,
+        // --- Backend: reutilizar del pool (A16) o marcar de nuevo ---
+        let conn = match checkout_or_connect(cfg, peer, local, &metrics).await {
+            Ok(conn) => conn,
             Err(OutboundError::NoServer) => {
                 // Todos los servidores caídos/drenados (B11): 503 explícito.
                 write_error(&mut client_write, 503, "service unavailable").await;
@@ -781,8 +780,8 @@ pub async fn serve_http<CR, CW>(
                 return;
             }
         };
-        let mut backend_read = BufReader::new(backend_read);
-        let mut backend_write = backend_write;
+        let mut backend_read = conn.read;
+        let mut backend_write = conn.write;
         let mut from_client = Prefixed {
             prefix: carry,
             pos: 0,
@@ -927,6 +926,25 @@ pub async fn serve_http<CR, CW>(
         metrics
             .http_requests_proxied
             .fetch_add(1, Ordering::Relaxed);
+        if !response.wants_close {
+            // Intercambio limpio y servidor en keep-alive: la conexión vuelve
+            // al pool alineada a mensaje (A16). Todos los caminos de error
+            // retornan antes sin devolverla: tras un fallo de framing, corte,
+            // timeout o cierre del servidor nunca se reutiliza.
+            cfg.backend
+                .pool
+                .checkin(conn.addr, backend_read, backend_write, Instant::now());
+            // La conexión backend ya no es nuestra: el resto del bucle solo
+            // toca el cliente.
+            if request.wants_close {
+                let _ = client_write.shutdown().await;
+                return;
+            }
+            continue;
+        }
+        // El servidor cerró o cerró el framing (UntilEof): la conexión
+        // backend muere aquí y nunca vuelve al pool.
+        drop((backend_read, backend_write));
         if request.wants_close || response.wants_close {
             let _ = client_write.shutdown().await;
             return;

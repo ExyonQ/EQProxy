@@ -22,9 +22,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinSet;
 
@@ -33,6 +33,7 @@ use eqproxy_core::{Metrics, Shutdown};
 use crate::balancer::{Balancer, ResolvedServer};
 use crate::health::{self, HealthCheck};
 use crate::http1;
+use crate::pool::Pool;
 use crate::proxy_proto::{self, ProxyProtocolMode};
 use crate::tls::{self, ClientTls};
 
@@ -66,6 +67,8 @@ pub struct ResolvedBackend {
     pub tls: Option<ClientTls>,
     pub health_check: Option<HealthCheck>,
     pub balancer: Arc<Balancer>,
+    /// Pool keep-alive por backend (A16), compartido entre listeners.
+    pub pool: Pool,
 }
 
 impl ResolvedBackend {
@@ -98,6 +101,7 @@ impl ResolvedBackend {
             proxy_protocol: ProxyProtocolMode::None,
             tls: None,
             health_check: None,
+            pool: Pool::with_defaults(),
         }
     }
 
@@ -372,6 +376,72 @@ pub async fn connect_backend(
         metrics.no_available_server.fetch_add(1, Ordering::Relaxed);
         OutboundError::NoServer
     })?;
+    connect_backend_to(cfg, addr, peer, local, metrics).await
+}
+
+/// Stream hacia el backend con su origen: reutilizado del pool (A16) o
+/// recién marcado. `reused` alimenta `backend_connections_reused`.
+pub struct BackendConn {
+    /// Servidor elegido por el balancer (clave del pool).
+    pub addr: SocketAddr,
+    /// Mitad de lectura (lista para `read_head`: alineada a mensaje).
+    pub read: BufReader<BoxRead>,
+    /// Mitad de escritura.
+    pub write: BoxWrite,
+    /// `true` si viene del pool (sin dial, handshake ni PROXY de nuevo).
+    pub reused: bool,
+}
+
+/// Reutiliza una conexión idle del pool o marca una nueva contra el servidor
+/// elegido por el balancer. Sin servidores disponibles: `NoServer` (503).
+pub async fn checkout_or_connect(
+    cfg: &ResolvedListener,
+    peer: SocketAddr,
+    local: SocketAddr,
+    metrics: &Metrics,
+) -> Result<BackendConn, OutboundError> {
+    let backend = &cfg.backend;
+    let addr = backend.balancer.pick().ok_or_else(|| {
+        metrics.no_available_server.fetch_add(1, Ordering::Relaxed);
+        OutboundError::NoServer
+    })?;
+    let now = Instant::now();
+    if let Some((read, write)) = backend.pool.checkout(&addr, now) {
+        metrics
+            .backend_connections_reused
+            .fetch_add(1, Ordering::Relaxed);
+        return Ok(BackendConn {
+            addr,
+            read,
+            write,
+            reused: true,
+        });
+    }
+    let (read, write) = connect_backend_to(cfg, addr, peer, local, metrics).await?;
+    metrics
+        .backend_connections_opened
+        .fetch_add(1, Ordering::Relaxed);
+    Ok(BackendConn {
+        addr,
+        read: BufReader::new(read),
+        write,
+        reused: false,
+    })
+}
+
+/// Variante de [`connect_backend`] contra un servidor ya elegido (el pool
+/// necesita la dirección antes de decidir entre reutilizar o marcar).
+///
+/// La cabecera PROXY v1 (A9) se escribe una sola vez por conexión: las
+/// conexiones reutilizadas del pool ya la llevan de su primer uso.
+async fn connect_backend_to(
+    cfg: &ResolvedListener,
+    addr: SocketAddr,
+    peer: SocketAddr,
+    local: SocketAddr,
+    metrics: &Metrics,
+) -> Result<(BoxRead, BoxWrite), OutboundError> {
+    let backend = &cfg.backend;
 
     let socket = match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(socket)) => socket,

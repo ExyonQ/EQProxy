@@ -167,6 +167,18 @@ only under the documented separation rule.
 - **PROXY protocol v1 (A9 send):** header written to the chosen server before
   the payload (inside the TLS stream when backend TLS is on).
 
+### 7.6 Backend keep-alive pool (A16, Phase 3 first slice)
+
+- Per backend, shared by its listeners: at most 64 idle connections per
+  server, 60 s idle expiry; excess and stale connections are dropped.
+- A connection returns to the pool **only after a fully clean exchange**
+  (request sent, response forwarded, no framing error/truncation/timeout,
+  server did not signal close). A checkout therefore always yields a
+  message-aligned connection; unread leftover bytes disqualify the entry.
+- Reuse and dial counts are observable (`pool[reutilizadas=… abiertas=…]`).
+  A server-side idle close racing a checkout surfaces as one explicit 502
+  plus `connect_failures`, identical to a dial failure — fail-explicit.
+
 ## 8. Explainable diagnostics (explain/trace mode)
 
 Designed (scope); implementation in Phases 3–4. The explain mode for a request

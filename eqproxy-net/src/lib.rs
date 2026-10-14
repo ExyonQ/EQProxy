@@ -10,12 +10,14 @@
 pub mod balancer;
 pub mod health;
 pub mod http1;
+pub mod pool;
 pub mod proxy;
 pub mod proxy_proto;
 pub mod tls;
 
 pub use balancer::{Balancer, ResolvedServer};
 pub use health::HealthCheck;
+pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, MAX_IDLE_PER_SERVER, Pool};
 pub use proxy::{
     BoundProxy, OutboundError, ProxyError, ProxyMode, READ_BUF, ResolvedBackend, ResolvedListener,
     bind, connect_backend,

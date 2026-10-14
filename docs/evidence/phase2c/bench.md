@@ -65,6 +65,29 @@ success. Remediation is the Phase 3 backend keep-alive pool (A16); no
 half-pool was shipped for this release. The parity goal (Better/Comparable
 everywhere) remains a Phase 9 acceptance criterion.
 
+## 7. Addendum — A16 pool re-run (Phase 3 first slice)
+
+After the per-server keep-alive pool landed, the same harness re-ran all
+three scenarios (raw data overwritten in `bench-raw.json`). Its disclosure
+block names the pre-amend commit the numbers were measured on; the published
+commit amends only this report, the README and the raw JSON itself — all
+code, scripts and configs are byte-identical between the two.
+
+| Scenario | EQProxy RPS | haproxy RPS | EQProxy p50/p95/p99 (ms) | haproxy p50/p95/p99 (ms) |
+|---|---|---|---|---|
+| S-TCP-01 | 5413 (4800–6388) | 5684 (4632–5786) | 1.27 / 2.31 / 5.09 | 1.15 / 2.38 / 4.88 |
+| S-H1-01 | 1547 (1310–1772) | 1265 (1009–2042) | 42.1 / 47.5 / 71.1 | 42.1 / 45.1 / 76.3 |
+| S-TLS-01 | 1314 (1233–1481) | 1369 (1158–4059*) | 43.2 / 63.7 / 141.1 | 45.2 / 77.0 / 162.7 |
+
+\* haproxy S-TLS-01 max 4059 is a single fast rep; its p99 spread reaches
+1331 ms vs 333 ms for EQProxy.
+
+- **Zero non-2xx in all 10 EQProxy HTTP/TLS runs** (all-200; only routine
+oha deadline-aborts at shutdown): the 502-storm is gone.
+- Revised classification: S-TCP-01 **Comparable**; S-H1-01 **Comparable**
+  (RPS median above the reference, equal p50, tighter p99);
+  S-TLS-01 **Comparable** (equal RPS order, lower p95/p99 medians).
+
 ## 4. Measured resource budgets (SPEC §7.3, first measurement)
 
 Native release binary on macOS/arm64, 200 idle connections, RSS via `ps`:
