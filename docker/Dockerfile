@@ -2,7 +2,7 @@
 #
 # Usage:
 #   docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
-#     --tag ghcr.io/ExyonQ/eqproxy:0.1.0 --tag ghcr.io/ExyonQ/eqproxy:latest --push .
+#     --tag ghcr.io/ExyonQ/eqproxy:0.3.0 --tag ghcr.io/ExyonQ/eqproxy:latest --push .
 #
 # The binary runs with `docker run ghcr.io/ExyonQ/eqproxy --help`.
 # The `export` stage isolates the binary to extract it as a release artifact:
@@ -38,10 +38,14 @@ RUN cargo build --release --locked -p eqproxy-cli \
 FROM scratch AS export
 COPY --from=builder /opt/eqproxy /eqproxy
 
-# Minimal runtime (default stage): unprivileged user, no toolchain,
-# no shell.
+# Minimal runtime (default stage): unprivileged user, no toolchain.
+# ca-certificates covers operators pointing `ca_file` at the
+# system bundle; default verification uses the compiled-in Mozilla roots.
 FROM debian:bookworm-slim AS runtime
 ENV LANG=C.UTF-8
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /opt/eqproxy /opt/eqproxy
 USER nobody
 EXPOSE 8080
