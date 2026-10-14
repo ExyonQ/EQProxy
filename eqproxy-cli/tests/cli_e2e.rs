@@ -162,10 +162,10 @@ fn validate_reports_syntax_errors_with_line() {
 )]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
-    // `config explain` used to be in this list; it is now implemented
-    // (Phase 3 slice, SPEC §8) and covered by explain_* tests below.
+    // `config explain` and `config plan` used to be in this list; both are
+    // now implemented (Phase 3 slices) and covered by explain_*/plan_*
+    // tests below.
     let cases: &[(&[&str], &str)] = &[
-        (&["config", "plan", "--config", "x.toml"], "config plan"),
         (&["config", "apply", "--config", "x.toml"], "config apply"),
         (&["config", "rollback"], "config rollback"),
         (
@@ -354,6 +354,106 @@ fn diff_refuses_when_a_side_is_invalid() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
     assert!(stderr.contains("could not read"), "stderr: {stderr}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn plan_inventories_what_run_would_activate() {
+    let config = temp_config(
+        "plan",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", weight = 3 }, { addr = \"127.0.0.1:9001\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "plan", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config plan");
+    remove_temp(&config);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for expected in [
+        "plan: 1 listener(s), 1 backend(s) — nothing started (dry run)",
+        "listener \"web\": bind 127.0.0.1:0 mode=http",
+        "backend=\"api\"",
+        "backend \"api\": servers=2 tls=no proxy_protocol=none health_check=none",
+        "server 127.0.0.1:9000 weight=3",
+        "server 127.0.0.1:9001 weight=1",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn plan_loads_real_tls_material() {
+    let config = temp_config(
+        "plan-tls",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"{FIXTURE_CERT}\"\nkey = \"{FIXTURE_KEY}\"\nalpn = [\"http/1.1\"]\n[backend.api]\nserver = \"127.0.0.1:9\"\n"
+        ),
+    );
+    let output = bin()
+        .args(["config", "plan", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config plan");
+    remove_temp(&config);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("tls=yes(alpn=[http/1.1])"),
+        "TLS material must load and report: {stdout}"
+    );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn plan_fails_actionably_on_bad_input() {
+    // Missing file -> exit 1, never a fake plan.
+    let output = bin()
+        .args(["config", "plan", "--config", "no-existe.toml"])
+        .output()
+        .expect("run eqproxy config plan");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("could not read"), "stderr: {stderr}");
+
+    // Semantically invalid (server + servers) -> exit 1 with the field.
+    let bad = temp_config(
+        "plan-bad",
+        "schema_version = 1\n[backend.api]\nserver = \"127.0.0.1:9000\"\nservers = [{ addr = \"127.0.0.1:9001\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "plan", "--config"])
+        .arg(&bad)
+        .output()
+        .expect("run eqproxy config plan");
+    remove_temp(&bad);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("mutually exclusive"), "stderr: {stderr}");
 }
 
 #[cfg_attr(

@@ -68,14 +68,31 @@ expect_exit = 1
 expect_stderr_regex = "could not read the file"
 
 # Unimplemented functionality: explicit exit 2 (never fakes success).
-# (`config explain` left this list when it was implemented in Phase 3;
-# `config plan` still holds the contract.)
+# (`config explain` and `config plan` left this list when they were
+# implemented in Phase 3; `config apply` still holds the contract.)
 [[e2e.scenarios]]
 name = "unimplemented-command-exits-2"
-argv = ["config", "plan", "--config", "eqproxy.toml"]
+argv = ["config", "apply", "--config", "eqproxy.toml"]
 expect_failure = true
 expect_exit = 2
 expect_stderr_regex = "not implemented yet"
+
+# Phase 3: `config plan` reports the activation inventory without starting
+# anything (dry run over the resolved model).
+[[e2e.scenarios]]
+name = "plan-reports-activation-inventory"
+argv = ["config", "plan", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:8080"
+mode = "http"
+backend = "api"
+[backend.api]
+servers = [{ addr = "127.0.0.1:9000", weight = 3 }]
+'''
+expect_exit = 0
+expect_stdout_regex = "plan: 1 listener\\(s\\), 1 backend\\(s\\) — nothing started \\(dry run\\)"
 
 # Phase 3: `config explain` simulates one routing decision offline with no
 # side effects and reports listener, backend and selected server.

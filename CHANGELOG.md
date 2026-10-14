@@ -5,6 +5,16 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.4.1] — 2026-10-15
+
+### Added
+
+- `config plan`: dry run of `run` — loads, validates and resolves (real
+  certificate reads, address parsing, backend assembly), then reports the
+  full activation inventory (listeners, timeouts, backends, servers)
+  without binding or dialing. Exit 1 carries the same actionable errors
+  `run` would fail with.
+
 ## [v0.4.0] — 2026-10-14
 
 First distributable release: containers and binaries, English-only docs.

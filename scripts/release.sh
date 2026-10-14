@@ -1,5 +1,5 @@
 #!/bin/bash
-# Release pipeline for EQProxy (v0.4.0+).
+# Release pipeline for EQProxy (v0.4.1+).
 #
 # Builds four release binaries, regenerates the SBOM, and E2E-verifies
 # EVERY artifact (real binary, real sockets, observable results) BEFORE
@@ -17,7 +17,7 @@
 # Env:   RUST_IMAGE (default rust:1.97-bookworm) for the Linux builds.
 set -euo pipefail
 
-VER="0.4.0"
+VER="0.4.1"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 RUST_IMAGE="${RUST_IMAGE:-rust:1.97-bookworm}"

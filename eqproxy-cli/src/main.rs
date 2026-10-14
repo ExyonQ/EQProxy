@@ -135,7 +135,7 @@ fn config_command(command: ConfigCommand) -> u8 {
             path,
         } => explain(&config, listener.as_deref(), &method, &host, &path),
         ConfigCommand::Diff { left, right } => diff(&left, &right),
-        ConfigCommand::Plan { .. } => not_implemented("config plan", "Phase 3"),
+        ConfigCommand::Plan { config } => plan(&config),
         ConfigCommand::Apply { .. } => not_implemented("config apply", "Phase 3"),
         ConfigCommand::Rollback => not_implemented("config rollback", "Phase 3"),
         ConfigCommand::Import { .. } => not_implemented("config import", "Phase 8"),
@@ -494,6 +494,124 @@ fn explain(path: &Path, want: Option<&str>, method: &str, host: &str, req_path: 
         explain_report(&config, listener, method, host, req_path)
     );
     0
+}
+
+/// Shows what `run` would activate from this config, without starting
+/// anything (Phase 3 dry run; the future hot-apply will diff against the
+/// live snapshot here).
+///
+/// Loads, validates and resolves like `run` does — certificates are read,
+/// addresses parsed, backends assembled — then reports the full activation
+/// inventory instead of binding or dialing. Exit 0 carries the report;
+/// exit 1 carries the same actionable errors `run` would fail with.
+fn plan(path: &Path) -> u8 {
+    let (config, result) = match load_and_check(path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !result.is_valid() {
+        for err in &result.errors {
+            eprintln!("{err}");
+        }
+        return 1;
+    }
+    let listeners = match resolve(&config, base_dir(path)) {
+        Ok(listeners) => listeners,
+        Err(msg) => {
+            eprintln!("error: inconsistent configuration after validation: {msg}");
+            return 1;
+        }
+    };
+    if listeners.is_empty() {
+        eprintln!("error: the configuration defines no listeners; nothing to serve");
+        return 1;
+    }
+    println!("{}", plan_report(&config, &listeners));
+    0
+}
+
+/// Renders the activation inventory. Pure function of the validated config
+/// and the resolved model (verified by unit test); the only I/O of `plan`
+/// is printing it. One defensive line per listener/backend/server so the
+/// operator can eyeball exactly what `run` would bring up.
+fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
+    use std::fmt::Write as _;
+    let mut backend_names: Vec<&str> = listeners.iter().map(|l| l.backend_name.as_str()).collect();
+    backend_names.sort_unstable();
+    backend_names.dedup();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "plan: {} listener(s), {} backend(s) — nothing started (dry run)",
+        listeners.len(),
+        backend_names.len()
+    );
+    for listener in listeners {
+        let mode = match listener.mode {
+            ProxyMode::Tcp => "tcp",
+            ProxyMode::Http => "http",
+        };
+        let tls = match listener.server_tls.as_ref() {
+            None => "no".to_owned(),
+            Some(t) => {
+                let protos: Vec<String> = t
+                    .alpn()
+                    .iter()
+                    .map(|p| String::from_utf8_lossy(p).into_owned())
+                    .collect();
+                format!("yes(alpn=[{}])", protos.join(","))
+            }
+        };
+        let _ = writeln!(
+            out,
+            "listener \"{}\": bind {} mode={} maxconn={} tls={} backend=\"{}\"",
+            listener.name, listener.listen, mode, listener.maxconn, tls, listener.backend_name
+        );
+        let _ = writeln!(
+            out,
+            "  timeouts: connect={:?} idle={:?} client_header={:?} server_header={:?} shutdown_grace={:?}",
+            listener.connect_timeout,
+            listener.idle_timeout,
+            listener.client_header_timeout,
+            listener.server_header_timeout,
+            config.shutdown_grace
+        );
+    }
+    for name in backend_names {
+        let backend = &listeners
+            .iter()
+            .find(|l| l.backend_name == name)
+            .expect("backend referenced by a listener")
+            .backend;
+        let proxy_protocol = match backend.proxy_protocol {
+            ProxyProtocolMode::None => "none",
+            ProxyProtocolMode::V1 => "v1",
+        };
+        let health = backend
+            .health_check
+            .as_ref()
+            .map(|hc| format!("interval={:?} timeout={:?}", hc.interval, hc.timeout))
+            .unwrap_or_else(|| "none".to_owned());
+        let _ = writeln!(
+            out,
+            "backend \"{}\": servers={} tls={} proxy_protocol={} health_check={}",
+            backend.name,
+            backend.servers.len(),
+            if backend.tls.is_some() { "yes" } else { "no" },
+            proxy_protocol,
+            health
+        );
+        for server in &backend.servers {
+            let _ = writeln!(out, "  server {} weight={}", server.addr, server.weight);
+        }
+    }
+    out
 }
 
 /// Picks the listener to explain: by name when requested, the only one when
@@ -951,6 +1069,24 @@ mod tests {
             "2 difference(s):",
             "+ listener \"extra\" (only in right)",
             "~ backend \"api\" servers: [127.0.0.1:9000(3)] -> [127.0.0.1:9000(1)]",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_report_inventories_listeners_backends_and_servers() {
+        let (config, listener) = two_server_listener();
+        let report = plan_report(&config, &[listener]);
+        for expected in [
+            "plan: 1 listener(s), 1 backend(s) — nothing started (dry run)",
+            "listener \"web\": bind 127.0.0.1:8080 mode=http maxconn=1024 tls=no backend=\"api\"",
+            "backend \"api\": servers=2 tls=no proxy_protocol=none health_check=none",
+            "server 127.0.0.1:9000 weight=3",
+            "server 127.0.0.1:9001 weight=1",
         ] {
             assert!(
                 report.contains(expected),

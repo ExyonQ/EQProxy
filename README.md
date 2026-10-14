@@ -6,21 +6,21 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: Phase 3 (2026-10-14).** A real TCP and HTTP/1.1 proxy exists
+> **Status: Phase 3 (2026-10-15).** A real TCP and HTTP/1.1 proxy exists
 > (crates `eqproxy-core/config/net/cli`): strict framing, per-phase timeouts,
 > signal cancellation, **TLS termination and backend TLS (verification on by
 > default), ALPN h1, weighted round-robin with TCP health checks and PROXY
 > protocol v1 send**, backend keep-alive pool, typed TOML configuration with
-> actionable errors and the `eqproxy` CLI (`validate`, `explain`, `diff`),
-> with 114 tests green (including E2E over real sockets, the real binary,
-> and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.0 published
-> (binaries and multi-arch image, see Install). Performance (first runs vs
+> actionable errors and the `eqproxy` CLI (`validate`, `explain`, `diff`,
+> `plan` dry run), with 117 tests green (including E2E over real sockets,
+> the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.1
+> published (binaries and multi-arch image, see Install). Performance (first runs vs
 > 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): after the A16 backend
 > keep-alive pool landed, S-TCP-01, S-H1-01 and S-TLS-01 measure
 > **Comparable** (zero non-2xx; tails comparable, H1/TLS at or below the
 > reference).
 >
-> **Scope honesty:** v0.4.0 is not declared production ready (Phase 9 gate
+> **Scope honesty:** v0.4.1 is not declared production ready (Phase 9 gate
 > pending): TCP + HTTP/1.1 only, no hot config reload, no rollback.
 
 > **Docs language:** documentation is published in English only.
@@ -32,17 +32,17 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.4.0
+## Install from release v0.4.1
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.4.0).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.4.1).
 
 ```bash
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.0/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.0/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.1/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.1/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 config validate --config eqproxy.toml.example
@@ -51,8 +51,8 @@ chmod +x eqproxy-linux-amd64
 Docker (linux/amd64 + linux/arm64):
 
 ```bash
-docker pull ghcr.io/exyonq/eqproxy:0.4.0
-docker run --rm ghcr.io/exyonq/eqproxy:0.4.0 --version
+docker pull ghcr.io/exyonq/eqproxy:0.4.1
+docker run --rm ghcr.io/exyonq/eqproxy:0.4.1 --version
 ```
 
 ## Documentation
