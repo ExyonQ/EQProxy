@@ -5,11 +5,15 @@ Language: **English** · [Español](#español)
 Minimal-observability TCP/HTTP reverse proxy, written in safe Rust
 (`#![forbid(unsafe_code)]`).
 
-## StatusPhase 2b — real HTTP/1.1 proxy (strict framing, per-phase timeouts, signal
-cancellation) + TLS (termination, backend TLS verified by default, ALPN h1),
-weighted round-robin with TCP health checks and PROXY protocol v1 send. See
-[SPEC.md](SPEC.md) for the specified behaviour, the parity matrix (internal
-documentation), and [ROADMAP.md](ROADMAP.md) for the plan.
+## Status — Phase 2c: real HTTP/1.1 proxy (strict framing, per-phase timeouts,
+signal cancellation) + TLS (termination, backend TLS verified by default,
+ALPN h1), weighted round-robin with TCP health checks, PROXY protocol v1
+send, framing fuzz corpus + live fuzz, first benchmarks vs 3.4.6 and measured
+per-connection budgets (see [docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)).
+See [SPEC.md](SPEC.md) for the specified behaviour and [ROADMAP.md](ROADMAP.md)
+for the plan.
+
+Docs language: from v0.3.0, documentation is published in English only.
 
 ## Build
 

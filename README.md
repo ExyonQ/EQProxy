@@ -6,15 +6,20 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: Phase 2b (2026-10-13).** A real TCP and HTTP/1.1 proxy exists
+> **Status: Phase 2c (2026-10-14).** A real TCP and HTTP/1.1 proxy exists
 > (crates `eqproxy-core/config/net/cli`): strict framing, per-phase timeouts,
 > signal cancellation, **TLS termination and backend TLS (verification on by
 > default), ALPN h1, weighted round-robin with TCP health checks and PROXY
 > protocol v1 send**, typed TOML configuration with actionable errors and the
-> `eqproxy` CLI, with 93 tests green (including E2E over real sockets and the
-> real binary). No HTTP/2 yet. Release v0.2.0 published (binaries and
-> multi-arch image). Performance: **not measured** — the only valid sentence
-> about benchmarks is "Not measured".
+> `eqproxy` CLI, with 96 tests green (including E2E over real sockets, the
+> real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.3.0
+> published (binaries and multi-arch image). Performance (first runs vs
+> 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): S-TCP-01 Comparable;
+> S-H1-01/S-TLS-01 Worse under sustained concurrency — per-exchange backend
+> dialing exhausts ephemeral ports (pool ships in Phase 3).
+
+> **Docs language:** from v0.3.0, documentation is published in English only.
+> Frozen Spanish sections below are kept as of v0.2.0 and are not updated.
 
 ## Quick start
 

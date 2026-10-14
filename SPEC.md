@@ -130,8 +130,8 @@ connections without compression or caching.
 
 | Scenario | Design budget (unmeasured) | Assumption | Validated in |
 |---|---|---|---|
-| TCP proxy connection | ≤ 36 KiB/connection (2 × 16 KiB buffers + ~4 KiB state) | bidirectional streaming | Phase 2 (memory bench) |
-| HTTP/1.1 connection | ≤ 48 KiB/connection (2 buffers + state + parser) | keep-alive to backend | Phase 2 (memory bench) |
+| TCP proxy connection | ≤ 36 KiB/connection (2 × 16 KiB buffers + ~4 KiB state) | bidirectional streaming | Phase 2c (measured ~37.8 KiB on darwin/arm64, +5% allocator rounding; Linux re-measurement pending) |
+| HTTP/1.1 connection | ≤ 48 KiB/connection (2 buffers + state + parser) | keep-alive to backend | Phase 2c (measured ~15.1 KiB idle keep-alive on darwin/arm64) |
 | FDs | 2 FDs per proxied connection + listeners + admin. E.g. maxconn 100 000 → ≥ 200 000 FDs + 10 % margin | `ulimit -n` limit documented in `eqproxy doctor` | Phase 1 |
 | Queues | Bounded queue per backend (`maxqueue`); rejection with 503/explicit timeout when full; **never unlimited queues** | burst traffic | Phase 3 |
 | Tasks | 1 task per connection (not per request on keep-alive); task cap = connection cap | — | Phase 1 |
@@ -310,7 +310,8 @@ the whole service), sanitizers/concurrency tools where appropriate.
 | Phase 1 code (TCP proxy, TOML config, CLI) | **Tested** (2026-10-12) | 30 tests green: 19 unit + 6 E2E with real sockets + 5 E2E through the real `eqproxy` binary (incl. SIGINT). fmt/clippy `-D warnings` green; 0 own `unsafe` (`forbid(unsafe_code)`); cargo-deny and cargo-machete green; SBOM in `sbom/` |
 | Phase 2a code (strict HTTP/1.1, T01–T03, per-phase timeouts, streaming) | **Tested** (2026-10-12) | 47 tests green: 27 unit + 14 E2E with real sockets (6 TCP + 8 HTTP) + 6 E2E through the real binary (incl. smuggling rejected with 400 and SIGINT). fmt/clippy `-D warnings` green |
 | Phase 2b code (TLS termination/backend TLS/ALPN, weighted RR, TCP health checks, PROXY v1 send) | **Tested** (2026-10-13) | 93 tests green: 57 unit + 26 E2E with real sockets (6 TCP + 8 HTTP + 12 Phase 2b) + 10 E2E through the real `eqproxy` binary (incl. real TLS traffic via `openssl s_client`). Veyra audit ACCEPTED + EvoForge slice eval F=1. Details in the 0.2.0 delivery |
-| Benchmarks | **Not measured** | Plan only (BENCHMARK_PLAN.md) |
+| Phase 2c code (framing fuzz corpus + live fuzz, first benchmarks, measured budgets) | **Tested** (2026-10-14) | 3 new corpus tests (~10k parser mutants, no-panic + explicit statuses); live cargo-fuzz `framing` 3.83M execs, 0 crashes; S-TCP-01 Comparable, S-H1-01/S-TLS-01 Worse under sustained concurrency (verified EADDRNOTAVAIL root cause, pool in Phase 3); RSS/conn measured (TCP ~37.8, HTTP ~15.1 KiB). Evidence in `docs/evidence/phase2c/bench.md` |
+| Benchmarks | **Measured (Phase 2 scope)** | First runs S-TCP-01, S-H1-01, S-TLS-01 vs 3.4.6 with raw data ([docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)); full matrix remains Phase 9 |
 
 ---
 

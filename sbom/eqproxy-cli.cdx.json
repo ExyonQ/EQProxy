@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:e0335a3e-d2ac-47b8-a1bb-a07f063c9978",
+  "serialNumber": "urn:uuid:ad004a35-b16a-4b5b-985b-960baacfdf83",
   "metadata": {
-    "timestamp": "2026-10-13T18:31:30.325925000Z",
+    "timestamp": "2026-10-14T16:55:32.781419000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -19,10 +19,10 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.2.0",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.3.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-cli",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "CLI de EQProxy: run, config validate y comandos de operación",
       "scope": "required",
       "licenses": [
@@ -30,14 +30,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-cli@0.2.0?download_url=file://.",
+      "purl": "pkg:cargo/eqproxy-cli@0.3.0?download_url=file://.",
       "components": [
         {
           "type": "application",
-          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.2.0 bin-target-0",
+          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.3.0 bin-target-0",
           "name": "eqproxy",
-          "version": "0.2.0",
-          "purl": "pkg:cargo/eqproxy-cli@0.2.0?download_url=file://.#src/main.rs"
+          "version": "0.3.0",
+          "purl": "pkg:cargo/eqproxy-cli@0.3.0?download_url=file://.#src/main.rs"
         }
       ]
     },
@@ -51,10 +51,10 @@
   "components": [
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.2.0",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.3.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-config",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "Configuración de EQProxy: esquema TOML tipado, validación semántica y errores accionables",
       "scope": "required",
       "licenses": [
@@ -62,14 +62,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-config@0.2.0?download_url=file://../eqproxy-config"
+      "purl": "pkg:cargo/eqproxy-config@0.3.0?download_url=file://../eqproxy-config"
     },
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.2.0",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-core",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "Tipos compartidos de EQProxy: métricas y apagado gradual",
       "scope": "required",
       "licenses": [
@@ -77,14 +77,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-core@0.2.0?download_url=file://../eqproxy-core"
+      "purl": "pkg:cargo/eqproxy-core@0.3.0?download_url=file://../eqproxy-core"
     },
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.2.0",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.3.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-net",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "description": "Dataplane de EQProxy: listeners, conexiones y proxy TCP con límites",
       "scope": "required",
       "licenses": [
@@ -92,7 +92,7 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-net@0.2.0?download_url=file://../eqproxy-net"
+      "purl": "pkg:cargo/eqproxy-net@0.3.0?download_url=file://../eqproxy-net"
     },
     {
       "type": "library",
@@ -1248,15 +1248,15 @@
     },
     {
       "type": "library",
-      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.45",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46",
       "name": "rustls",
-      "version": "0.23.45",
+      "version": "0.23.46",
       "description": "Rustls is a modern TLS library written in Rust.",
       "scope": "required",
       "hashes": [
         {
           "alg": "SHA-256",
-          "content": "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+          "content": "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
         }
       ],
       "licenses": [
@@ -1264,7 +1264,7 @@
           "expression": "Apache-2.0 OR ISC OR MIT"
         }
       ],
-      "purl": "pkg:cargo/rustls@0.23.45",
+      "purl": "pkg:cargo/rustls@0.23.46",
       "externalReferences": [
         {
           "type": "website",
@@ -2073,17 +2073,17 @@
   ],
   "dependencies": [
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.2.0",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.3.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#clap@4.6.7",
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.2.0",
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.2.0",
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.2.0",
+        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.3.0",
+        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0",
+        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.3.0",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2"
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.2.0",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.3.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
         "registry+https://github.com/rust-lang/crates.io-index#serde_path_to_error@0.1.20",
@@ -2091,16 +2091,16 @@
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.2.0",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2"
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.2.0",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.3.0",
       "dependsOn": [
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.2.0",
-        "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.45",
+        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.3.0",
+        "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46",
         "registry+https://github.com/rust-lang/crates.io-index#rustls-pki-types@1.15.1",
         "registry+https://github.com/rust-lang/crates.io-index#thiserror@2.0.21",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2",
@@ -2312,7 +2312,7 @@
       ]
     },
     {
-      "ref": "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.45",
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#aws-lc-rs@1.18.2",
         "registry+https://github.com/rust-lang/crates.io-index#log@0.4.34",
@@ -2409,7 +2409,7 @@
     {
       "ref": "registry+https://github.com/rust-lang/crates.io-index#tokio-rustls@0.26.6",
       "dependsOn": [
-        "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.45",
+        "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.2"
       ]
     },

@@ -1,0 +1,22 @@
+{
+  "platform": "darwin",
+  "binary": "/Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy",
+  "results": [
+    {
+      "mode": "tcp",
+      "connections": 200,
+      "rss_before_kib": 3632,
+      "rss_with_conns_kib": 11184,
+      "rss_after_close_kib": 11248,
+      "kib_per_conn": 37.76
+    },
+    {
+      "mode": "http",
+      "connections": 200,
+      "rss_before_kib": 3584,
+      "rss_with_conns_kib": 6608,
+      "rss_after_close_kib": 6672,
+      "kib_per_conn": 15.12
+    }
+  ]
+}

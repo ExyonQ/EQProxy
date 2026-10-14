@@ -274,14 +274,22 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         reason: "empty request head",
     })?;
 
-    let parts: Vec<&[u8]> = request_line.split(|&b| b == b' ').collect();
-    if parts.len() != 3 {
+    // Exactly three space-separated parts: no allocation, no indexing.
+    let mut parts = request_line.split(|&b| b == b' ');
+    let (Some(method), Some(target), Some(raw_version)) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(Reject {
+            status: 400,
+            reason: "malformed request line",
+        });
+    };
+    if parts.next().is_some() {
         return Err(Reject {
             status: 400,
             reason: "malformed request line",
         });
     }
-    let method = parts[0];
     if method.is_empty() || !method.iter().all(|&b| is_tchar(b)) {
         return Err(Reject {
             status: 400,
@@ -295,7 +303,6 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
             reason: "connect is not implemented (planned for phase 4)",
         });
     }
-    let target = parts[1];
     if target.is_empty()
         || target.iter().any(|b| *b <= 0x20 || *b == 0x7f)
         || (!target.starts_with(b"/") && target != b"*")
@@ -306,7 +313,7 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
             reason: "invalid request target",
         });
     }
-    let version = match parts[2] {
+    let version = match raw_version {
         b"HTTP/1.1" => 11u8,
         b"HTTP/1.0" => 10u8,
         v if v.starts_with(b"HTTP/") => {
