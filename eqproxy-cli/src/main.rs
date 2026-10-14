@@ -1,7 +1,7 @@
 //! EQProxy CLI.
 //!
-//! Commands implemented in Phase 1: `run` and `config validate`. The rest
-//! **fail explicitly** with exit code 2 (never fake success).
+//! Implemented: `run`, `config validate`, `config explain` and `config diff`.
+//! The rest **fail explicitly** with exit code 2 (never fake success).
 
 #![forbid(unsafe_code)]
 
@@ -78,8 +78,15 @@ enum ConfigCommand {
         #[arg(long, default_value = "/")]
         path: String,
     },
-    /// Compares two configurations (Phase 3)
-    Diff { left: PathBuf, right: PathBuf },
+    /// Compares two configurations (Phase 3): exit 0 with the report on
+    /// stdout (verdict line first); exit 1 when either side fails to load
+    /// or validate, with the errors on stderr
+    Diff {
+        /// Baseline configuration file
+        left: PathBuf,
+        /// Candidate configuration file
+        right: PathBuf,
+    },
     /// Shows the change plan without applying it (Phase 3)
     Plan {
         #[arg(short, long)]
@@ -127,7 +134,7 @@ fn config_command(command: ConfigCommand) -> u8 {
             host,
             path,
         } => explain(&config, listener.as_deref(), &method, &host, &path),
-        ConfigCommand::Diff { .. } => not_implemented("config diff", "Phase 3"),
+        ConfigCommand::Diff { left, right } => diff(&left, &right),
         ConfigCommand::Plan { .. } => not_implemented("config plan", "Phase 3"),
         ConfigCommand::Apply { .. } => not_implemented("config apply", "Phase 3"),
         ConfigCommand::Rollback => not_implemented("config rollback", "Phase 3"),
@@ -191,6 +198,258 @@ fn validate(path: &Path) -> u8 {
         path.display()
     );
     0
+}
+
+/// Compares two configurations for the pre-apply safety workflow (Phase 3).
+///
+/// Both sides must load and validate like `validate` does; the comparison
+/// itself is pure (`diff_report`) and needs no network, certs or processes.
+/// Exit 0 always carries the report on stdout (verdict line first, so
+/// automation can gate on it); exit 1 means a side could not be loaded or
+/// validated, with the errors on stderr.
+fn diff(left: &Path, right: &Path) -> u8 {
+    let (left_config, left_result) = match load_and_check(left) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    let (right_config, right_result) = match load_and_check(right) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    for warning in left_result.warnings.iter().chain(&right_result.warnings) {
+        eprintln!("warning: {warning}");
+    }
+    for err in left_result.errors.iter().chain(&right_result.errors) {
+        eprintln!("{err}");
+    }
+    if !left_result.is_valid() || !right_result.is_valid() {
+        eprintln!("invalid config: refusing to diff until both sides validate");
+        return 1;
+    }
+    println!("{}", diff_report(&left_config, &right_config));
+    0
+}
+
+/// Renders the comparison. Pure function of the two parsed configs
+/// (verified by unit test); the only I/O of `diff` is printing it.
+///
+/// Line vocabulary, mirroring `diff(1)`: `+` only in right, `-` only in
+/// left, `~` changed. Section maps are `BTreeMap`s, so the order is
+/// deterministic. Server lists compare through `server_entries`, hence the
+/// legacy single `server` and the `servers` list use one vocabulary.
+fn diff_report(left: &Config, right: &Config) -> String {
+    use std::fmt::Write as _;
+    let mut changes = Vec::new();
+    if left.schema_version != right.schema_version {
+        changes.push(format!(
+            "~ schema_version: {} -> {}",
+            left.schema_version, right.schema_version
+        ));
+    }
+    if left.shutdown_grace != right.shutdown_grace {
+        changes.push(format!(
+            "~ shutdown_grace: {:?} -> {:?}",
+            left.shutdown_grace, right.shutdown_grace
+        ));
+    }
+    for name in left
+        .listener
+        .keys()
+        .filter(|n| !right.listener.contains_key(*n))
+    {
+        changes.push(format!("- listener \"{name}\" (only in left)"));
+    }
+    for name in right
+        .listener
+        .keys()
+        .filter(|n| !left.listener.contains_key(*n))
+    {
+        changes.push(format!("+ listener \"{name}\" (only in right)"));
+    }
+    for name in left
+        .listener
+        .keys()
+        .filter(|n| right.listener.contains_key(*n))
+    {
+        let l = &left.listener[name];
+        let r = &right.listener[name];
+        if l.listen != r.listen {
+            changes.push(format!(
+                "~ listener \"{name}\" listen: {} -> {}",
+                l.listen, r.listen
+            ));
+        }
+        if l.mode != r.mode {
+            changes.push(format!(
+                "~ listener \"{name}\" mode: {:?} -> {:?}",
+                l.mode, r.mode
+            ));
+        }
+        if l.backend != r.backend {
+            changes.push(format!(
+                "~ listener \"{name}\" backend: {} -> {}",
+                l.backend, r.backend
+            ));
+        }
+        if l.maxconn != r.maxconn {
+            changes.push(format!(
+                "~ listener \"{name}\" maxconn: {} -> {}",
+                l.maxconn, r.maxconn
+            ));
+        }
+        for (field, a, b) in [
+            ("connect_timeout", l.connect_timeout, r.connect_timeout),
+            ("idle_timeout", l.idle_timeout, r.idle_timeout),
+            (
+                "client_header_timeout",
+                l.client_header_timeout,
+                r.client_header_timeout,
+            ),
+            (
+                "server_header_timeout",
+                l.server_header_timeout,
+                r.server_header_timeout,
+            ),
+        ] {
+            if a != b {
+                changes.push(format!("~ listener \"{name}\" {field}: {a:?} -> {b:?}"));
+            }
+        }
+        if l.tls != r.tls {
+            changes.push(format!(
+                "~ listener \"{name}\" tls: {} -> {}",
+                tls_server_summary(l.tls.as_ref()),
+                tls_server_summary(r.tls.as_ref())
+            ));
+        }
+    }
+    for name in left
+        .backend
+        .keys()
+        .filter(|n| !right.backend.contains_key(*n))
+    {
+        changes.push(format!("- backend \"{name}\" (only in left)"));
+    }
+    for name in right
+        .backend
+        .keys()
+        .filter(|n| !left.backend.contains_key(*n))
+    {
+        changes.push(format!("+ backend \"{name}\" (only in right)"));
+    }
+    for name in left
+        .backend
+        .keys()
+        .filter(|n| right.backend.contains_key(*n))
+    {
+        let l = &left.backend[name];
+        let r = &right.backend[name];
+        let l_servers: Vec<(String, u32)> = l
+            .server_entries()
+            .into_iter()
+            .map(|(addr, w)| (addr.to_owned(), w))
+            .collect();
+        let r_servers: Vec<(String, u32)> = r
+            .server_entries()
+            .into_iter()
+            .map(|(addr, w)| (addr.to_owned(), w))
+            .collect();
+        if l_servers != r_servers {
+            changes.push(format!(
+                "~ backend \"{name}\" servers: {} -> {}",
+                entries_summary(&l_servers),
+                entries_summary(&r_servers)
+            ));
+        }
+        if l.balance != r.balance {
+            changes.push(format!(
+                "~ backend \"{name}\" balance: {:?} -> {:?}",
+                l.balance, r.balance
+            ));
+        }
+        if l.proxy_protocol != r.proxy_protocol {
+            changes.push(format!(
+                "~ backend \"{name}\" proxy_protocol: {:?} -> {:?}",
+                l.proxy_protocol, r.proxy_protocol
+            ));
+        }
+        if l.health_check != r.health_check {
+            changes.push(format!(
+                "~ backend \"{name}\" health_check: {} -> {}",
+                health_summary(l.health_check.as_ref()),
+                health_summary(r.health_check.as_ref())
+            ));
+        }
+        if l.tls != r.tls {
+            changes.push(format!(
+                "~ backend \"{name}\" tls: {} -> {}",
+                tls_client_summary(l.tls.as_ref()),
+                tls_client_summary(r.tls.as_ref())
+            ));
+        }
+    }
+    let mut out = String::new();
+    if changes.is_empty() {
+        out.push_str("no differences");
+    } else {
+        let _ = writeln!(out, "{} difference(s):", changes.len());
+        for change in &changes {
+            let _ = writeln!(out, "{change}");
+        }
+    }
+    out
+}
+
+/// `addr(weight), …` for a normalized server list; `[]` when empty.
+fn entries_summary(entries: &[(String, u32)]) -> String {
+    let items: Vec<String> = entries
+        .iter()
+        .map(|(addr, w)| format!("{addr}({w})"))
+        .collect();
+    format!("[{}]", items.join(", "))
+}
+
+fn tls_server_summary(tls: Option<&eqproxy_config::schema::TlsServerConfig>) -> String {
+    match tls {
+        None => "none".to_owned(),
+        Some(t) => format!(
+            "cert={} key={} alpn=[{}] min={:?}",
+            t.cert,
+            t.key,
+            t.alpn.join(","),
+            t.min_version
+        ),
+    }
+}
+
+fn tls_client_summary(tls: Option<&eqproxy_config::schema::TlsClientConfig>) -> String {
+    match tls {
+        None => "none".to_owned(),
+        Some(t) => format!(
+            "verify={} ca={} server_name={} alpn=[{}] min={:?}",
+            t.verify,
+            t.ca_file.as_deref().unwrap_or("-"),
+            t.server_name.as_deref().unwrap_or("-"),
+            t.alpn.join(","),
+            t.min_version
+        ),
+    }
+}
+
+fn health_summary(hc: Option<&eqproxy_config::schema::HealthCheckConfig>) -> String {
+    match hc {
+        None => "none".to_owned(),
+        Some(h) => format!(
+            "interval={:?} timeout={:?} fall={} rise={}",
+            h.interval, h.timeout, h.fall, h.rise
+        ),
+    }
 }
 
 /// Simulates one routing decision with no external effects (SPEC §8).
@@ -666,6 +925,38 @@ mod tests {
         assert!(err.contains("--listener"), "error: {err}");
         let err = select_listener(&all, Some("nope")).expect_err("unknown");
         assert!(err.contains("unknown listener"), "error: {err}");
+    }
+
+    fn parse_config(source: &str) -> Config {
+        eqproxy_config::parse_str(source, Path::new("test.toml")).expect("test config")
+    }
+
+    #[test]
+    fn diff_report_is_empty_for_identical_configs() {
+        let source = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9000\"\n";
+        let report = diff_report(&parse_config(source), &parse_config(source));
+        assert_eq!(report, "no differences");
+    }
+
+    #[test]
+    fn diff_report_names_changed_weight_and_added_listener() {
+        let left = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", weight = 3 }]\n",
+        );
+        let right = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[listener.extra]\nlisten = \"127.0.0.1:8081\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", weight = 1 }]\n",
+        );
+        let report = diff_report(&left, &right);
+        for expected in [
+            "2 difference(s):",
+            "+ listener \"extra\" (only in right)",
+            "~ backend \"api\" servers: [127.0.0.1:9000(3)] -> [127.0.0.1:9000(1)]",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
+        }
     }
 
     #[test]

@@ -271,6 +271,96 @@ fn explain_fails_actionably_on_bad_input() {
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
+fn diff_reports_no_differences_for_identical_configs() {
+    let contents = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\n";
+    let left = temp_config("diff-same-left", contents);
+    let right = temp_config("diff-same-right", contents);
+    let output = bin()
+        .args(["config", "diff"])
+        .arg(&left)
+        .arg(&right)
+        .output()
+        .expect("run eqproxy config diff");
+    remove_temp(&left);
+    remove_temp(&right);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("no differences"), "stdout: {stdout}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn diff_reports_changed_servers_and_added_listener() {
+    let left = temp_config(
+        "diff-left",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", weight = 3 }]\n",
+    );
+    let right = temp_config(
+        "diff-right",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[listener.extra]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", weight = 1 }, { addr = \"127.0.0.1:9001\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "diff"])
+        .arg(&left)
+        .arg(&right)
+        .output()
+        .expect("run eqproxy config diff");
+    remove_temp(&left);
+    remove_temp(&right);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for expected in [
+        "2 difference(s):",
+        "+ listener \"extra\" (only in right)",
+        "~ backend \"api\" servers: [127.0.0.1:9000(3)] -> [127.0.0.1:9000(1), 127.0.0.1:9001(1)]",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn diff_refuses_when_a_side_is_invalid() {
+    let good = temp_config(
+        "diff-good",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "diff"])
+        .arg(&good)
+        .arg("no-existe.toml")
+        .output()
+        .expect("run eqproxy config diff");
+    remove_temp(&good);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("could not read"), "stderr: {stderr}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
 fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     // Minimal real HTTP backend: answers 200 with body echo.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend http");
