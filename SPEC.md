@@ -175,13 +175,15 @@ only under the documented separation rule.
   (request sent, response forwarded, no framing error/truncation/timeout,
   server did not signal close). A checkout therefore always yields a
   message-aligned connection; unread leftover bytes disqualify the entry.
-- Reuse and dial counts are observable (`pool[reutilizadas=… abiertas=…]`).
+- Reuse and dial counts are observable (`pool[reused=… opened=…]`).
   A server-side idle close racing a checkout surfaces as one explicit 502
   plus `connect_failures`, identical to a dial failure — fail-explicit.
 
 ## 8. Explainable diagnostics (explain/trace mode)
 
-Designed (scope); implementation in Phases 3–4. The explain mode for a request
+Designed (scope); implementation in Phases 3–4. The static subset
+(listener, backend, selected server + state; items 1–3) is delivered as
+`config explain`, offline with no side effects. The explain mode for a request
 (real, sampled, or **simulated with no external effects**) must show:
 
 1. Listener and frontend used.

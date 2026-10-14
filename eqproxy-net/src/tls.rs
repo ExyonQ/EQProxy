@@ -274,14 +274,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn client_config_rejects_invalid_server_name() {
-        let err = client_config(
-            None,
-            true,
-            Some("no es un nombre .."),
-            &[],
-            TlsVersion::V1_2,
-        )
-        .expect_err("must reject the name");
+        let err = client_config(None, true, Some("not a name .."), &[], TlsVersion::V1_2)
+            .expect_err("must reject the name");
         assert!(matches!(err, TlsError::ServerName(_)), "error: {err}");
     }
 

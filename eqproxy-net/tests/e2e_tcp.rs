@@ -1,4 +1,4 @@
-//! Pruebas E2E del dataplane TCP con **sockets reales** (sin mocks de red).
+//! TCP dataplane E2E tests with **real sockets** (no network mocks).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -79,7 +79,7 @@ async fn start_proxy(
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn echo_roundtrip_through_proxy_updates_metrics() {
@@ -97,15 +97,15 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
 
     let mut client = tokio::time::timeout(WAIT, TcpStream::connect(proxy_addr))
         .await
-        .expect("connect a tiempo")
+        .expect("connect in time")
         .expect("connect al proxy");
     let payload = vec![0xABu8; 4096];
     client.write_all(&payload).await.expect("write");
     let mut received = vec![0u8; payload.len()];
     tokio::time::timeout(WAIT, client.read_exact(&mut received))
         .await
-        .expect("echo a tiempo")
-        .expect("echo completo");
+        .expect("echo in time")
+        .expect("full echo");
     assert_eq!(received, payload, "echo must be byte for byte");
 
     drop(client);
@@ -120,13 +120,13 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn maxconn_rejects_excess_connections_explicitly() {
@@ -147,12 +147,12 @@ async fn maxconn_rejects_excess_connections_explicitly() {
 
     let _held_1 = TcpStream::connect(proxy_addr).await.expect("conn 1");
     let _held_2 = TcpStream::connect(proxy_addr).await.expect("conn 2");
-    // La tercera supera maxconn=2: aceptada y cerrada de inmediato (rechazo).
+    // The third exceeds maxconn=2: accepted and closed immediately (refusal).
     let mut third = TcpStream::connect(proxy_addr).await.expect("conn 3");
     let mut byte = [0u8; 1];
     let closed = tokio::time::timeout(WAIT, third.read(&mut byte))
         .await
-        .expect("rechazo a tiempo")
+        .expect("refusal in time")
         .expect("read");
     assert_eq!(closed, 0, "the excess connection must close without data");
     assert_eq!(metrics.snapshot().connections_rejected, 1);
@@ -160,13 +160,13 @@ async fn maxconn_rejects_excess_connections_explicitly() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connect_timeout_fails_fast_and_counts() {
@@ -190,7 +190,7 @@ async fn connect_timeout_fails_fast_and_counts() {
     let mut byte = [0u8; 1];
     let closed = tokio::time::timeout(WAIT, client.read(&mut byte))
         .await
-        .expect("cierre a tiempo")
+        .expect("timely close")
         .expect("read");
     assert_eq!(
         closed, 0,
@@ -206,13 +206,13 @@ async fn connect_timeout_fails_fast_and_counts() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_timeout_closes_silent_connection() {
@@ -232,7 +232,7 @@ async fn idle_timeout_closes_silent_connection() {
     let mut byte = [0u8; 1];
     let closed = tokio::time::timeout(WAIT, client.read(&mut byte))
         .await
-        .expect("cierre por idle a tiempo")
+        .expect("timely idle close")
         .expect("read");
     assert_eq!(closed, 0, "the silent connection must close");
     assert!(
@@ -244,13 +244,13 @@ async fn idle_timeout_closes_silent_connection() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
@@ -267,18 +267,18 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
     let (proxy_addr, handle, serve) = start_proxy(cfg, metrics, Duration::from_secs(3)).await;
 
     let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
-    client.write_all(b"hola").await.expect("write");
-    let mut buf = [0u8; 4];
+    client.write_all(b"hello").await.expect("write");
+    let mut buf = [0u8; 5];
     tokio::time::timeout(WAIT, client.read_exact(&mut buf))
         .await
-        .expect("eco previo")
+        .expect("previous echo")
         .expect("read");
-    assert_eq!(&buf, b"hola");
+    assert_eq!(&buf, b"hello");
 
     // Shutdown with a live connection: the in-flight connection must be able to continue.
     handle.trigger();
     client
-        .write_all(b"mundo!!")
+        .write_all(b"world!!")
         .await
         .expect("write after shutdown");
     let mut buf2 = [0u8; 7];
@@ -286,7 +286,7 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
         .await
         .expect("the in-flight connection must finish its echo")
         .expect("read");
-    assert_eq!(&buf2, b"mundo!!");
+    assert_eq!(&buf2, b"world!!");
 
     // ...but no new connections are accepted anymore.
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -297,18 +297,18 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
 
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bind_is_all_or_nothing() {
     // Occupies a port with a foreign socket; the proxy bind must fail whole.
-    let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("socket ajeno");
+    let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("foreign socket");
     let busy: SocketAddr = taken.local_addr().expect("addr");
     let backend = start_echo().await;
 
@@ -321,7 +321,7 @@ async fn bind_is_all_or_nothing() {
         Duration::from_secs(5),
     );
     let bad = listener_cfg(
-        "ocupado",
+        "taken",
         busy,
         backend,
         64,
@@ -331,7 +331,7 @@ async fn bind_is_all_or_nothing() {
     let metrics = Arc::new(Metrics::default());
     let err = bind(vec![good, bad], metrics).await.expect_err("must fail");
     assert!(
-        err.to_string().contains("ocupado"),
+        err.to_string().contains("taken"),
         "the error must name the listener: {err}"
     );
 }

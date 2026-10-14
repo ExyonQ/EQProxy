@@ -11,7 +11,7 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_eqproxy"))
 }
 
-/// Certificados de test compartidos con los e2e de eqproxy-net.
+/// Test certificates shared with the eqproxy-net e2e tests.
 const FIXTURE_CERT: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../eqproxy-net/tests/fixtures/cert.pem"
@@ -26,7 +26,7 @@ fn temp_config(name: &str, contents: &str) -> PathBuf {
         "eqproxy-cli-e2e-{}-{name}.toml",
         std::process::id()
     ));
-    std::fs::write(&path, contents).expect("escribir config de test");
+    std::fs::write(&path, contents).expect("write test config");
     path
 }
 
@@ -162,11 +162,9 @@ fn validate_reports_syntax_errors_with_line() {
 )]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
+    // `config explain` used to be in this list; it is now implemented
+    // (Phase 3 slice, SPEC §8) and covered by explain_* tests below.
     let cases: &[(&[&str], &str)] = &[
-        (
-            &["config", "explain", "--config", "x.toml"],
-            "config explain",
-        ),
         (&["config", "plan", "--config", "x.toml"], "config plan"),
         (&["config", "apply", "--config", "x.toml"], "config apply"),
         (&["config", "rollback"], "config rollback"),
@@ -177,7 +175,7 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
         (&["doctor"], "eqproxy doctor"),
     ];
     for (args, name) in cases {
-        let output = bin().args(*args).output().expect("ejecutar eqproxy");
+        let output = bin().args(*args).output().expect("run eqproxy");
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(
             output.status.code(),
@@ -189,6 +187,83 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
             "{name} must fail explicitly; stderr: {stderr}"
         );
     }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn explain_simulates_routing_with_no_side_effects() {
+    let backend = start_echo_backend();
+    let config = temp_config(
+        "explain",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[backend.api]\nservers = [{{ addr = \"{backend}\", weight = 3 }}]\n"
+        ),
+    );
+    let output = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&config)
+        .args(["--method", "GET", "--host", "example.com", "--path", "/api"])
+        .output()
+        .expect("run eqproxy config explain");
+    remove_temp(&config);
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "explain must exit 0; stderr: {stderr}"
+    );
+    for expected in [
+        "simulation: true (no requests issued, no state changed)",
+        "request: GET /api host=example.com",
+        "listener \"web\"",
+        "mode=http",
+        "backend \"api\"",
+        &format!("server {backend} weight=3 state=UP(initial)"),
+        &format!("decision: server {backend}"),
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn explain_fails_actionably_on_bad_input() {
+    // Missing file -> exit 1 with an actionable error, never exit 2.
+    let output = bin()
+        .args(["config", "explain", "--config", "x.toml"])
+        .output()
+        .expect("run eqproxy config explain");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("could not read"), "stderr: {stderr}");
+
+    // Two listeners without --listener -> exit 1 asking for --listener.
+    let config = temp_config(
+        "explain-ambiguous",
+        "schema_version = 1\n[listener.a]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[listener.b]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config explain");
+    remove_temp(&config);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("select one with --listener"),
+        "stderr: {stderr}"
+    );
 }
 
 #[cfg_attr(
@@ -254,7 +329,7 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     }
     assert!(!proxy_addr.is_empty(), "the address was not announced");
 
-    // Recorrido real: GET proxificado con respuesta observada.
+    // Real run: proxied GET with observed response.
     let mut client = TcpStream::connect(proxy_addr.as_str()).expect("connect al proxy");
     client
         .write_all(b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
@@ -266,7 +341,7 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     let _ = client.read_to_end(&mut response);
     let text = String::from_utf8_lossy(&response);
     assert!(text.starts_with("HTTP/1.1 200 OK"), "respuesta: {text}");
-    assert!(text.ends_with("ok"), "cuerpo ecoado: {text}");
+    assert!(text.ends_with("ok"), "echoed body: {text}");
 
     // Error case: CL+TE smuggling rejected with 400 by the real binary.
     let mut evil = TcpStream::connect(proxy_addr.as_str()).expect("connect 2");
@@ -289,7 +364,7 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     let kill = Command::new("kill")
         .args(["-INT", &pid.to_string()])
         .status()
-        .expect("ejecutar kill");
+        .expect("run kill");
     assert!(kill.success(), "kill -INT must be accepted");
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
@@ -363,7 +438,7 @@ fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
     let kill = Command::new("kill")
         .args(["-INT", &pid.to_string()])
         .status()
-        .expect("ejecutar kill");
+        .expect("run kill");
     assert!(kill.success(), "kill -INT must be accepted");
 
     // The in-flight connection must be able to finish after the signal.
@@ -558,7 +633,7 @@ fn run_with_tls_termination_proxies_real_traffic() {
     }
     assert!(!proxy_addr.is_empty(), "the TLS address was not announced");
 
-    // Cliente TLS real (openssl s_client) contra el listener con termination:
+    // Real TLS client (openssl s_client) against the listener with termination:
     // the echo must come back through the encrypted tunnel.
     let mut client = Command::new("openssl")
         .args([
@@ -576,10 +651,10 @@ fn run_with_tls_termination_proxies_real_traffic() {
     client
         .stdin
         .take()
-        .expect("stdin del cliente TLS")
+        .expect("TLS client stdin")
         .write_all(b"ping")
         .expect("write TLS");
-    let output = client.wait_with_output().expect("esperar s_client");
+    let output = client.wait_with_output().expect("wait for s_client");
     let echoed = String::from_utf8_lossy(&output.stdout);
     assert!(
         echoed.contains("ping"),
@@ -591,7 +666,7 @@ fn run_with_tls_termination_proxies_real_traffic() {
     let kill = Command::new("kill")
         .args(["-INT", &pid.to_string()])
         .status()
-        .expect("ejecutar kill");
+        .expect("run kill");
     assert!(kill.success(), "kill -INT must be accepted");
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {

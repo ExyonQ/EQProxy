@@ -1,4 +1,4 @@
-//! Duraciones en formato legible: `500ms`, `5s`, `2m`, `1h`.
+//! Human-readable durations: `500ms`, `5s`, `2m`, `1h`.
 //!
 //! Only integers and exact suffixes: no typing ambiguity (ADR-0002, C4).
 

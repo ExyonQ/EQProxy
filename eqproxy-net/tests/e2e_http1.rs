@@ -43,7 +43,7 @@ async fn start_http_backend() -> SocketAddr {
                     };
                     let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
                     let body_needed = if head.contains("transfer-encoding: chunked") {
-                        // Hasta el chunk terminal completo: "0\r\n\r\n".
+                        // Up to the full terminal chunk: "0\r\n\r\n".
                         usize::MAX
                     } else if let Some(len) =
                         head.lines().find_map(|l| l.strip_prefix("content-length:"))
@@ -145,7 +145,7 @@ async fn read_one_response(client: &mut TcpStream) -> String {
     loop {
         let n = tokio::time::timeout(WAIT, client.read(&mut buf))
             .await
-            .expect("respuesta a tiempo")
+            .expect("response in time")
             .expect("read");
         assert!(n > 0, "EOF before a full response: {acc:?}");
         acc.extend_from_slice(&buf[..n]);
@@ -158,14 +158,14 @@ async fn read_one_response(client: &mut TcpStream) -> String {
 async fn send_and_read(addr: SocketAddr, request: &[u8]) -> String {
     let mut client = tokio::time::timeout(WAIT, TcpStream::connect(addr))
         .await
-        .expect("connect a tiempo")
+        .expect("connect in time")
         .expect("connect al proxy");
     client.write_all(request).await.expect("write request");
     client.shutdown().await.expect("half-close");
     let mut response = Vec::new();
     tokio::time::timeout(WAIT, client.read_to_end(&mut response))
         .await
-        .expect("respuesta a tiempo")
+        .expect("response in time")
         .expect("read response");
     String::from_utf8_lossy(&response).into_owned()
 }
@@ -209,7 +209,7 @@ async fn http1_get_roundtrip_and_keepalive() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -229,7 +229,7 @@ async fn http1_post_body_streams_end_to_end() {
     );
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    let body = "cuerpo de prueba con bytes";
+    let body = "test body with bytes";
     let request = format!(
         "POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
@@ -249,7 +249,7 @@ async fn http1_post_body_streams_end_to_end() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -269,14 +269,14 @@ async fn http1_chunked_body_streams_end_to_end() {
     );
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    let request = b"POST /x HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhola!\r\n0\r\n\r\n";
+    let request = b"POST /x HTTP/1.1\r\nHost: t\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n6\r\nhello!\r\n0\r\n\r\n";
     let response = send_and_read(proxy_addr, request).await;
-    assert!(response.contains("hola!"), "eco chunked: {response}");
+    assert!(response.contains("hello!"), "chunked echo: {response}");
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -334,7 +334,7 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -363,7 +363,7 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
     let mut buf = vec![0u8; 128];
     let n = tokio::time::timeout(WAIT, client.read(&mut buf))
         .await
-        .expect("408 a tiempo")
+        .expect("408 in time")
         .expect("read");
     let response = String::from_utf8_lossy(&buf[..n]).into_owned();
     assert!(
@@ -375,7 +375,7 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -409,7 +409,7 @@ async fn http1_server_header_timeout_returns_504() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -420,14 +420,14 @@ async fn http1_server_header_timeout_returns_504() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_abort_cancels_upstream_promptly() {
     // A19: the mid-body client abort must cancel the upstream
-    // al instante (el backend ve el cierre), sin esperar al idle timeout (10s).
+    // instantly (the backend sees the close), without waiting for the idle timeout (10s).
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let backend = listener.local_addr().expect("addr");
     tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accept backend");
         let mut buf = vec![0u8; 4096];
-        // Lee la cabecera y parte del cuerpo; el cierre prematuro es el cancel.
+        // Reads the head and part of the body; the premature close is the cancel.
         let _ = socket.read(&mut buf).await;
         let _ = socket.read(&mut buf).await;
         let mut tx = Some(closed_tx);
@@ -462,8 +462,8 @@ async fn http1_client_abort_cancels_upstream_promptly() {
     client
         .write_all(&[0xAB; 10])
         .await
-        .expect("write body parcial");
-    drop(client); // abort a mitad de cuerpo
+        .expect("partial body write");
+    drop(client); // mid-body abort
 
     // The backend must observe the upstream connection close promptly.
     tokio::time::timeout(Duration::from_secs(2), closed_rx)
@@ -481,7 +481,7 @@ async fn http1_client_abort_cancels_upstream_promptly() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }
 
@@ -519,6 +519,6 @@ async fn http1_response_without_framing_is_eof_delimited() {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve termina")
+        .expect("serve finishes")
         .expect("serve task without panic");
 }

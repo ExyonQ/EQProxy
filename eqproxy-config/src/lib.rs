@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn oversized_source_is_rejected_with_actionable_error() {
-        let file = PathBuf::from("grande.toml");
+        let file = PathBuf::from("big.toml");
         let source = "x".repeat(MAX_CONFIG_BYTES + 1);
         let err = parse_str(&source, &file).expect_err("must reject");
         assert!(err.cause.contains("too large"), "cause: {}", err.cause);
@@ -191,7 +191,7 @@ mod tests {
     )]
     #[test]
     fn source_at_the_limit_is_accepted() {
-        let file = PathBuf::from("limite.toml");
+        let file = PathBuf::from("limit.toml");
         let mut source = String::from("schema_version = 1\n");
         source.push_str(&"#".repeat(MAX_CONFIG_BYTES - source.len()));
         assert_eq!(source.len(), MAX_CONFIG_BYTES);
@@ -250,8 +250,8 @@ mod tests {
                 "schema_version = 1",
             ),
             (
-                "listener.web.nombre",
-                "missing field `nombre`",
+                "listener.web.bogus",
+                "missing field `bogus`",
                 "check the required fields in eqproxy.toml.example",
             ),
             (
@@ -282,7 +282,7 @@ mod tests {
             ),
             ("schema_version", "invalid integer", "schema_version = 1"),
             (
-                "listener.web.nombre",
+                "listener.web.bogus",
                 "invalid string",
                 "see eqproxy.toml.example",
             ),

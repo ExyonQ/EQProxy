@@ -46,17 +46,17 @@ pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
 /// Writer of an already-split stream half (TCP or TLS).
 pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
-/// Modo de proxy de un listener (A1 `Tcp`, A2 `Http`).
+/// Proxy mode of a listener (A1 `Tcp`, A2 `Http`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyMode {
     /// TCP tunnel without interpretation.
     #[default]
     Tcp,
-    /// Proxy HTTP/1.1 con framing estricto.
+    /// HTTP/1.1 proxy with strict framing.
     Http,
 }
 
-/// Backend resuelto: servidores, balanceo, TLS y PROXY protocol.
+/// Resolved backend: servers, balancing, TLS and PROXY protocol.
 ///
 /// Shared across listeners referencing the same backend (a single
 /// [`Balancer`] and a single health machine per backend).
@@ -87,7 +87,7 @@ impl ResolvedBackend {
         )
     }
 
-    /// Backend con servidores ponderados y umbrales `fall`/`rise` (B11).
+    /// Backend with weighted servers and `fall`/`rise` thresholds (B11).
     #[must_use]
     pub fn new(
         name: impl Into<String>,
@@ -120,7 +120,7 @@ impl ResolvedBackend {
         self
     }
 
-    /// Health check TCP activo (B11).
+    /// Active TCP health check (B11).
     #[must_use]
     pub fn with_health_check(mut self, check: HealthCheck) -> Self {
         self.health_check = Some(check);
@@ -138,14 +138,14 @@ pub struct ResolvedListener {
     pub name: String,
     pub listen: SocketAddr,
     pub backend_name: String,
-    /// Backend destino (servidores + balanceo + TLS + PROXY).
+    /// Destination backend (servers + balancing + TLS + PROXY).
     pub backend: Arc<ResolvedBackend>,
     pub mode: ProxyMode,
     pub maxconn: u32,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
     /// Client phase (`http` only): request head. Also covers the
-    /// handshake TLS del cliente (A11).
+    /// client TLS handshake (A11).
     pub client_header_timeout: Duration,
     /// Server phase (`http` only): response head.
     pub server_header_timeout: Duration,
@@ -187,7 +187,7 @@ impl ResolvedListener {
         }
     }
 
-    /// Sustituye el backend por uno completo (multi-servidor, TLS, PROXY, …).
+    /// Replaces the backend with a full one (multi-server, TLS, PROXY, …).
     #[must_use]
     pub fn with_backend(mut self, backend: Arc<ResolvedBackend>) -> Self {
         self.backend_name = backend.name.clone();
@@ -195,7 +195,7 @@ impl ResolvedListener {
         self
     }
 
-    /// Activa TLS termination en el listener (A11).
+    /// Enables TLS termination on the listener (A11).
     #[must_use]
     pub fn with_server_tls(mut self, server_tls: tls::ServerTls) -> Self {
         self.server_tls = Some(server_tls);
@@ -203,10 +203,10 @@ impl ResolvedListener {
     }
 }
 
-/// Error de arranque del dataplane.
+/// Dataplane startup error.
 #[derive(Debug, thiserror::Error)]
 pub enum ProxyError {
-    #[error("no se pudo escuchar en {addr} (listener «{name}»): {source}")]
+    #[error("could not listen on {addr} (listener \"{name}\"): {source}")]
     Bind {
         name: String,
         addr: SocketAddr,
@@ -275,7 +275,7 @@ impl BoundProxy {
 
     /// Serves until the shutdown signal; then drains until `grace`.
     pub async fn serve(self, mut shutdown: Shutdown, grace: Duration) -> Result<(), ProxyError> {
-        // Health checks (B11): un task por backend con checks configurados,
+        // Health checks (B11): one task per backend with configured checks,
         // shared across the listeners of the same backend (same Arc).
         let mut health_tasks = JoinSet::new();
         let mut seen: Vec<Arc<Balancer>> = Vec::new();
@@ -329,7 +329,7 @@ async fn accept_loop(bound: BoundListener, metrics: Arc<Metrics>, mut shutdown: 
                 let (socket, peer) = match accepted {
                     Ok(pair) => pair,
                     Err(err) => {
-                        // Error transitorio (EMFILE, etc.): registrar y continuar,
+                        // Transient error (EMFILE, etc.): log and continue,
                         // with a small breather to avoid saturating the CPU.
                         eprintln!("ERROR [{}] accept failed: {err}", bound.cfg.name);
                         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -364,7 +364,7 @@ impl Drop for ConnectionGuard {
     }
 }
 
-/// Conecta al backend elegido por el balancer: TCP + TLS opcional (A12) +
+/// Connects to the balancer-chosen backend: TCP + optional TLS (A12) +
 /// optional PROXY v1 header (A9). Returns the halves ready to pump.
 pub async fn connect_backend(
     cfg: &ResolvedListener,
@@ -449,7 +449,7 @@ async fn connect_backend_to(
         Ok(Err(err)) => {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             eprintln!(
-                "ERROR [{}] no se pudo conectar a {} (par {peer}): {err}",
+                "ERROR [{}] could not connect to {} (peer {peer}): {err}",
                 cfg.name, addr
             );
             return Err(OutboundError::Connect);
@@ -531,7 +531,7 @@ async fn handle_connection(
     let _ = client.set_nodelay(true);
     let local = client.local_addr().unwrap_or(cfg.listen);
 
-    // TLS termination (A11): el handshake vive en la fase cliente.
+    // TLS termination (A11): the handshake lives in the client phase.
     let (client_read, client_write): (BoxRead, BoxWrite) = if let Some(server_tls) = &cfg.server_tls
     {
         let handshake = tokio::time::timeout(
@@ -545,7 +545,7 @@ async fn handle_connection(
                     .tls_handshake_failures
                     .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "ERROR [{}] handshake TLS de cliente fallido (par {peer}): {err}",
+                    "ERROR [{}] failed client TLS handshake (peer {peer}): {err}",
                     cfg.name
                 );
                 return;
@@ -631,7 +631,7 @@ async fn pump(
     }
 }
 
-/// Copia `reader → writer` con timeout de inactividad por lectura.
+/// Copies `reader → writer` with a per-read inactivity timeout.
 ///
 /// On EOF (or timeout) the writer gets `shutdown()` to propagate the
 /// half-close towards the peer. Returns `TimedOut` when the timeout expired.
@@ -714,15 +714,15 @@ mod tests {
                 )
                 .await
             });
-            client.write_all(b"hola").await.expect("write");
+            client.write_all(b"hello").await.expect("write");
             drop(client); // EOF
             let copied = tokio::time::timeout(Duration::from_secs(2), copier)
                 .await
                 .expect("the copier must finish")
                 .expect("join")
-                .expect("sin error en EOF");
-            assert_eq!(copied, 4);
-            assert_eq!(bytes.load(Ordering::Relaxed), 4);
+                .expect("no error on EOF");
+            assert_eq!(copied, 5);
+            assert_eq!(bytes.load(Ordering::Relaxed), 5);
             assert_eq!(idles.load(Ordering::Relaxed), 0);
         })
     }

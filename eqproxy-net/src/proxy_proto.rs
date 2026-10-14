@@ -11,10 +11,10 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 /// PROXY protocol send mode (A9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyProtocolMode {
-    /// Sin cabecera PROXY (por defecto).
+    /// No PROXY header (default).
     #[default]
     None,
-    /// Cabecera PROXY protocol v1 (`PROXY TCP4/TCP6 …`).
+    /// PROXY protocol v1 header (`PROXY TCP4/TCP6 …`).
     V1,
 }
 

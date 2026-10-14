@@ -4,16 +4,16 @@
 //! analysis and forwarding** — every ambiguous message is rejected BEFORE
 //! touching the backend, and what is forwarded is byte-for-byte what the
 //! parser validated:
-//! - `Content-Length` y `Transfer-Encoding` juntos → 400 (T01).
-//! - `Content-Length` o `Transfer-Encoding` duplicados → 400 (T01).
-//! - `Transfer-Encoding` distinto de `chunked` exacto → 400 (T01).
-//! - obs-fold, espacios en nombres, CR/LF suelto, caracteres de control → 400 (T02).
+//! - `Content-Length` and `Transfer-Encoding` together → 400 (T01).
+//! - duplicated `Content-Length` or `Transfer-Encoding` → 400 (T01).
+//! - `Transfer-Encoding` other than exact `chunked` → 400 (T01).
+//! - obs-fold, spaces in names, bare CR/LF, control characters → 400 (T02).
 //! - Per-message limits: header count, header and line size → 431 (T03).
 //! - `CONNECT` and `Upgrade` (A7/A8, Phase 4) → explicit 501, never faked.
 //!
 //! Connection semantics: one backend connection **per exchange** (pool in
 //! Phase 3, A16); client keep-alive with `Connection`/version per RFC 9112.
-//! Un abort del cliente cierra el backend al instante (A19): el intercambio
+//! A client abort closes the backend instantly (A19): the exchange
 //! aborted never leaves live tasks.
 
 use std::io;
@@ -40,7 +40,7 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024;
 const CRLF: &[u8] = b"\r\n";
 const HEAD_END: &[u8] = b"\r\n\r\n";
 
-/// Cabeceras prohibidas en trailers de chunked (T01).
+/// Headers forbidden in chunked trailers (T01).
 const FORBIDDEN_TRAILERS: [&str; 6] = [
     "host",
     "content-length",
@@ -50,7 +50,7 @@ const FORBIDDEN_TRAILERS: [&str; 6] = [
     "upgrade",
 ];
 
-/// Rechazo de un mensaje: status HTTP y detalle ASCII corto.
+/// Rejection of a message: HTTP status and short ASCII detail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Reject {
     pub status: u16,
@@ -60,9 +60,9 @@ pub struct Reject {
 /// Body framing per RFC 9112 §6 (the only source of limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyFraming {
-    /// Sin cuerpo.
+    /// No body.
     None,
-    /// `Content-Length: n` exacto.
+    /// Exact `Content-Length: n`.
     ContentLength(u64),
     /// `Transfer-Encoding: chunked` (the only accepted TE).
     Chunked,
@@ -81,7 +81,7 @@ pub struct RequestHead {
     pub wants_close: bool,
 }
 
-/// Respuesta parseada y validada.
+/// Parsed and validated response.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResponseHead {
     pub status: u16,
@@ -456,7 +456,7 @@ pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHe
 // Serving one client connection
 // ---------------------------------------------------------------------------
 
-/// Error de copia de cuerpo: distingue framing, corte, inactividad y abort.
+/// Body copy error: distinguishes framing, cut, inactivity and abort.
 #[derive(Debug)]
 enum CopyError {
     Framing(Reject),
@@ -717,7 +717,7 @@ async fn write_error<W: AsyncWrite + Unpin>(writer: &mut W, status: u16, reason:
 ///
 /// Takes the client stream halves (plain TCP or already-accepted TLS) and the
 /// peer addresses for PROXY protocol (A9). With no servers available the
-/// intercambio recibe 503; si el servidor elegido falla, 502 (SPEC §7.4).
+/// exchange gets 503; when the chosen server fails, 502 (SPEC §7.4).
 pub async fn serve_http<CR, CW>(
     client_read: CR,
     client_write: CW,
@@ -768,7 +768,7 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
-        // --- Backend: reutilizar del pool (A16) o marcar de nuevo ---
+        // --- Backend: reuse from the pool (A16) or dial again ---
         let conn = match checkout_or_connect(cfg, peer, local, &metrics).await {
             Ok(conn) => conn,
             Err(OutboundError::NoServer) => {
@@ -842,11 +842,11 @@ pub async fn serve_http<CR, CW>(
                 return;
             }
             Err(CopyError::Idle) => return,
-            // A19: abort del cliente → se descarta el backend al salir.
+            // A19: client abort → the backend is dropped on exit.
             Err(CopyError::Io) => return,
         }
 
-        // --- Fase servidor: cabecera de respuesta ---
+        // --- Server phase: response head ---
         let (response_head_bytes, response_carry) =
             match read_head(&mut backend_read, cfg.server_header_timeout).await {
                 Ok(pair) => pair,
@@ -936,7 +936,7 @@ pub async fn serve_http<CR, CW>(
                 .pool
                 .checkin(conn.addr, backend_read, backend_write, Instant::now());
             // The backend connection is no longer ours: the rest of the loop only
-            // toca el cliente.
+            // touches the client.
             if request.wants_close {
                 let _ = client_write.shutdown().await;
                 return;
@@ -980,7 +980,7 @@ mod tests {
 
     #[test]
     fn smuggling_corpus_is_rejected() {
-        // (cabecera, status esperado) — corpus T01–T03.
+        // (head, expected status) — T01–T03 corpus.
         let corpus: &[(&str, u16)] = &[
             (
                 "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n",
@@ -1019,13 +1019,13 @@ mod tests {
         ];
         for (head, expected) in corpus {
             let err = req(head).expect_err(head);
-            assert_eq!(err.status, *expected, "caso: {head:?}");
+            assert_eq!(err.status, *expected, "case: {head:?}");
         }
     }
 
     #[test]
     fn request_without_trailing_crlf_parses() {
-        // read_head entrega la cabecera sin el terminador final.
+        // read_head delivers the head without the final terminator.
         let parsed = req("GET /a HTTP/1.1\r\nHost: x").expect("must parse");
         assert_eq!(parsed.target, "/a");
     }
@@ -1036,7 +1036,7 @@ mod tests {
         for i in 0..MAX_HEADERS {
             head.push_str(&format!("X-H{i}: v\r\n"));
         }
-        let err = req(&head).expect_err("demasiadas cabeceras");
+        let err = req(&head).expect_err("too many headers");
         assert_eq!(err.status, 431);
     }
 

@@ -10,7 +10,7 @@ binaries = ["eqproxy"]
 timeout_seconds = 60
 
 # Real happy path: a valid config is accepted and reports the summary.
-# /dev/stdin permite entregar la config por stdin sin rutas del checkout.
+# /dev/stdin delivers the config via stdin without checkout paths.
 [[e2e.scenarios]]
 name = "validate-accepts-valid-config"
 argv = ["config", "validate", "--config", "/dev/stdin"]
@@ -68,12 +68,31 @@ expect_exit = 1
 expect_stderr_regex = "could not read the file"
 
 # Unimplemented functionality: explicit exit 2 (never fakes success).
+# (`config explain` left this list when it was implemented in Phase 3;
+# `config plan` still holds the contract.)
 [[e2e.scenarios]]
 name = "unimplemented-command-exits-2"
-argv = ["config", "explain", "--config", "eqproxy.toml"]
+argv = ["config", "plan", "--config", "eqproxy.toml"]
 expect_failure = true
 expect_exit = 2
 expect_stderr_regex = "not implemented yet"
+
+# Phase 3: `config explain` simulates one routing decision offline with no
+# side effects and reports listener, backend and selected server.
+[[e2e.scenarios]]
+name = "explain-simulates-routing-without-side-effects"
+argv = ["config", "explain", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:8080"
+mode = "http"
+backend = "api"
+[backend.api]
+servers = [{ addr = "127.0.0.1:9000", weight = 3 }]
+'''
+expect_exit = 0
+expect_stdout_regex = "simulation: true \\(no requests issued, no state changed\\)"
 
 # Phase 2b: weighted servers and health check are accepted and summarized.
 [[e2e.scenarios]]

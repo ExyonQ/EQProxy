@@ -113,7 +113,7 @@ impl fmt::Display for MetricsSnapshot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "conexiones[aceptadas={} activas={} completadas={} rechazadas={} fallos_conexion={} idle_timeouts={}] bytes[c2b={} b2c={}]",
+            "connections[accepted={} active={} completed={} rejected={} connect_failures={} idle_timeouts={}] bytes[c2b={} b2c={}]",
             self.connections_accepted,
             self.connections_active,
             self.connections_completed,
@@ -125,17 +125,17 @@ impl fmt::Display for MetricsSnapshot {
         )?;
         write!(
             f,
-            " http[proxied={} rechazadas={} header_timeouts={}]",
+            " http[proxied={} rejected={} header_timeouts={}]",
             self.http_requests_proxied, self.http_requests_rejected, self.header_timeouts
         )?;
         write!(
             f,
-            " tls[handshakes_fallidas={}] sin_servidor={}",
+            " tls[handshake_failures={}] no_server={}",
             self.tls_handshake_failures, self.no_available_server
         )?;
         write!(
             f,
-            " pool[reutilizadas={} abiertas={}]",
+            " pool[reused={} opened={}]",
             self.backend_connections_reused, self.backend_connections_opened
         )
     }
@@ -152,12 +152,12 @@ mod tests {
         assert!(metrics.try_acquire_connection(2));
         assert!(
             !metrics.try_acquire_connection(2),
-            "maxconn=2 no admite una tercera"
+            "maxconn=2 admits no third one"
         );
         metrics.release_connection();
         assert!(
             metrics.try_acquire_connection(2),
-            "liberar plaza permite aceptar de nuevo"
+            "releasing the slot allows accepting again"
         );
     }
 
@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(snap.connections_active, 1);
         assert_eq!(snap.bytes_client_to_backend, 42);
         let shown = snap.to_string();
-        assert!(shown.contains("activas=1"), "display: {shown}");
+        assert!(shown.contains("active=1"), "display: {shown}");
         assert!(shown.contains("c2b=42"), "display: {shown}");
     }
 

@@ -104,7 +104,7 @@ async fn start_tls_echo() -> SocketAddr {
     addr
 }
 
-/// Puerto de loopback libre (sin listener): los connects fallan al instante.
+/// Free loopback port (no listener): connects fail instantly.
 async fn free_port() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
@@ -154,7 +154,7 @@ async fn stop_proxy(handle: shutdown::ShutdownHandle, serve: JoinHandle<()>) {
 fn test_client(server_name: Option<&str>, alpn: &[&str]) -> ClientTls {
     let alpn: Vec<String> = alpn.iter().map(|p| (*p).to_owned()).collect();
     tls::client_config(Some(CERT), true, server_name, &alpn, TlsVersion::V1_2)
-        .expect("cliente tls de test")
+        .expect("test TLS client")
 }
 
 async fn tls_roundtrip(stream: &mut tokio_rustls::client::TlsStream<TcpStream>, payload: &[u8]) {
@@ -162,8 +162,8 @@ async fn tls_roundtrip(stream: &mut tokio_rustls::client::TlsStream<TcpStream>, 
     let mut received = vec![0u8; payload.len()];
     tokio::time::timeout(WAIT, stream.read_exact(&mut received))
         .await
-        .expect("eco tls a tiempo")
-        .expect("eco tls completo");
+        .expect("TLS echo in time")
+        .expect("full TLS echo");
     assert_eq!(received, payload, "TLS echo must be byte for byte");
 }
 
@@ -171,7 +171,7 @@ async fn tls_roundtrip(stream: &mut tokio_rustls::client::TlsStream<TcpStream>, 
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_termination_e2e() {
@@ -192,7 +192,7 @@ async fn tls_termination_e2e() {
             .connect(name, TcpStream::connect(proxy_addr).await.expect("connect")),
     )
     .await
-    .expect("handshake a tiempo")
+    .expect("handshake in time")
     .expect("handshake TLS contra el listener");
     let mut stream = stream;
     tls_roundtrip(&mut stream, &vec![0xABu8; 4096]).await;
@@ -210,7 +210,7 @@ async fn tls_termination_e2e() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alpn_negotiation() {
@@ -231,7 +231,7 @@ async fn alpn_negotiation() {
             .connect(name, TcpStream::connect(proxy_addr).await.expect("connect")),
     )
     .await
-    .expect("handshake a tiempo")
+    .expect("handshake in time")
     .expect("handshake TLS");
     assert_eq!(
         stream.get_ref().1.alpn_protocol(),
@@ -250,7 +250,7 @@ async fn alpn_negotiation() {
             .connect(name, TcpStream::connect(proxy_addr).await.expect("connect")),
     )
     .await
-    .expect("handshake a tiempo");
+    .expect("handshake in time");
     assert!(
         result.is_err(),
         "h2-only must not negotiate against an h1 listener"
@@ -263,7 +263,7 @@ async fn alpn_negotiation() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_backend_e2e() {
@@ -281,8 +281,8 @@ async fn tls_backend_e2e() {
     let mut received = vec![0u8; payload.len()];
     tokio::time::timeout(WAIT, client.read_exact(&mut received))
         .await
-        .expect("eco a tiempo")
-        .expect("eco completo");
+        .expect("echo in time")
+        .expect("full echo");
     assert_eq!(received, payload, "backend TLS echo must be intact");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -293,7 +293,7 @@ async fn tls_backend_e2e() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_backend_verification_failure_is_counted_and_rejected() {
@@ -310,7 +310,7 @@ async fn tls_backend_verification_failure_is_counted_and_rejected() {
     client.write_all(b"ping").await.expect("write");
     let mut buf = [0u8; 16];
     let read = tokio::time::timeout(WAIT, client.read(&mut buf)).await;
-    // EOF o RST (con datos sin leer en el buffer el SO responde RST), pero
+    // EOF or RST (with unread data in the buffer the OS answers RST), but
     // never echo data: TLS to the backend failed, there is no tunnel.
     match read {
         Ok(Ok(0)) => {}
@@ -329,7 +329,7 @@ async fn tls_backend_verification_failure_is_counted_and_rejected() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn balancer_roundrobin() {
@@ -355,7 +355,7 @@ async fn balancer_roundrobin() {
         let mut id = [0u8; 1];
         tokio::time::timeout(WAIT, client.read_exact(&mut id))
             .await
-            .expect("id a tiempo")
+            .expect("id in time")
             .expect("id");
         seen.push(id[0] as char);
     }
@@ -370,7 +370,7 @@ async fn balancer_roundrobin() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn balancer_weights() {
@@ -394,7 +394,7 @@ async fn balancer_weights() {
         let mut id = [0u8; 1];
         tokio::time::timeout(WAIT, client.read_exact(&mut id))
             .await
-            .expect("id a tiempo")
+            .expect("id in time")
             .expect("id");
         counts[usize::from(id[0] - b'A')] += 1;
     }
@@ -405,12 +405,12 @@ async fn balancer_weights() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn healthchecks_e2e() {
     let a = start_marker_echo(b'A').await;
-    let b_addr = free_port().await; // sin listener: los checks fallan
+    let b_addr = free_port().await; // no listener: checks fail
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(
         "api",
@@ -438,7 +438,7 @@ async fn healthchecks_e2e() {
         let mut id = [0u8; 1];
         tokio::time::timeout(WAIT, client.read_exact(&mut id))
             .await
-            .expect("id a tiempo")
+            .expect("id in time")
             .expect("id");
         assert_eq!(id[0], b'A', "with B down all traffic goes to A");
     }
@@ -461,7 +461,7 @@ async fn healthchecks_e2e() {
         let mut id = [0u8; 1];
         tokio::time::timeout(WAIT, client.read_exact(&mut id))
             .await
-            .expect("id a tiempo")
+            .expect("id in time")
             .expect("id");
         if id[0] == b'B' {
             seen_b = true;
@@ -475,11 +475,11 @@ async fn healthchecks_e2e() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn proxy_protocol_v1() {
-    // Backend que espera la cabecera PROXY v1 y responde con ella.
+    // Backend that waits for the PROXY v1 header and answers with it.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let backend_addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
@@ -516,8 +516,8 @@ async fn proxy_protocol_v1() {
     let mut response = vec![0u8; expected.len()];
     tokio::time::timeout(WAIT, client.read_exact(&mut response))
         .await
-        .expect("respuesta a tiempo")
-        .expect("respuesta completa");
+        .expect("response in time")
+        .expect("full response");
     assert_eq!(
         response,
         expected.as_bytes(),
@@ -532,7 +532,7 @@ async fn proxy_protocol_v1() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_servers_down_returns_503_in_http_mode() {
@@ -566,7 +566,7 @@ async fn all_servers_down_returns_503_in_http_mode() {
     let mut response = vec![0u8; 2048];
     let n = tokio::time::timeout(WAIT, client.read(&mut response))
         .await
-        .expect("respuesta a tiempo")
+        .expect("response in time")
         .expect("read");
     let text = String::from_utf8_lossy(&response[..n]).to_string();
     assert!(
@@ -582,7 +582,7 @@ async fn all_servers_down_returns_503_in_http_mode() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_servers_down_closes_connection_in_tcp_mode() {
@@ -610,7 +610,7 @@ async fn all_servers_down_closes_connection_in_tcp_mode() {
     let mut buf = [0u8; 8];
     let read = tokio::time::timeout(WAIT, client.read(&mut buf))
         .await
-        .expect("cierre a tiempo")
+        .expect("timely close")
         .expect("read");
     assert_eq!(read, 0, "TCP mode must close without data");
 
@@ -622,7 +622,7 @@ async fn all_servers_down_closes_connection_in_tcp_mode() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drained_server_is_skipped() {
@@ -648,7 +648,7 @@ async fn drained_server_is_skipped() {
         let mut id = [0u8; 1];
         tokio::time::timeout(WAIT, client.read_exact(&mut id))
             .await
-            .expect("id a tiempo")
+            .expect("id in time")
             .expect("id");
         assert_eq!(id[0], b'A', "weight = 0 must never receive traffic");
     }
@@ -658,7 +658,7 @@ async fn drained_server_is_skipped() {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn client_garbage_handshake_is_counted_as_tls_failure() {

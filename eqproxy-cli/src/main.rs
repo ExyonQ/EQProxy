@@ -61,10 +61,22 @@ enum ConfigCommand {
         #[arg(short, long)]
         config: PathBuf,
     },
-    /// Shows the effective configuration (Phase 3)
+    /// Simulates one routing decision without side effects (Phase 3, SPEC §8)
     Explain {
         #[arg(short, long)]
         config: PathBuf,
+        /// Listener to explain (required when the config defines several)
+        #[arg(long)]
+        listener: Option<String>,
+        /// Simulated request method
+        #[arg(long, default_value = "GET")]
+        method: String,
+        /// Simulated request host
+        #[arg(long, default_value = "-")]
+        host: String,
+        /// Simulated request path
+        #[arg(long, default_value = "/")]
+        path: String,
     },
     /// Compares two configurations (Phase 3)
     Diff { left: PathBuf, right: PathBuf },
@@ -108,7 +120,13 @@ async fn main() -> ExitCode {
 fn config_command(command: ConfigCommand) -> u8 {
     match command {
         ConfigCommand::Validate { config } => validate(&config),
-        ConfigCommand::Explain { .. } => not_implemented("config explain", "Phase 3"),
+        ConfigCommand::Explain {
+            config,
+            listener,
+            method,
+            host,
+            path,
+        } => explain(&config, listener.as_deref(), &method, &host, &path),
         ConfigCommand::Diff { .. } => not_implemented("config diff", "Phase 3"),
         ConfigCommand::Plan { .. } => not_implemented("config plan", "Phase 3"),
         ConfigCommand::Apply { .. } => not_implemented("config apply", "Phase 3"),
@@ -173,6 +191,175 @@ fn validate(path: &Path) -> u8 {
         path.display()
     );
     0
+}
+
+/// Simulates one routing decision with no external effects (SPEC §8).
+///
+/// Loads, validates and resolves the config, picks the listener (explicit
+/// `--listener` when several exist), then reports the listener, the backend
+/// with its servers, and the first weighted round-robin pick computed on a
+/// throwaway balancer. No sockets are opened and no shared state is touched.
+fn explain(path: &Path, want: Option<&str>, method: &str, host: &str, req_path: &str) -> u8 {
+    let (config, result) = match load_and_check(path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !result.is_valid() {
+        for err in &result.errors {
+            eprintln!("{err}");
+        }
+        return 1;
+    }
+    let listeners = match resolve(&config, base_dir(path)) {
+        Ok(listeners) => listeners,
+        Err(msg) => {
+            eprintln!("error: inconsistent configuration after validation: {msg}");
+            return 1;
+        }
+    };
+    let listener = match select_listener(&listeners, want) {
+        Ok(listener) => listener,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return 1;
+        }
+    };
+    println!(
+        "{}",
+        explain_report(&config, listener, method, host, req_path)
+    );
+    0
+}
+
+/// Picks the listener to explain: by name when requested, the only one when
+/// unambiguous, otherwise an error that lists the candidates (never guesses).
+fn select_listener<'a>(
+    listeners: &'a [ResolvedListener],
+    want: Option<&str>,
+) -> Result<&'a ResolvedListener, String> {
+    if let Some(name) = want {
+        return listeners.iter().find(|l| l.name == name).ok_or_else(|| {
+            let names = listener_names(listeners);
+            format!("unknown listener \"{name}\"; available: {names}")
+        });
+    }
+    if listeners.len() == 1 {
+        return Ok(&listeners[0]);
+    }
+    let names = listener_names(listeners);
+    Err(format!(
+        "{} listeners; select one with --listener <name>: {names}",
+        listeners.len()
+    ))
+}
+
+fn listener_names(listeners: &[ResolvedListener]) -> String {
+    listeners
+        .iter()
+        .map(|l| l.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Renders the simulation report. Pure function of the resolved config
+/// (verified by unit test); the only I/O of `explain` is printing it.
+fn explain_report(
+    config: &Config,
+    listener: &ResolvedListener,
+    method: &str,
+    host: &str,
+    req_path: &str,
+) -> String {
+    use std::fmt::Write as _;
+    let backend = &listener.backend;
+    let mode = match listener.mode {
+        ProxyMode::Tcp => "tcp",
+        ProxyMode::Http => "http",
+    };
+    let (fall, rise) = config
+        .backend
+        .get(&listener.backend_name)
+        .and_then(|b| b.health_check.as_ref())
+        .map(|hc| (hc.fall, hc.rise))
+        .unwrap_or((3, 2));
+    // Throwaway balancer: the simulated pick advances no shared state.
+    let sim = eqproxy_net::Balancer::new(backend.servers.clone(), fall, rise);
+    let pick = sim.pick();
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "simulation: true (no requests issued, no state changed)"
+    );
+    let _ = writeln!(out, "request: {method} {req_path} host={host}");
+    let _ = writeln!(
+        out,
+        "listener \"{}\": listen={} mode={} maxconn={} tls={}",
+        listener.name,
+        listener.listen,
+        mode,
+        listener.maxconn,
+        if listener.server_tls.is_some() {
+            "yes"
+        } else {
+            "no"
+        },
+    );
+    let proxy_protocol = match backend.proxy_protocol {
+        ProxyProtocolMode::None => "none",
+        ProxyProtocolMode::V1 => "v1",
+    };
+    let health = backend
+        .health_check
+        .as_ref()
+        .map(|hc| {
+            format!(
+                "interval={:?} timeout={:?} fall={} rise={}",
+                hc.interval, hc.timeout, fall, rise
+            )
+        })
+        .unwrap_or_else(|| "none".to_owned());
+    let _ = writeln!(
+        out,
+        "backend \"{}\": balance=roundrobin servers={} tls={} proxy_protocol={} health_check={}",
+        backend.name,
+        backend.servers.len(),
+        if backend.tls.is_some() { "yes" } else { "no" },
+        proxy_protocol,
+        health,
+    );
+    for server in &backend.servers {
+        let state = if sim.is_up(server.addr) {
+            "UP(initial)"
+        } else {
+            "DOWN(initial)"
+        };
+        let _ = writeln!(
+            out,
+            "server {} weight={} state={state}",
+            server.addr, server.weight
+        );
+    }
+    match pick {
+        Some(addr) => {
+            let _ = writeln!(
+                out,
+                "decision: server {addr} reason=\"first weighted round-robin pick on a throwaway balancer (simulation)\""
+            );
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "decision: none reason=\"no operational server (all drained or zero-weight)\""
+            );
+        }
+    }
+    out
 }
 
 /// Base directory for relative config paths (certs, keys, CAs).
@@ -394,6 +581,109 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         Err(err) => {
             eprintln!("error: {err}");
             1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::time::Duration;
+
+    fn two_server_listener() -> (Config, ResolvedListener) {
+        let mut backend = BTreeMap::new();
+        backend.insert(
+            "api".to_owned(),
+            eqproxy_config::schema::BackendConfig {
+                servers: Some(vec![
+                    eqproxy_config::schema::ServerConfig {
+                        addr: "127.0.0.1:9000".to_owned(),
+                        weight: 3,
+                    },
+                    eqproxy_config::schema::ServerConfig {
+                        addr: "127.0.0.1:9001".to_owned(),
+                        weight: 1,
+                    },
+                ]),
+                ..eqproxy_config::schema::BackendConfig::default()
+            },
+        );
+        let config = Config {
+            schema_version: 1,
+            listener: BTreeMap::new(),
+            backend,
+            shutdown_grace: Duration::from_secs(10),
+        };
+        let backend = Arc::new(ResolvedBackend::new(
+            "api",
+            vec![
+                ResolvedServer {
+                    addr: "127.0.0.1:9000".parse().expect("addr"),
+                    weight: 3,
+                },
+                ResolvedServer {
+                    addr: "127.0.0.1:9001".parse().expect("addr"),
+                    weight: 1,
+                },
+            ],
+            3,
+            2,
+        ));
+        let listener = ResolvedListener::new(
+            "web",
+            "127.0.0.1:8080".parse().expect("addr"),
+            "api",
+            "127.0.0.1:9000".parse().expect("addr"),
+            ProxyMode::Http,
+            1024,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+        )
+        .with_backend(backend);
+        (config, listener)
+    }
+
+    #[test]
+    fn select_listener_prefers_the_only_one() {
+        let (_, listener) = two_server_listener();
+        let all = [listener];
+        assert_eq!(select_listener(&all, None).expect("one").name, "web");
+        assert_eq!(
+            select_listener(&all, Some("web")).expect("named").name,
+            "web"
+        );
+    }
+
+    #[test]
+    fn select_listener_errors_name_candidates() {
+        let (_, first) = two_server_listener();
+        let (_, second) = two_server_listener();
+        let all = [first, second];
+        let err = select_listener(&all, None).expect_err("ambiguous");
+        assert!(err.contains("--listener"), "error: {err}");
+        let err = select_listener(&all, Some("nope")).expect_err("unknown");
+        assert!(err.contains("unknown listener"), "error: {err}");
+    }
+
+    #[test]
+    fn explain_report_labels_simulation_and_decision() {
+        let (config, listener) = two_server_listener();
+        let report = explain_report(&config, &listener, "GET", "example.com", "/a");
+        for expected in [
+            "simulation: true",
+            "request: GET /a host=example.com",
+            "listener \"web\": listen=127.0.0.1:8080 mode=http",
+            "backend \"api\": balance=roundrobin servers=2",
+            "server 127.0.0.1:9000 weight=3 state=UP(initial)",
+            "decision: server 127.0.0.1:9000",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
         }
     }
 }

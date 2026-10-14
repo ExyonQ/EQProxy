@@ -25,7 +25,7 @@ pub fn channel() -> (ShutdownHandle, Shutdown) {
 }
 
 impl ShutdownHandle {
-    /// Dispara el apagado. Idempotente.
+    /// Triggers shutdown. Idempotent.
     pub fn trigger(&self) {
         self.tx.send_replace(true);
     }

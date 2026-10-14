@@ -12,7 +12,7 @@
 use std::net::SocketAddr;
 use std::sync::{Mutex, MutexGuard};
 
-/// Un servidor resuelto del backend.
+/// A resolved backend server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolvedServer {
     pub addr: SocketAddr,
@@ -146,7 +146,7 @@ impl Balancer {
             .is_some_and(|server| server.up)
     }
 
-    /// Nº de servidores operativos.
+    /// Number of operational servers.
     #[must_use]
     pub fn up_count(&self) -> usize {
         self.state().iter().filter(|s| s.up).count()
@@ -220,9 +220,9 @@ mod tests {
         let balancer = Balancer::new(vec![server(1, 1)], 2, 2);
 
         balancer.report_fail(addr);
-        assert!(balancer.is_up(addr), "1 fallo con fall=2 no derriba");
+        assert!(balancer.is_up(addr), "1 failure with fall=2 does not drop");
         balancer.report_fail(addr);
-        assert!(!balancer.is_up(addr), "2 fallos con fall=2 derriban");
+        assert!(!balancer.is_up(addr), "2 failures with fall=2 drop");
 
         // A success followed by a failure resets the rise count.
         balancer.report_ok(addr);

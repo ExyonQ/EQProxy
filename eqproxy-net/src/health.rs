@@ -65,7 +65,7 @@ mod tests {
 
     #[cfg_attr(
         miri,
-        ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+        ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
     )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn check_task_marks_server_down_and_up_again() {
@@ -107,7 +107,7 @@ mod tests {
             "the live server must stay operational"
         );
 
-        // Cerramos el listener: los checks fallan → down (fall=1).
+        // We close the listener: checks fail → down (fall=1).
         acceptor.abort();
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(!balancer.is_up(addr), "the dead server must drop");
