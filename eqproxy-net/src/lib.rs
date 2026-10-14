@@ -1,9 +1,9 @@
-//! Dataplane de EQProxy: proxy TCP/HTTP con TLS, balanceo, health checks y
-//! límites. Streaming, cancelación y apagado gradual.
+//! EQProxy dataplane: TCP/HTTP proxy with TLS, balancing, health checks and
+//! limits. Streaming, cancellation and graceful shutdown.
 //!
-//! Fase 1: TCP passthrough con timeouts y límites. Fase 2a: HTTP/1.1 estricto.
-//! Fase 2b: TLS (A11/A12/A14), balanceo RR ponderado (B1/B7), health checks TCP
-//! (B11) y envío de PROXY protocol v1 (A9). Código 100 % safe Rust.
+//! Phase 1: TCP passthrough with timeouts and limits. Phase 2a: strict HTTP/1.1.
+//! Phase 2b: TLS (A11/A12/A14), weighted RR balancing (B1/B7), TCP health
+//! checks (B11) and PROXY protocol v1 send (A9). 100 % safe Rust code.
 
 #![forbid(unsafe_code)]
 

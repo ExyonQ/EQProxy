@@ -1,11 +1,11 @@
-# Política de dependencias de EQProxy (cargo-deny).
-# Licencias permitidas = MIT OR Apache-2.0 (decisión de proyecto) + las
-# permisivas estándar del ecosistema Rust. Cualquier otra requiere ADR.
+# EQProxy dependency policy (cargo-deny).
+# Allowed licenses = MIT OR Apache-2.0 (project decision) + the
+# standard permissive ones of the Rust ecosystem. Any other requires an ADR.
 #
-# ISC y MIT-0 (ambas OSI, permisivas) se añaden en Fase 2b con la cadena
+# ISC and MIT-0 (both OSI, permissive) are added in Phase 2b with the chain
 # rustls/aws-lc (aws-lc-rs, aws-lc-sys); CDLA-Permissive-2.0 es la licencia
-# de datos del almacén de raíces de Mozilla (webpki-roots). Todo permisivo.
-# Documentado en la entrega 0.2.0.
+# Mozilla root-store data (webpki-roots). All permissive.
+# Documented in release 0.2.0.
 
 [graph]
 all-features = true

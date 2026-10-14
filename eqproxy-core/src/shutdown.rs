@@ -1,23 +1,23 @@
-//! Apagado gradual: una señal, múltiples oyentes (listeners y tareas de control).
+//! Graceful shutdown: one signal, many listeners (listeners and control tasks).
 //!
-//! Implementado sobre `tokio::sync::watch`: sin dependencias adicionales y sin
-//! bucles de sondeo.
+//! Built on `tokio::sync::watch`: no extra dependencies and no
+//! polling loops.
 
 use tokio::sync::watch;
 
-/// Receptor de la señal de apagado (clonable, barato).
+/// Shutdown signal receiver (clonable, cheap).
 #[derive(Debug, Clone)]
 pub struct Shutdown {
     rx: watch::Receiver<bool>,
 }
 
-/// Emisor de la señal de apagado.
+/// Shutdown signal sender.
 #[derive(Debug, Clone)]
 pub struct ShutdownHandle {
     tx: watch::Sender<bool>,
 }
 
-/// Crea el par (emisor, receptor) de apagado.
+/// Creates the shutdown (sender, receiver) pair.
 #[must_use]
 pub fn channel() -> (ShutdownHandle, Shutdown) {
     let (tx, rx) = watch::channel(false);
@@ -30,7 +30,7 @@ impl ShutdownHandle {
         self.tx.send_replace(true);
     }
 
-    /// ¿Está disparado el apagado?
+    /// Is the shutdown triggered?
     #[must_use]
     pub fn is_triggered(&self) -> bool {
         *self.tx.borrow()
@@ -38,13 +38,13 @@ impl ShutdownHandle {
 }
 
 impl Shutdown {
-    /// ¿Está disparado el apagado?
+    /// Is the shutdown triggered?
     #[must_use]
     pub fn is_triggered(&self) -> bool {
         *self.rx.borrow()
     }
 
-    /// Espera hasta que se dispare el apagado (inmediato si ya está disparado).
+    /// Waits until shutdown fires (immediate when already triggered).
     pub async fn wait(&mut self) {
         if self.is_triggered() {
             return;
@@ -59,9 +59,9 @@ mod tests {
     use std::future::Future;
     use std::time::Duration;
 
-    /// Ejecuta un futuro en un runtime de un solo hilo **sin driver IO**
-    /// (mio/kqueue): los tests solo usan timers y canales en memoria, así que
-    /// corren también bajo miri, que no emula ese FFI del SO.
+    /// Runs a future on a single-thread runtime **without IO driver**
+    /// (mio/kqueue): tests only use timers and in-memory channels, so they
+    /// also run under miri, which does not emulate that OS FFI.
     fn sin_driver_io<F: Future>(fut: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -80,8 +80,8 @@ mod tests {
             handle.trigger();
             tokio::time::timeout(Duration::from_secs(1), waiting)
                 .await
-                .expect("wait() debe retornar tras trigger()")
-                .expect("la tarea no debe fallar");
+                .expect("wait() must return after trigger()")
+                .expect("the task must not fail");
             assert!(shutdown.is_triggered());
             assert!(handle.is_triggered());
         })
@@ -95,7 +95,7 @@ mod tests {
             let mut waiter = shutdown;
             tokio::time::timeout(Duration::from_secs(1), waiter.wait())
                 .await
-                .expect("wait() sobre señal ya disparada debe ser inmediato");
+                .expect("wait() on an already-triggered signal must be immediate");
         })
     }
 }

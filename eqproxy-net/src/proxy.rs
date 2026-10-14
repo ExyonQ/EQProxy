@@ -1,22 +1,23 @@
-//! Proxy TCP: aceptar, conectar al backend y bombear bytes con timeouts.
+//! TCP proxy: accept, connect to the backend and pump bytes with timeouts.
 //!
-//! Semántica (documentada y testeada):
-//! - `maxconn` por listener: al llenarse, la conexión se **rechaza** (cierre
-//!   inmediato + contador); nunca hay colas ilimitadas (SPEC §7.3).
-//! - `connect_timeout`: máximo para establecer la conexión al backend (e
-//!   incluye el handshake TLS hacia él).
-//! - `idle_timeout`: por dirección; si no hay bytes en esa dirección durante la
-//!   ventana, se cierra con EOF hacia su par y se cuenta `idle_timeouts`.
-//! - Apagado gradual: se deja de aceptar, las conexiones vivas terminan dentro
-//!   de `grace`; al expirar, el proceso termina y las restantes se cierran.
-//! - `bind` es "o todo o nada": si un listener no puede abrirse, se cierran los
-//!   demás y se devuelve error (preparación de recursos previa a la activación,
-//!   SPEC §7.2).
+//! Semantics (documented and tested):
+//! - `maxconn` per listener: when full, the connection is **refused** (close
+//!   immediately + counter); there are never unbounded queues (SPEC §7.3).
+//! - `connect_timeout`: maximum to establish the backend connection
+//!   (includes the TLS handshake to it).
+//! - `idle_timeout`: per direction; with no bytes in that direction during
+//!   the window, it closes with EOF towards its peer and `idle_timeouts`
+//!   counts it.
+//! - Graceful shutdown: stops accepting, live connections finish within
+//!   `grace`; on expiry the process exits and the rest are closed.
+//! - `bind` is "all or nothing": when a listener cannot open, the
+//!   others close and an error returns (resource preparation before
+//!   activation, SPEC §7.2).
 //!
-//! Fase 2b: TLS termination (A11, handshake en la fase cliente), TLS hacia
-//! backends (A12), balanceo RR ponderado (B1/B7) con health checks TCP (B11) y
-//! envío de PROXY protocol v1 (A9). Sin servidores disponibles: HTTP → 503,
-//! TCP → cierre (contado en `no_available_server`).
+//! Phase 2b: TLS termination (A11, handshake in the client phase), TLS to
+//! backends (A12), weighted RR balancing (B1/B7) with TCP health checks
+//! (B11) and PROXY protocol v1 send (A9). With no servers available:
+//! HTTP → 503, TCP → close (counted in `no_available_server`).
 
 use std::io;
 use std::net::SocketAddr;
@@ -37,18 +38,18 @@ use crate::pool::Pool;
 use crate::proxy_proto::{self, ProxyProtocolMode};
 use crate::tls::{self, ClientTls};
 
-/// Buffer por dirección (SPEC §7.3: 16 KiB).
+/// Per-direction buffer (SPEC §7.3: 16 KiB).
 pub const READ_BUF: usize = 16 * 1024;
 
-/// Lector de una mitad de stream ya separada (TCP o TLS).
+/// Reader of an already-split stream half (TCP or TLS).
 pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
-/// Escritor de una mitad de stream ya separada (TCP o TLS).
+/// Writer of an already-split stream half (TCP or TLS).
 pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
 /// Modo de proxy de un listener (A1 `Tcp`, A2 `Http`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyMode {
-    /// Túnel TCP sin interpretación.
+    /// TCP tunnel without interpretation.
     #[default]
     Tcp,
     /// Proxy HTTP/1.1 con framing estricto.
@@ -57,8 +58,8 @@ pub enum ProxyMode {
 
 /// Backend resuelto: servidores, balanceo, TLS y PROXY protocol.
 ///
-/// Compartido entre listeners que referencian el mismo backend (un único
-/// [`Balancer`] y una única máquina de salud por backend).
+/// Shared across listeners referencing the same backend (a single
+/// [`Balancer`] and a single health machine per backend).
 #[derive(Debug)]
 pub struct ResolvedBackend {
     pub name: String,
@@ -67,12 +68,12 @@ pub struct ResolvedBackend {
     pub tls: Option<ClientTls>,
     pub health_check: Option<HealthCheck>,
     pub balancer: Arc<Balancer>,
-    /// Pool keep-alive por backend (A16), compartido entre listeners.
+    /// Per-backend keep-alive pool (A16), shared across listeners.
     pub pool: Pool,
 }
 
 impl ResolvedBackend {
-    /// Backend de un solo servidor con ajustes por defecto (compat 0.1.0).
+    /// Single-server backend with default settings (compat 0.1.0).
     #[must_use]
     pub fn single(name: impl Into<String>, server: SocketAddr) -> Self {
         Self::new(
@@ -105,14 +106,14 @@ impl ResolvedBackend {
         }
     }
 
-    /// Envío de PROXY protocol v1 hacia los servidores (A9).
+    /// PROXY protocol v1 send to the servers (A9).
     #[must_use]
     pub fn with_proxy_protocol(mut self, mode: ProxyProtocolMode) -> Self {
         self.proxy_protocol = mode;
         self
     }
 
-    /// TLS hacia los servidores (A12).
+    /// TLS to the servers (A12).
     #[must_use]
     pub fn with_tls(mut self, tls: ClientTls) -> Self {
         self.tls = Some(tls);
@@ -127,10 +128,10 @@ impl ResolvedBackend {
     }
 }
 
-/// Listener resuelto (config ya validada: direcciones parseadas, refs íntegras).
+/// Resolved listener (already-validated config: parsed addresses, sound refs).
 ///
-/// `#[non_exhaustive]`: añadir campos no es un cambio rupturante para los
-/// consumidores (política semver de ADR-0004). Se construye con [`Self::new`].
+/// `#[non_exhaustive]`: adding fields is not a breaking change for
+/// consumers (ADR-0004 semver policy). Built with [`Self::new`].
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub struct ResolvedListener {
@@ -143,19 +144,19 @@ pub struct ResolvedListener {
     pub maxconn: u32,
     pub connect_timeout: Duration,
     pub idle_timeout: Duration,
-    /// Fase cliente (solo `http`): cabecera de petición. También cubre el
+    /// Client phase (`http` only): request head. Also covers the
     /// handshake TLS del cliente (A11).
     pub client_header_timeout: Duration,
-    /// Fase servidor (solo `http`): cabecera de respuesta.
+    /// Server phase (`http` only): response head.
     pub server_header_timeout: Duration,
-    /// TLS termination en este listener (A11). `None` = TCP plano.
+    /// TLS termination at this listener (A11). `None` = plain TCP.
     pub server_tls: Option<tls::ServerTls>,
 }
 
 impl ResolvedListener {
-    /// Construye un listener con un backend de un solo servidor (compat 0.1.0).
-    /// Usa [`Self::with_backend`] para balanceo/TLS/PROXY y
-    /// [`Self::with_server_tls`] para TLS termination.
+    /// Builds a listener with a single-server backend (compat 0.1.0).
+    /// Use [`Self::with_backend`] for balancing/TLS/PROXY and
+    /// [`Self::with_server_tls`] for TLS termination.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
@@ -213,12 +214,12 @@ pub enum ProxyError {
     },
 }
 
-/// Por qué no se pudo abrir el stream hacia el backend.
+/// Why the stream to the backend could not open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutboundError {
-    /// Todos los servidores están caídos o drenados (HTTP → 503, TCP → cierre).
+    /// All servers are down or drained (HTTP → 503, TCP → close).
     NoServer,
-    /// El servidor elegido no aceptó la conexión/handshake (HTTP → 502).
+    /// The chosen server refused the connection/handshake (HTTP → 502).
     Connect,
 }
 
@@ -228,14 +229,14 @@ struct BoundListener {
     listener: TcpListener,
 }
 
-/// Dataplane con todos los sockets ya abiertos (activación pendiente).
+/// Dataplane with all sockets already open (activation pending).
 #[derive(Debug)]
 pub struct BoundProxy {
     listeners: Vec<BoundListener>,
     metrics: Arc<Metrics>,
 }
 
-/// Abre todos los listeners. Falla completo si alguno no puede abrirse.
+/// Opens all listeners. Fails whole when any one cannot open.
 pub async fn bind(
     listeners: Vec<ResolvedListener>,
     metrics: Arc<Metrics>,
@@ -260,7 +261,7 @@ pub async fn bind(
 }
 
 impl BoundProxy {
-    /// Direcciones reales tras el bind (el puerto 0 resuelve uno efímero).
+    /// Real addresses after bind (port 0 resolves an ephemeral one).
     #[must_use]
     pub fn local_addrs(&self) -> Vec<(String, SocketAddr)> {
         self.listeners
@@ -272,10 +273,10 @@ impl BoundProxy {
             .collect()
     }
 
-    /// Sirve hasta la señal de apagado; después drena hasta `grace`.
+    /// Serves until the shutdown signal; then drains until `grace`.
     pub async fn serve(self, mut shutdown: Shutdown, grace: Duration) -> Result<(), ProxyError> {
         // Health checks (B11): un task por backend con checks configurados,
-        // compartido entre los listeners del mismo backend (mismo Arc).
+        // shared across the listeners of the same backend (same Arc).
         let mut health_tasks = JoinSet::new();
         let mut seen: Vec<Arc<Balancer>> = Vec::new();
         for bound in &self.listeners {
@@ -300,7 +301,7 @@ impl BoundProxy {
 
         shutdown.wait().await;
 
-        // Los bucles de accept retornan al instante con la señal disparada.
+        // Accept loops return instantly on the triggered signal.
         let _ = tokio::time::timeout(grace, async {
             while acceptors.join_next().await.is_some() {}
         })
@@ -308,7 +309,7 @@ impl BoundProxy {
         acceptors.abort_all();
         health_tasks.abort_all();
 
-        // Drenado: las conexiones vivas pueden terminar dentro de la ventana.
+        // Draining: live connections may finish within the window.
         let deadline = tokio::time::Instant::now() + grace;
         while self.metrics.connections_active.load(Ordering::Acquire) > 0 {
             if tokio::time::Instant::now() >= deadline {
@@ -329,15 +330,15 @@ async fn accept_loop(bound: BoundListener, metrics: Arc<Metrics>, mut shutdown: 
                     Ok(pair) => pair,
                     Err(err) => {
                         // Error transitorio (EMFILE, etc.): registrar y continuar,
-                        // con pequeño respiro para no saturar la CPU.
-                        eprintln!("ERROR [{}] accept falló: {err}", bound.cfg.name);
+                        // with a small breather to avoid saturating the CPU.
+                        eprintln!("ERROR [{}] accept failed: {err}", bound.cfg.name);
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     }
                 };
                 if !metrics.try_acquire_connection(bound.cfg.maxconn) {
                     metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
-                    // Rechazo explícito: cierre inmediato, sin cola.
+                    // Explicit refusal: immediate close, no queue.
                     drop(socket);
                     continue;
                 }
@@ -352,7 +353,7 @@ async fn accept_loop(bound: BoundListener, metrics: Arc<Metrics>, mut shutdown: 
     }
 }
 
-/// Guardia RAII: libera la plaza de conexión pase lo que pase.
+/// RAII guard: releases the connection slot no matter what.
 struct ConnectionGuard {
     metrics: Arc<Metrics>,
 }
@@ -364,7 +365,7 @@ impl Drop for ConnectionGuard {
 }
 
 /// Conecta al backend elegido por el balancer: TCP + TLS opcional (A12) +
-/// cabecera PROXY v1 opcional (A9). Devuelve las mitades listas para bombear.
+/// optional PROXY v1 header (A9). Returns the halves ready to pump.
 pub async fn connect_backend(
     cfg: &ResolvedListener,
     peer: SocketAddr,
@@ -379,21 +380,21 @@ pub async fn connect_backend(
     connect_backend_to(cfg, addr, peer, local, metrics).await
 }
 
-/// Stream hacia el backend con su origen: reutilizado del pool (A16) o
-/// recién marcado. `reused` alimenta `backend_connections_reused`.
+/// Stream to the backend with its origin: reused from the pool (A16) or
+/// freshly dialed. `reused` feeds `backend_connections_reused`.
 pub struct BackendConn {
-    /// Servidor elegido por el balancer (clave del pool).
+    /// Balancer-chosen server (pool key).
     pub addr: SocketAddr,
-    /// Mitad de lectura (lista para `read_head`: alineada a mensaje).
+    /// Read half (ready for `read_head`: message-aligned).
     pub read: BufReader<BoxRead>,
-    /// Mitad de escritura.
+    /// Write half.
     pub write: BoxWrite,
-    /// `true` si viene del pool (sin dial, handshake ni PROXY de nuevo).
+    /// `true` when from the pool (no dial, handshake or PROXY again).
     pub reused: bool,
 }
 
-/// Reutiliza una conexión idle del pool o marca una nueva contra el servidor
-/// elegido por el balancer. Sin servidores disponibles: `NoServer` (503).
+/// Reuses an idle pool connection or dials a new one to the
+/// balancer-chosen server. With no servers available: `NoServer` (503).
 pub async fn checkout_or_connect(
     cfg: &ResolvedListener,
     peer: SocketAddr,
@@ -429,11 +430,11 @@ pub async fn checkout_or_connect(
     })
 }
 
-/// Variante de [`connect_backend`] contra un servidor ya elegido (el pool
-/// necesita la dirección antes de decidir entre reutilizar o marcar).
+/// Variant of [`connect_backend`] against an already-chosen server (the pool
+/// needs the address before deciding between reuse and dial).
 ///
-/// La cabecera PROXY v1 (A9) se escribe una sola vez por conexión: las
-/// conexiones reutilizadas del pool ya la llevan de su primer uso.
+/// The PROXY v1 header (A9) is written once per connection: pool-reused
+/// connections already carry it from their first use.
 async fn connect_backend_to(
     cfg: &ResolvedListener,
     addr: SocketAddr,
@@ -456,7 +457,7 @@ async fn connect_backend_to(
         Err(_elapsed) => {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             eprintln!(
-                "ERROR [{}] connect timeout hacia {} (par {peer}) tras {:?}",
+                "ERROR [{}] connect timeout to {} (peer {peer}) after {:?}",
                 cfg.name, addr, cfg.connect_timeout
             );
             return Err(OutboundError::Connect);
@@ -477,7 +478,7 @@ async fn connect_backend_to(
                     .tls_handshake_failures
                     .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "ERROR [{}] handshake TLS fallido hacia {} (par {peer}): {err}",
+                    "ERROR [{}] failed TLS handshake to {} (peer {peer}): {err}",
                     cfg.name, addr
                 );
                 return Err(OutboundError::Connect);
@@ -487,7 +488,7 @@ async fn connect_backend_to(
                     .tls_handshake_failures
                     .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "ERROR [{}] handshake TLS timeout hacia {} (par {peer}) tras {:?}",
+                    "ERROR [{}] TLS handshake timeout to {} (peer {peer}) after {:?}",
                     cfg.name, addr, cfg.connect_timeout
                 );
                 return Err(OutboundError::Connect);
@@ -554,7 +555,7 @@ async fn handle_connection(
                     .tls_handshake_failures
                     .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "ERROR [{}] handshake TLS de cliente timeout (par {peer}) tras {:?}",
+                    "ERROR [{}] client TLS handshake timeout (peer {peer}) after {:?}",
                     cfg.name, cfg.client_header_timeout
                 );
                 return;
@@ -584,7 +585,7 @@ async fn handle_connection(
         }
         Err(OutboundError::NoServer) => {
             eprintln!(
-                "ERROR [{}] sin servidores disponibles (par {peer}): conexión cerrada",
+                "ERROR [{}] no servers available (peer {peer}): connection closed",
                 cfg.name
             );
         }
@@ -592,7 +593,7 @@ async fn handle_connection(
     }
 }
 
-/// Bomba bidireccional independiente por dirección.
+/// Independent bidirectional pump per direction.
 async fn pump(
     client: (BoxRead, BoxWrite),
     server: (BoxRead, BoxWrite),
@@ -616,24 +617,24 @@ async fn pump(
         &metrics.bytes_backend_to_client,
         &metrics.idle_timeouts,
     );
-    // join!: cada dirección tiene su propio timeout, así el conjunto termina en
-    // tiempo acotado aunque un par esté en silencio.
+    // join!: each direction has its own timeout, so the set finishes in
+    // bounded time even when a peer is silent.
     let (c2b_result, b2c_result) = tokio::join!(c2b, b2c);
     for result in [c2b_result, b2c_result] {
-        // El timeout de inactividad ya está contabilizado y cerrado en copy_dir;
-        // los errores de I/O reales se registran para diagnóstico.
+        // The inactivity timeout is already counted and closed in copy_dir;
+        // real I/O errors are logged for diagnosis.
         if let Err(err) = result
             && err.kind() != io::ErrorKind::TimedOut
         {
-            eprintln!("ERROR en el túnel TCP: {err}");
+            eprintln!("ERROR in the TCP tunnel: {err}");
         }
     }
 }
 
 /// Copia `reader → writer` con timeout de inactividad por lectura.
 ///
-/// Al llegar EOF (o timeout) se hace `shutdown()` del writer para propagar el
-/// half-close hacia el par. Devuelve `TimedOut` si expiró el timeout.
+/// On EOF (or timeout) the writer gets `shutdown()` to propagate the
+/// half-close towards the peer. Returns `TimedOut` when the timeout expired.
 async fn copy_dir<R, W>(
     mut reader: R,
     mut writer: W,
@@ -654,7 +655,7 @@ where
                 let _ = writer.shutdown().await;
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    "timeout de inactividad en una dirección del túnel",
+                    "inactivity timeout in one tunnel direction",
                 ));
             }
             Ok(result) => result,
@@ -683,9 +684,9 @@ mod tests {
     use std::future::Future;
     use tokio::io::AsyncWriteExt;
 
-    /// Ejecuta un futuro en un runtime de un solo hilo **sin driver IO**
-    /// (mio/kqueue): los tests solo usan timers y duplex en memoria, así que
-    /// corren también bajo miri, que no emula ese FFI del SO.
+    /// Runs a future on a single-thread runtime **without IO driver**
+    /// (mio/kqueue): tests only use timers and in-memory duplex, so they
+    /// also run under miri, which does not emulate that OS FFI.
     fn sin_driver_io<F: Future>(fut: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
@@ -717,7 +718,7 @@ mod tests {
             drop(client); // EOF
             let copied = tokio::time::timeout(Duration::from_secs(2), copier)
                 .await
-                .expect("el copier debe terminar")
+                .expect("the copier must finish")
                 .expect("join")
                 .expect("sin error en EOF");
             assert_eq!(copied, 4);
@@ -740,7 +741,7 @@ mod tests {
                 &idles,
             )
             .await;
-            let err = result.expect_err("debe expirar por inactividad");
+            let err = result.expect_err("must expire on inactivity");
             assert_eq!(err.kind(), io::ErrorKind::TimedOut);
             assert_eq!(idles.load(Ordering::Relaxed), 1);
         })

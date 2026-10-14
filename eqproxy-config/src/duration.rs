@@ -1,16 +1,16 @@
 //! Duraciones en formato legible: `500ms`, `5s`, `2m`, `1h`.
 //!
-//! Solo enteros y sufijos exactos: sin ambigüedad de tipado (ADR-0002, C4).
+//! Only integers and exact suffixes: no typing ambiguity (ADR-0002, C4).
 
 use std::fmt;
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, Serializer};
 
-/// Ejemplo canónico para mensajes de error.
-pub const EXAMPLE: &str = "\"5s\" (sufijos válidos: ms, s, m, h)";
+/// Canonical example for error messages.
+pub const EXAMPLE: &str = "\"5s\" (valid suffixes: ms, s, m, h)";
 
-/// Error de parseo de duración (causa; el ejemplo lo añade la capa de config).
+/// Duration parse error (cause; the config layer adds the example).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurationParseError {
     pub input: String,
@@ -18,13 +18,13 @@ pub struct DurationParseError {
 
 impl fmt::Display for DurationParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "«{}» no es una duración válida", self.input)
+        write!(f, "\"{}\" is not a valid duration", self.input)
     }
 }
 
 impl std::error::Error for DurationParseError {}
 
-/// Parsea duraciones como `"<entero><ms|s|m|h>"`.
+/// Parses durations like `"<integer><ms|s|m|h>"`.
 pub fn parse(input: &str) -> Result<Duration, DurationParseError> {
     let trimmed = input.trim();
     let err = || DurationParseError {
@@ -53,13 +53,13 @@ pub fn parse(input: &str) -> Result<Duration, DurationParseError> {
     }
 }
 
-/// Deserializa un campo `String` en [`Duration`] con errores explicables.
+/// Deserializes a `String` field into [`Duration`] with explainable errors.
 pub fn deserialize<'de, D: Deserializer<'de>>(de: D) -> Result<Duration, D::Error> {
     let raw = String::deserialize(de)?;
-    parse(&raw).map_err(|e| serde::de::Error::custom(format!("{e}; ejemplo: {EXAMPLE}")))
+    parse(&raw).map_err(|e| serde::de::Error::custom(format!("{e}; example: {EXAMPLE}")))
 }
 
-/// Serializa una duración como milisegundos (para `config export` futuro).
+/// Serializes a duration as milliseconds (for a future `config export`).
 pub fn serialize<S: Serializer>(value: &Duration, ser: S) -> Result<S::Ok, S::Error> {
     ser.serialize_str(&format!("{}ms", value.as_millis()))
 }
@@ -86,10 +86,10 @@ mod tests {
             "s",
             "1.5s",
             "-5s",
-            "cinco s",
+            "five s",
             "99999999999999999h",
         ] {
-            let err = parse(bad).expect_err("debe rechazar");
+            let err = parse(bad).expect_err("must reject");
             assert_eq!(err.input, bad);
         }
     }

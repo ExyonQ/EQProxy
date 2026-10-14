@@ -1,6 +1,6 @@
-//! Tipos compartidos de EQProxy: contadores del dataplane y apagado gradual.
+//! Shared EQProxy types: dataplane counters and graceful shutdown.
 //!
-//! Código 100 % safe Rust (`#![forbid(unsafe_code)]`, decisión de proyecto).
+//! 100 % safe Rust code (`#![forbid(unsafe_code)]`, project decision).
 
 #![forbid(unsafe_code)]
 

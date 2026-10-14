@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Configuración de EQProxy: esquema TOML tipado, validación semántica y errores accionables"
+description = "EQProxy configuration: typed TOML schema, semantic validation and actionable errors"
 
 [dependencies]
 serde = { workspace = true }

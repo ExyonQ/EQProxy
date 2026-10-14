@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Tipos compartidos de EQProxy: métricas y apagado gradual"
+description = "Shared EQProxy types: metrics and graceful shutdown"
 
 [dependencies]
 tokio = { workspace = true }

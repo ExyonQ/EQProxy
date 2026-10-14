@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Dataplane de EQProxy: listeners, conexiones y proxy TCP con límites"
+description = "EQProxy dataplane: listeners, connections and bounded TCP proxy"
 
 [dependencies]
 eqproxy-core = { path = "../eqproxy-core", version = "0.3.0" }

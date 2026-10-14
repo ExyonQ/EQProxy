@@ -1,5 +1,5 @@
-//! Validación semántica: referencias inexistentes, rangos y advertencias de
-//! configuraciones peligrosas. Errores con línea, campo, causa y ejemplo.
+//! Semantic validation: dangling references, ranges and warnings for
+//! dangerous configurations. Errors with line, field, cause and example.
 
 use std::net::SocketAddr;
 use std::path::Path;
@@ -8,12 +8,12 @@ use crate::error::{ConfigError, Location};
 use crate::find_line;
 use crate::schema::{Config, MAX_SECTIONS, MAX_SERVER_WEIGHT, SCHEMA_VERSION};
 
-/// Resultado de validar una configuración completa.
+/// Result of validating a full configuration.
 #[derive(Debug, Default)]
 pub struct CheckResult {
-    /// Errores que impiden usar la configuración.
+    /// Errors that prevent using the configuration.
     pub errors: Vec<ConfigError>,
-    /// Advertencias: la configuración es usable pero arriesgada.
+    /// Warnings: the configuration is usable but risky.
     pub warnings: Vec<String>,
 }
 
@@ -24,7 +24,7 @@ impl CheckResult {
     }
 }
 
-/// Valida `config` (parseada) contra el texto `source` para poder ubicar líneas.
+/// Validates `config` (parsed) against the `source` text to locate lines.
 pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
     let mut result = CheckResult::default();
 
@@ -35,10 +35,10 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             location: None,
             field: None,
             cause: format!(
-                "demasiadas secciones: {sections} entre [listener.*] y [backend.*] (máximo {MAX_SECTIONS})"
+                "too many sections: {sections} across [listener.*] and [backend.*] (maximum {MAX_SECTIONS})"
             ),
             example: format!(
-                "reduce a {MAX_SECTIONS} secciones combinadas; parte la configuración por servicios (ADR-0002)"
+                "reduce to {MAX_SECTIONS} combined sections; split the configuration per service (ADR-0002)"
             ),
         });
     }
@@ -57,7 +57,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         err(
             "schema_version".to_owned(),
             format!(
-                "schema_version = {} no soportado por este binario (soportado: {SCHEMA_VERSION})",
+                "schema_version = {} not supported by this binary (supported: {SCHEMA_VERSION})",
                 config.schema_version
             ),
             "schema_version = 1".to_owned(),
@@ -68,13 +68,13 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
     if config.listener.is_empty() {
         result
             .warnings
-            .push("no hay secciones [listener.*]: el dataplane no aceptará conexiones".to_owned());
+            .push("no [listener.*] sections: the dataplane will not accept connections".to_owned());
     }
 
     if config.shutdown_grace.is_zero() {
         err(
             "shutdown_grace".to_owned(),
-            "shutdown_grace debe ser mayor que 0".to_owned(),
+            "shutdown_grace must be greater than 0".to_owned(),
             "shutdown_grace = \"10s\"".to_owned(),
             "shutdown_grace",
         );
@@ -88,7 +88,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             err(
                 field("listen"),
                 format!(
-                    "«{}» no es una dirección válida (se espera IP:PUERTO)",
+                    "\"{}\" is not a valid address (expected IP:PORT)",
                     listener.listen
                 ),
                 "listen = \"127.0.0.1:8080\"".to_owned(),
@@ -96,14 +96,14 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             );
         }
 
-        // Las validaciones de backend son por sección (no por listener):
-        // se comprueban en el bucle de backends de abajo.
+        // Backend validations run per section (not per listener):
+        // they are checked in the backend loop below.
         if !config.backend.contains_key(&listener.backend) {
             err(
                 field("backend"),
-                format!("el backend «{}» no existe", listener.backend),
+                format!("backend \"{}\" does not exist", listener.backend),
                 format!(
-                    "backend = \"{}\" requiere una sección [backend.{}] con server = \"127.0.0.1:9000\"",
+                    "backend = \"{}\" requires a [backend.{}] section with server = \"127.0.0.1:9000\"",
                     listener.backend, listener.backend
                 ),
                 &section,
@@ -113,7 +113,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         if listener.maxconn == 0 {
             err(
                 field("maxconn"),
-                "maxconn debe ser al menos 1".to_owned(),
+                "maxconn must be at least 1".to_owned(),
                 "maxconn = 1024".to_owned(),
                 &section,
             );
@@ -122,7 +122,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         if listener.connect_timeout.is_zero() {
             err(
                 field("connect_timeout"),
-                "connect_timeout debe ser mayor que 0".to_owned(),
+                "connect_timeout must be greater than 0".to_owned(),
                 "connect_timeout = \"5s\"".to_owned(),
                 &section,
             );
@@ -131,7 +131,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         if listener.idle_timeout.is_zero() {
             err(
                 field("idle_timeout"),
-                "idle_timeout debe ser mayor que 0".to_owned(),
+                "idle_timeout must be greater than 0".to_owned(),
                 "idle_timeout = \"60s\"".to_owned(),
                 &section,
             );
@@ -140,7 +140,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         if listener.client_header_timeout.is_zero() {
             err(
                 field("client_header_timeout"),
-                "client_header_timeout debe ser mayor que 0".to_owned(),
+                "client_header_timeout must be greater than 0".to_owned(),
                 "client_header_timeout = \"5s\"".to_owned(),
                 &section,
             );
@@ -149,7 +149,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         if listener.server_header_timeout.is_zero() {
             err(
                 field("server_header_timeout"),
-                "server_header_timeout debe ser mayor que 0".to_owned(),
+                "server_header_timeout must be greater than 0".to_owned(),
                 "server_header_timeout = \"30s\"".to_owned(),
                 &section,
             );
@@ -158,12 +158,12 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         if let Ok(addr) = listener.listen.parse::<SocketAddr>() {
             if !addr.ip().is_loopback() && listener.tls.is_none() {
                 result.warnings.push(format!(
-                    "listener «{name}» escucha en {addr} sin TLS: expónlo solo en redes de confianza o activa [listener.{name}.tls]"
+                    "listener \"{name}\" listens on {addr} without TLS: expose it only on trusted networks or enable [listener.{name}.tls]"
                 ));
             }
             if listener.maxconn > 65_535 {
                 result.warnings.push(format!(
-                    "listener «{name}» maxconn={} necesita ~{} descriptores; verifica `ulimit -n`",
+                    "listener \"{name}\" maxconn={} needs ~{} descriptors; check `ulimit -n`",
                     listener.maxconn,
                     u64::from(listener.maxconn) * 2
                 ));
@@ -178,14 +178,14 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         match (&backend.server, &backend.servers) {
             (None, None) => err(
                 field("server"),
-                "el backend no define servidores".to_owned(),
-                "server = \"127.0.0.1:9000\" (un servidor) o servers = [{ addr = \"127.0.0.1:9000\", weight = 1 }]".to_owned(),
+                "the backend defines no servers".to_owned(),
+                "server = \"127.0.0.1:9000\" (one server) or servers = [{ addr = \"127.0.0.1:9000\", weight = 1 }]".to_owned(),
                 &section,
             ),
             (Some(_), Some(_)) => err(
                 field("servers"),
-                "`server` y `servers` son excluyentes: define solo uno".to_owned(),
-                "servers = [{ addr = \"127.0.0.1:9000\", weight = 1 }] (elimina `server`)".to_owned(),
+                "`server` and `servers` are mutually exclusive: define only one".to_owned(),
+                "servers = [{ addr = \"127.0.0.1:9000\", weight = 1 }] (remove `server`)".to_owned(),
                 &section,
             ),
             _ => {}
@@ -196,7 +196,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         {
             err(
                 field("servers"),
-                "`servers` está vacío: el backend no tendría destino".to_owned(),
+                "`servers` is empty: the backend would have no destination".to_owned(),
                 "servers = [{ addr = \"127.0.0.1:9000\", weight = 1 }]".to_owned(),
                 &section,
             );
@@ -212,7 +212,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             if addr.parse::<SocketAddr>().is_err() {
                 err(
                     field(&suffix),
-                    format!("«{addr}» no es una dirección válida (se espera IP:PUERTO)"),
+                    format!("\"{addr}\" is not a valid address (expected IP:PORT)"),
                     "addr = \"127.0.0.1:9000\"".to_owned(),
                     &section,
                 );
@@ -220,16 +220,16 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             if weight > MAX_SERVER_WEIGHT {
                 err(
                     field(&format!("servers[{idx}].weight")),
-                    format!("weight = {weight} fuera de rango (máximo {MAX_SERVER_WEIGHT})"),
-                    "weight = 1 (rango 0..=256; 0 = drenado)".to_owned(),
+                    format!("weight = {weight} out of range (maximum {MAX_SERVER_WEIGHT})"),
+                    "weight = 1 (range 0..=256; 0 = drained)".to_owned(),
                     &section,
                 );
             }
             if !seen_addrs.insert(addr) {
                 err(
                     field(&suffix),
-                    format!("servidor duplicado: «{addr}» aparece más de una vez"),
-                    "cada `addr` debe ser única dentro del backend".to_owned(),
+                    format!("duplicate server: \"{addr}\" appears more than once"),
+                    "each `addr` must be unique within the backend".to_owned(),
                     &section,
                 );
             }
@@ -239,7 +239,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             if hc.interval.is_zero() {
                 err(
                     field("health_check.interval"),
-                    "health_check.interval debe ser mayor que 0".to_owned(),
+                    "health_check.interval must be greater than 0".to_owned(),
                     "interval = \"2s\"".to_owned(),
                     &section,
                 );
@@ -247,7 +247,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             if hc.timeout.is_zero() {
                 err(
                     field("health_check.timeout"),
-                    "health_check.timeout debe ser mayor que 0".to_owned(),
+                    "health_check.timeout must be greater than 0".to_owned(),
                     "timeout = \"1s\"".to_owned(),
                     &section,
                 );
@@ -255,7 +255,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             if hc.fall == 0 {
                 err(
                     field("health_check.fall"),
-                    "health_check.fall debe ser al menos 1".to_owned(),
+                    "health_check.fall must be at least 1".to_owned(),
                     "fall = 3".to_owned(),
                     &section,
                 );
@@ -263,7 +263,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             if hc.rise == 0 {
                 err(
                     field("health_check.rise"),
-                    "health_check.rise debe ser al menos 1".to_owned(),
+                    "health_check.rise must be at least 1".to_owned(),
                     "rise = 2".to_owned(),
                     &section,
                 );
@@ -276,7 +276,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             }
             if !tls.verify && tls.ca_file.is_some() {
                 result.warnings.push(format!(
-                    "backend «{name}» define ca_file pero verify = false: la CA no se usa y el backend no se verifica"
+                    "backend \"{name}\" sets ca_file but verify = false: the CA is unused and the backend is not verified"
                 ));
             }
         }
@@ -299,21 +299,21 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
     result
 }
 
-/// Problemas de una lista ALPN: nombres no vacíos, sin duplicados (A14).
-/// Devuelve pares (causa, ejemplo) para insertarlos con el contexto de error.
+/// Problems of an ALPN list: non-empty names, no duplicates (A14).
+/// Returns (cause, example) pairs to insert with the error context.
 fn alpn_problems(alpn: &[String]) -> Vec<(String, String)> {
     let mut problems = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
     for proto in alpn {
         if proto.is_empty() || proto.len() > 255 {
             problems.push((
-                format!("protocolo ALPN «{proto}» inválido: debe tener 1..=255 bytes"),
+                format!("invalid ALPN protocol \"{proto}\": must be 1..=255 bytes"),
                 "alpn = [\"http/1.1\"]".to_owned(),
             ));
         }
         if !seen.insert(proto.as_str()) {
             problems.push((
-                format!("protocolo ALPN duplicado: «{proto}»"),
+                format!("duplicate ALPN protocol: \"{proto}\""),
                 "alpn = [\"http/1.1\"]".to_owned(),
             ));
         }
@@ -331,13 +331,13 @@ mod tests {
 
     fn check_source(source: &str) -> CheckResult {
         let file = PathBuf::from("eqproxy.toml");
-        let config = parse_str(source, &file).expect("toml válido");
+        let config = parse_str(source, &file).expect("valid TOML");
         check(&config, source, &file)
     }
 
-    /// Config con `listeners` [listener.*] y `backends` [backend.*] construida
-    /// directamente: el presupuesto vive en `check`, y parsear miles de
-    /// secciones TOML bajo el intérprete de miri es coste puro.
+    /// Config with `listeners` [listener.*] and `backends` [backend.*] built
+    /// directly: the budget lives in `check`, and parsing thousands of
+    /// TOML sections under the miri interpreter is pure cost.
     fn config_with_sections(listeners: usize, backends: usize) -> Config {
         use std::collections::BTreeMap;
         let mut config = Config {
@@ -392,22 +392,22 @@ backend = "api"
 server = "127.0.0.1:9000"
 "#,
         );
-        assert!(result.is_valid(), "errores: {:?}", result.errors);
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
     }
 
     #[test]
     fn missing_backend_is_reported_with_line_field_cause_example() {
-        let source = "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"fantasma\"\n";
+        let source = "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"ghost\"\n";
         let result = check_source(source);
         assert!(!result.is_valid());
         let err = &result.errors[0];
         assert_eq!(err.field.as_deref(), Some("listener.web.backend"));
-        let loc = err.location.as_ref().expect("debe ubicar la línea");
-        assert_eq!(loc.line, 3, "línea de [listener.web]: {source:?}");
-        assert!(err.cause.contains("fantasma"), "causa: {}", err.cause);
+        let loc = err.location.as_ref().expect("must locate the line");
+        assert_eq!(loc.line, 3, "[listener.web] line: {source:?}");
+        assert!(err.cause.contains("ghost"), "cause: {}", err.cause);
         assert!(
-            err.example.contains("[backend.fantasma]"),
-            "ejemplo: {}",
+            err.example.contains("[backend.ghost]"),
+            "example: {}",
             err.example
         );
     }
@@ -456,28 +456,28 @@ server = "127.0.0.1:9000"
         let err = result
             .errors
             .iter()
-            .find(|e| e.cause.contains("demasiadas secciones"))
-            .expect("debe reportar el presupuesto de secciones");
-        assert!(err.example.contains("ADR-0002"), "ejemplo: {}", err.example);
+            .find(|e| e.cause.contains("too many sections"))
+            .expect("must report the section budget");
+        assert!(err.example.contains("ADR-0002"), "example: {}", err.example);
     }
 
     #[test]
     fn sections_at_the_budget_are_accepted() {
         let result = check_config(&config_with_sections(MAX_SECTIONS - 1, 1));
-        assert!(result.is_valid(), "errores: {:?}", result.errors);
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
     }
 
     #[test]
     fn budget_counts_listeners_and_backends_by_their_sum() {
-        // 1025 [listener.*] sin [backend.*]: la suma (1025) excede el
-        // presupuesto aunque el producto sea 0 — cuenta secciones combinadas.
+        // 1025 [listener.*] without [backend.*]: the sum (1025) exceeds the
+        // budget even though the product is 0 — combined sections count.
         let result = check_config(&config_with_sections(MAX_SECTIONS + 1, 0));
         assert!(
             result
                 .errors
                 .iter()
-                .any(|e| e.cause.contains("demasiadas secciones")),
-            "esperaba error de presupuesto: {:?}",
+                .any(|e| e.cause.contains("too many sections")),
+            "expected a budget error: {:?}",
             result.errors
         );
     }
@@ -491,14 +491,14 @@ server = "127.0.0.1:9000"
         };
         let at = check_source(&config_with(65_535));
         assert!(
-            !at.warnings.iter().any(|w| w.contains("descriptores")),
-            "a 65535 no debe avisar: {:?}",
+            !at.warnings.iter().any(|w| w.contains("descriptors")),
+            "must not warn at 65535: {:?}",
             at.warnings
         );
         let above = check_source(&config_with(65_536));
         assert!(
-            above.warnings.iter().any(|w| w.contains("descriptores")),
-            "a 65536 debe avisar: {:?}",
+            above.warnings.iter().any(|w| w.contains("descriptors")),
+            "must warn at 65536: {:?}",
             above.warnings
         );
     }
@@ -542,14 +542,14 @@ server = "127.0.0.1:9000"
                 "backend.api.servers[1].weight",
                 "backend.api.servers[2].addr",
             ],
-            "errores: {:?}",
+            "errors: {:?}",
             bad.errors
         );
 
         let ok = check_source(
             "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\", weight = 3 }, { addr = \"127.0.0.1:2\", weight = 0 }]\n",
         );
-        assert!(ok.is_valid(), "errores: {:?}", ok.errors);
+        assert!(ok.is_valid(), "errors: {:?}", ok.errors);
     }
 
     #[test]
@@ -583,9 +583,9 @@ server = "127.0.0.1:9000"
             .iter()
             .filter(|e| e.field.as_deref().is_some_and(|f| f.ends_with("tls.alpn")))
             .collect();
-        assert_eq!(alpn_errors.len(), 2, "errores: {:?}", result.errors);
-        assert!(alpn_errors[0].cause.contains("duplicado"));
-        assert!(alpn_errors[1].cause.contains("inválido"));
+        assert_eq!(alpn_errors.len(), 2, "errors: {:?}", result.errors);
+        assert!(alpn_errors[0].cause.contains("duplicate"));
+        assert!(alpn_errors[1].cause.contains("invalid"));
     }
 
     #[test]
@@ -595,7 +595,7 @@ server = "127.0.0.1:9000"
         );
         assert!(plain.is_valid());
         assert!(
-            plain.warnings.iter().any(|w| w.contains("sin TLS")),
+            plain.warnings.iter().any(|w| w.contains("without TLS")),
             "warnings: {:?}",
             plain.warnings
         );
@@ -605,7 +605,7 @@ server = "127.0.0.1:9000"
         );
         assert!(with_tls.is_valid());
         assert!(
-            !with_tls.warnings.iter().any(|w| w.contains("sin TLS")),
+            !with_tls.warnings.iter().any(|w| w.contains("without TLS")),
             "warnings: {:?}",
             with_tls.warnings
         );
@@ -616,12 +616,12 @@ server = "127.0.0.1:9000"
         let result = check_source(
             "schema_version = 1\n[listener.web]\nlisten = \"0.0.0.0:8080\"\nbackend = \"api\"\nmaxconn = 100000\n[backend.api]\nserver = \"127.0.0.1:1\"\n",
         );
-        assert!(result.is_valid(), "errores: {:?}", result.errors);
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
         assert!(
             result
                 .warnings
                 .iter()
-                .any(|w| w.contains("redes de confianza")),
+                .any(|w| w.contains("trusted networks")),
             "warnings: {:?}",
             result.warnings
         );

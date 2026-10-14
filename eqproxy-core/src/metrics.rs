@@ -1,48 +1,48 @@
-//! Contadores del dataplane.
+//! Dataplane counters.
 //!
-//! Cardinalidad acotada por diseño: sin etiquetas por cliente, URL ni token
-//! (SPEC §7.3). Las métricas exportables llegan en Fase 3; aquí vive el estado
-//! real que el dataplane incrementa.
+//! Bounded cardinality by design: no per-client, URL or token labels
+//! (SPEC §7.3). Exportable metrics arrive in Phase 3; the real state the
+//! dataplane increments lives here.
 
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Contadores globales del proceso de tráfico.
+/// Global counters of the traffic process.
 #[derive(Debug, Default)]
 pub struct Metrics {
-    /// Conexiones aceptadas (incluye las que luego fallan al conectar al backend).
+    /// Accepted connections (including ones that later fail to reach the backend).
     pub connections_accepted: AtomicU64,
-    /// Conexiones rechazadas por alcanzar `maxconn`.
+    /// Connections refused for reaching `maxconn`.
     pub connections_rejected: AtomicU64,
-    /// Conexiones proxyadas vivas ahora mismo.
+    /// Proxied connections alive right now.
     pub connections_active: AtomicU64,
-    /// Conexiones terminadas (cualquier motivo).
+    /// Finished connections (any reason).
     pub connections_completed: AtomicU64,
-    /// Fallos de conexión al backend (incluido timeout de conexión).
+    /// Backend connection failures (including connection timeout).
     pub connect_failures: AtomicU64,
-    /// Direcciones cerradas por timeout de inactividad.
+    /// Directions closed by inactivity timeout.
     pub idle_timeouts: AtomicU64,
-    /// Bytes transferidos cliente → backend.
+    /// Bytes transferred client → backend.
     pub bytes_client_to_backend: AtomicU64,
-    /// Bytes transferidos backend → cliente.
+    /// Bytes transferred backend → client.
     pub bytes_backend_to_client: AtomicU64,
-    /// Intercambios HTTP/1.1 completados (request + response terminados).
+    /// Completed HTTP/1.1 exchanges (finished request + response).
     pub http_requests_proxied: AtomicU64,
-    /// Peticiones HTTP rechazadas por framing/validación (400/417/431/501/505).
+    /// HTTP requests rejected by framing/validation (400/417/431/501/505).
     pub http_requests_rejected: AtomicU64,
-    /// Cabeceras de mensaje no recibidas dentro de su timeout de fase.
+    /// Message heads not received within their phase timeout.
     pub header_timeouts: AtomicU64,
-    /// Handshakes TLS fallidos (cliente al listener o proxy hacia backend).
+    /// Failed TLS handshakes (client to listener, or proxy to backend).
     pub tls_handshake_failures: AtomicU64,
-    /// Conexiones sin servidor disponible (todos los backends caídos/drenados).
+    /// Connections with no server available (all backends down/drained).
     pub no_available_server: AtomicU64,
-    /// Conexiones a backend reutilizadas del pool keep-alive (A16).
+    /// Backend connections reused from the keep-alive pool (A16).
     pub backend_connections_reused: AtomicU64,
-    /// Conexiones a backend recién marcadas (no reutilizadas).
+    /// Freshly dialed backend connections (not reused).
     pub backend_connections_opened: AtomicU64,
 }
 
-/// Fotografía inmutable de los contadores.
+/// Immutable snapshot of the counters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MetricsSnapshot {
     pub connections_accepted: u64,
@@ -63,7 +63,7 @@ pub struct MetricsSnapshot {
 }
 
 impl Metrics {
-    /// Fotografía coherente (por contador) para logging o tests.
+    /// Coherent snapshot (per counter) for logging or tests.
     pub fn snapshot(&self) -> MetricsSnapshot {
         MetricsSnapshot {
             connections_accepted: self.connections_accepted.load(Ordering::Relaxed),
@@ -84,8 +84,8 @@ impl Metrics {
         }
     }
 
-    /// Reserva plaza de conexión. Devuelve `false` si se alcanzó `maxconn`
-    /// (el llamador debe rechazar de forma explícita, nunca encolar sin límite).
+    /// Reserves a connection slot. Returns `false` when `maxconn` is reached
+    /// (the caller must refuse explicitly, never queue without a bound).
     pub fn try_acquire_connection(&self, maxconn: u32) -> bool {
         self.connections_active
             .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
@@ -98,7 +98,7 @@ impl Metrics {
             .is_ok()
     }
 
-    /// Libera la plaza de conexión y cuenta la conexión como completada.
+    /// Releases the connection slot and counts the connection as completed.
     pub fn release_connection(&self) {
         let _ = self
             .connections_active

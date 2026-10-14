@@ -13,7 +13,7 @@ use eqproxy_net::{BoundProxy, ResolvedListener, bind};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-/// Backend de eco real sobre sockets.
+/// Real echo backend over sockets.
 async fn start_echo() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
     let addr = listener.local_addr().expect("addr echo");
@@ -59,7 +59,7 @@ fn listener_cfg(
     )
 }
 
-/// Arranca el proxy y devuelve (dirección real, handle de apagado, tarea serve).
+/// Starts the proxy and returns (real address, shutdown handle, serve task).
 async fn start_proxy(
     cfg: ResolvedListener,
     metrics: Arc<Metrics>,
@@ -106,7 +106,7 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
         .await
         .expect("echo a tiempo")
         .expect("echo completo");
-    assert_eq!(received, payload, "el eco debe ser byte a byte");
+    assert_eq!(received, payload, "echo must be byte for byte");
 
     drop(client);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -121,7 +121,7 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
@@ -140,8 +140,8 @@ async fn maxconn_rejects_excess_connections_explicitly() {
         Duration::from_secs(2),
         Duration::from_secs(5),
     );
-    // grace corto: las conexiones retenidas siguen vivas al apagar y el
-    // drenado debe terminar al expirar la ventana (cierre forzado documentado).
+    // short grace: held connections stay alive at shutdown and the
+    // drain must finish when the window expires (documented forced close).
     let (proxy_addr, handle, serve) =
         start_proxy(cfg, Arc::clone(&metrics), Duration::from_secs(1)).await;
 
@@ -154,14 +154,14 @@ async fn maxconn_rejects_excess_connections_explicitly() {
         .await
         .expect("rechazo a tiempo")
         .expect("read");
-    assert_eq!(closed, 0, "la conexión excedente debe cerrarse sin datos");
+    assert_eq!(closed, 0, "the excess connection must close without data");
     assert_eq!(metrics.snapshot().connections_rejected, 1);
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
@@ -170,7 +170,7 @@ async fn maxconn_rejects_excess_connections_explicitly() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connect_timeout_fails_fast_and_counts() {
-    // 192.0.2.0/24 (TEST-NET-1) no enruta: la conexión al backend nunca completa.
+    // 192.0.2.0/24 (TEST-NET-1) does not route: the backend connection never completes.
     let blackhole: SocketAddr = "192.0.2.1:81".parse().expect("addr");
     let metrics = Arc::new(Metrics::default());
     let cfg = listener_cfg(
@@ -194,11 +194,11 @@ async fn connect_timeout_fails_fast_and_counts() {
         .expect("read");
     assert_eq!(
         closed, 0,
-        "el proxy debe cerrar la conexión al fallar el backend"
+        "the proxy must close the connection when the backend fails"
     );
     assert!(
         started.elapsed() < Duration::from_secs(2),
-        "el fallo debe ser rápido, no colgar: {:?}",
+        "the failure must be fast, not hang: {:?}",
         started.elapsed()
     );
     assert_eq!(metrics.snapshot().connect_failures, 1);
@@ -207,7 +207,7 @@ async fn connect_timeout_fails_fast_and_counts() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
@@ -234,10 +234,10 @@ async fn idle_timeout_closes_silent_connection() {
         .await
         .expect("cierre por idle a tiempo")
         .expect("read");
-    assert_eq!(closed, 0, "la conexión silenciosa debe cerrarse");
+    assert_eq!(closed, 0, "the silent connection must close");
     assert!(
         metrics.snapshot().idle_timeouts >= 1,
-        "debe contarse el timeout de inactividad: {}",
+        "the inactivity timeout must be counted: {}",
         metrics.snapshot()
     );
 
@@ -245,7 +245,7 @@ async fn idle_timeout_closes_silent_connection() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
@@ -275,30 +275,30 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
         .expect("read");
     assert_eq!(&buf, b"hola");
 
-    // Apagado con la conexión viva: la conexión en curso debe poder seguir.
+    // Shutdown with a live connection: the in-flight connection must be able to continue.
     handle.trigger();
     client
         .write_all(b"mundo!!")
         .await
-        .expect("write tras shutdown");
+        .expect("write after shutdown");
     let mut buf2 = [0u8; 7];
     tokio::time::timeout(WAIT, client.read_exact(&mut buf2))
         .await
-        .expect("la conexión en curso debe terminar su eco")
+        .expect("the in-flight connection must finish its echo")
         .expect("read");
     assert_eq!(&buf2, b"mundo!!");
 
-    // ...pero ya no se aceptan conexiones nuevas.
+    // ...but no new connections are accepted anymore.
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         TcpStream::connect(proxy_addr).await.is_err(),
-        "tras el apagado no deben aceptarse conexiones nuevas"
+        "after shutdown no new connections must be accepted"
     );
 
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
@@ -307,7 +307,7 @@ async fn graceful_shutdown_finishes_inflight_and_stops_accepting() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bind_is_all_or_nothing() {
-    // Ocupa un puerto con un socket ajeno; el bind del proxy debe fallar entero.
+    // Occupies a port with a foreign socket; the proxy bind must fail whole.
     let taken = std::net::TcpListener::bind("127.0.0.1:0").expect("socket ajeno");
     let busy: SocketAddr = taken.local_addr().expect("addr");
     let backend = start_echo().await;
@@ -329,11 +329,9 @@ async fn bind_is_all_or_nothing() {
         Duration::from_secs(5),
     );
     let metrics = Arc::new(Metrics::default());
-    let err = bind(vec![good, bad], metrics)
-        .await
-        .expect_err("debe fallar");
+    let err = bind(vec![good, bad], metrics).await.expect_err("must fail");
     assert!(
         err.to_string().contains("ocupado"),
-        "el error debe nombrar el listener: {err}"
+        "the error must name the listener: {err}"
     );
 }

@@ -1,6 +1,6 @@
-//! Pruebas E2E del proxy HTTP/1.1 con **sockets reales** (sin mocks de red):
-//! framing estricto (T01–T03), timeouts por fase (A17) y streaming con
-//! cancelación (A19).
+//! E2E tests of the HTTP/1.1 proxy with **real sockets** (no network mocks):
+//! strict framing (T01–T03), per-phase timeouts (A17) and streaming with
+//! cancellation (A19).
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -15,7 +15,7 @@ use eqproxy_net::{BoundProxy, ProxyMode, ResolvedListener, bind};
 
 const WAIT: Duration = Duration::from_secs(5);
 
-/// Backend HTTP mínimo real: responde 200 con eco del cuerpo de petición.
+/// Minimal real HTTP backend: answers 200 echoing the request body.
 async fn start_http_backend() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -26,8 +26,8 @@ async fn start_http_backend() -> SocketAddr {
             tokio::spawn(async move {
                 let mut buf = vec![0u8; 8192];
                 loop {
-                    // Lee la cabecera completa (fixture: espera el cuerpo según
-                    // el framing para poder ecoarlo byte a byte).
+                    // Reads the full head (fixture: waits for the body per
+                    // framing to echo it byte by byte).
                     let mut total = 0usize;
                     let head_end = loop {
                         match socket.read(&mut buf[total..]).await {
@@ -84,7 +84,7 @@ async fn start_http_backend() -> SocketAddr {
     addr
 }
 
-/// Backend que acepta y nunca responde (para timeout de cabecera de respuesta).
+/// Backend that accepts and never answers (for response-head timeout).
 async fn start_silent_backend() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind silent");
     let addr = listener.local_addr().expect("addr silent");
@@ -135,10 +135,10 @@ async fn start_proxy(
     (addr, handle, serve)
 }
 
-/// Lee una respuesta completa (hasta el fin de cabecera), tolerando lecturas
-/// cortas de TCP: un solo `read()` no garantiza una respuesta entera. Las
-/// respuestas del fixture a GET son `Content-Length: 0`, así que el fin de
-/// cabecera es también el fin del mensaje.
+/// Reads a full response (up to the end of head), tolerating short TCP
+/// reads: a single `read()` does not guarantee a whole response. Fixture
+/// responses to GET are `Content-Length: 0`, so end of head is also end
+/// of message.
 async fn read_one_response(client: &mut TcpStream) -> String {
     let mut acc = Vec::new();
     let mut buf = [0u8; 256];
@@ -147,7 +147,7 @@ async fn read_one_response(client: &mut TcpStream) -> String {
             .await
             .expect("respuesta a tiempo")
             .expect("read");
-        assert!(n > 0, "EOF antes de una respuesta completa: {acc:?}");
+        assert!(n > 0, "EOF before a full response: {acc:?}");
         acc.extend_from_slice(&buf[..n]);
         if acc.windows(4).any(|w| w == b"\r\n\r\n") {
             return String::from_utf8_lossy(&acc).into_owned();
@@ -172,7 +172,7 @@ async fn send_and_read(addr: SocketAddr, request: &[u8]) -> String {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_get_roundtrip_and_keepalive() {
@@ -192,12 +192,12 @@ async fn http1_get_roundtrip_and_keepalive() {
     let first = read_one_response(&mut client).await;
     assert!(first.starts_with("HTTP/1.1 200 OK"), "respuesta: {first:?}");
 
-    // Keep-alive: segunda petición sobre la MISMA conexión cliente.
+    // Keep-alive: second request over the SAME client connection.
     client.write_all(get).await.expect("write 2");
     let second = read_one_response(&mut client).await;
     assert!(
         second.starts_with("HTTP/1.1 200 OK"),
-        "respuesta 2: {second:?} métricas={:?}",
+        "response 2: {second:?} metrics={:?}",
         metrics.snapshot()
     );
 
@@ -210,12 +210,12 @@ async fn http1_get_roundtrip_and_keepalive() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_post_body_streams_end_to_end() {
@@ -237,7 +237,7 @@ async fn http1_post_body_streams_end_to_end() {
     let response = send_and_read(proxy_addr, request.as_bytes()).await;
     assert!(
         response.ends_with(body),
-        "el cuerpo debe reenviarse byte a byte: {response}"
+        "the body must forward byte for byte: {response}"
     );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -250,12 +250,12 @@ async fn http1_post_body_streams_end_to_end() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_chunked_body_streams_end_to_end() {
@@ -277,12 +277,12 @@ async fn http1_chunked_body_streams_end_to_end() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_smuggling_corpus_is_rejected_before_backend() {
@@ -296,8 +296,8 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
     );
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    // Corpus T01–T02: cada caso debe recibir 400/431/501/505 y jamás llegar
-    // al backend como petición procesable.
+    // T01–T02 corpus: each case must get 400/431/501/505 and never reach
+    // the backend as a processable request.
     let corpus: &[&[u8]] = &[
         b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n",
         b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\n",
@@ -313,12 +313,12 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
         let response = send_and_read(proxy_addr, request).await;
         assert!(
             response.starts_with("HTTP/1.1 4") || response.starts_with("HTTP/1.1 5"),
-            "debe rechazarse, no servirse: {}",
+            "must be rejected, not served: {}",
             String::from_utf8_lossy(request)
         );
         assert!(
             !response.contains("200 OK"),
-            "nunca200 para: {}",
+            "never200 for: {}",
             String::from_utf8_lossy(request)
         );
     }
@@ -327,7 +327,7 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
     assert_eq!(
         metrics.snapshot().http_requests_rejected as usize,
         corpus.len(),
-        "cada rechazo cuenta"
+        "every rejection counts"
     );
     assert_eq!(metrics.snapshot().http_requests_proxied, 0);
 
@@ -335,12 +335,12 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_header_timeout_returns_408_and_counts() {
@@ -354,7 +354,7 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
     );
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    // Cabecera de petición incompleta: el timeout de fase debe dispararse.
+    // Incomplete request head: the phase timeout must fire.
     let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
     client
         .write_all(b"GET / HTTP/1.1\r\nHost: t\r\n")
@@ -376,12 +376,12 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_server_header_timeout_returns_504() {
@@ -410,16 +410,16 @@ async fn http1_server_header_timeout_returns_504() {
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_client_abort_cancels_upstream_promptly() {
-    // A19: el abort del cliente a mitad de cuerpo debe cancelar el upstream
+    // A19: the mid-body client abort must cancel the upstream
     // al instante (el backend ve el cierre), sin esperar al idle timeout (10s).
     let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -451,7 +451,7 @@ async fn http1_client_abort_cancels_upstream_promptly() {
         Duration::from_secs(5),
         Duration::from_secs(5),
     );
-    // idle alto: el cierre no puede venir del timeout, debe ser el abort.
+    // high idle: the close cannot come from the timeout, it must be the abort.
     let mut cfg = cfg;
     cfg.idle_timeout = Duration::from_secs(10);
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
@@ -465,33 +465,33 @@ async fn http1_client_abort_cancels_upstream_promptly() {
         .expect("write body parcial");
     drop(client); // abort a mitad de cuerpo
 
-    // El backend debe observar el cierre de la conexión upstream enseguida.
+    // The backend must observe the upstream connection close promptly.
     tokio::time::timeout(Duration::from_secs(2), closed_rx)
         .await
-        .expect("el abort del cliente debe cancelar el upstream de inmediato")
-        .expect("señal de cierre del backend");
+        .expect("the client abort must cancel the upstream immediately")
+        .expect("backend close signal");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(
         metrics.snapshot().connections_active,
         0,
-        "sin fugas de tareas tras el abort"
+        "no task leaks after the abort"
     );
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere sockets TCP: miri no soporta red (rust-lang/miri#3449)"
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_response_without_framing_is_eof_delimited() {
-    // Backend HTTP/1.0-style: respuesta sin Content-Length → cuerpo hasta EOF.
+    // HTTP/1.0-style backend: response without Content-Length → body until EOF.
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let backend = listener.local_addr().expect("addr");
     tokio::spawn(async move {
@@ -499,7 +499,7 @@ async fn http1_response_without_framing_is_eof_delimited() {
             let mut buf = vec![0u8; 4096];
             let _ = socket.read(&mut buf).await;
             let _ = socket
-                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nhasta-eof")
+                .write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nuntil-eof")
                 .await;
         }
     });
@@ -514,11 +514,11 @@ async fn http1_response_without_framing_is_eof_delimited() {
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
     let response = send_and_read(proxy_addr, b"GET /x HTTP/1.1\r\nHost: t\r\n\r\n").await;
-    assert!(response.contains("hasta-eof"), "respuesta: {response}");
+    assert!(response.contains("until-eof"), "response: {response}");
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
         .expect("serve termina")
-        .expect("tarea serve sin pánico");
+        .expect("serve task without panic");
 }

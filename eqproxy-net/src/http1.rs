@@ -1,19 +1,20 @@
-//! Proxy HTTP/1.1 con framing estricto (A2) y rechazo de ambigüedades (T01–T03).
+//! Strict-framing HTTP/1.1 proxy (A2) with ambiguity rejection (T01–T03).
 //!
-//! Política de seguridad (THREAT_MODEL §2.1): **parser único compartido entre
-//! análisis y reenvío** — todo mensaje ambiguo se rechaza ANTES de tocar al
-//! backend, y lo que se reenvía es byte a byte lo que el parser validó:
+//! Security policy (THREAT_MODEL §2.1): **single shared parser between
+//! analysis and forwarding** — every ambiguous message is rejected BEFORE
+//! touching the backend, and what is forwarded is byte-for-byte what the
+//! parser validated:
 //! - `Content-Length` y `Transfer-Encoding` juntos → 400 (T01).
 //! - `Content-Length` o `Transfer-Encoding` duplicados → 400 (T01).
 //! - `Transfer-Encoding` distinto de `chunked` exacto → 400 (T01).
 //! - obs-fold, espacios en nombres, CR/LF suelto, caracteres de control → 400 (T02).
-//! - Límites por mensaje: nº de cabeceras, tamaño de cabecera y de línea → 431 (T03).
-//! - `CONNECT` y `Upgrade` (A7/A8, Fase 4) → 501 explícito, nunca simulado.
+//! - Per-message limits: header count, header and line size → 431 (T03).
+//! - `CONNECT` and `Upgrade` (A7/A8, Phase 4) → explicit 501, never faked.
 //!
-//! Semántica de conexión: una conexión backend **por intercambio** (pool en
-//! Fase 3, A16); keep-alive del cliente con `Connection`/versión según RFC 9112.
+//! Connection semantics: one backend connection **per exchange** (pool in
+//! Phase 3, A16); client keep-alive with `Connection`/version per RFC 9112.
 //! Un abort del cliente cierra el backend al instante (A19): el intercambio
-//! abortado nunca deja tareas vivas.
+//! aborted never leaves live tasks.
 
 use std::io;
 use std::net::SocketAddr;
@@ -29,11 +30,11 @@ use eqproxy_core::Metrics;
 
 use crate::proxy::{OutboundError, READ_BUF, ResolvedListener, checkout_or_connect};
 
-/// Tamaño máximo de la cabecera de mensaje (línea final incluida) (T03).
+/// Maximum message-head size (final line included) (T03).
 pub const MAX_HEAD_BYTES: usize = 16 * 1024;
-/// Número máximo de cabeceras por mensaje (T03).
+/// Maximum headers per message (T03).
 pub const MAX_HEADERS: usize = 100;
-/// Tamaño máximo de una línea de cabecera o de chunk (T03).
+/// Maximum header-or-chunk line size (T03).
 pub const MAX_LINE_BYTES: usize = 8 * 1024;
 
 const CRLF: &[u8] = b"\r\n";
@@ -56,25 +57,25 @@ pub struct Reject {
     pub reason: &'static str,
 }
 
-/// Framing del cuerpo según RFC 9112 §6 (la única fuente de límites).
+/// Body framing per RFC 9112 §6 (the only source of limits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BodyFraming {
     /// Sin cuerpo.
     None,
     /// `Content-Length: n` exacto.
     ContentLength(u64),
-    /// `Transfer-Encoding: chunked` (el único TE aceptado).
+    /// `Transfer-Encoding: chunked` (the only accepted TE).
     Chunked,
-    /// Respuesta sin framing: cuerpo hasta EOF del backend (solo respuestas).
+    /// Unframed response: body until backend EOF (responses only).
     UntilEof,
 }
 
-/// Petición parseada y validada.
+/// Parsed and validated request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestHead {
     pub method: String,
     pub target: String,
-    /// Versión HTTP: 10 (HTTP/1.0) u 11 (HTTP/1.1).
+    /// HTTP version: 10 (HTTP/1.0) or 11 (HTTP/1.1).
     pub version: u8,
     pub framing: BodyFraming,
     pub wants_close: bool,
@@ -108,13 +109,13 @@ fn trim_ows(value: &[u8]) -> &[u8] {
     &value[start..end]
 }
 
-/// Divide la cabecera (sin el terminador `\r\n\r\n`) en líneas CRLF estrictas.
+/// Splits the head (without the `\r\n\r\n` terminator) into strict CRLF lines.
 fn parse_lines(head: &[u8]) -> Result<Vec<&[u8]>, Reject> {
     let mut lines = Vec::new();
     let mut rest = head;
     while !rest.is_empty() {
         let Some(pos) = find_sub(rest, CRLF) else {
-            // Última línea: la cabecera se entrega sin el terminador final.
+            // Last line: the head is delivered without the final terminator.
             if rest.contains(&b'\r') || rest.contains(&b'\n') {
                 return Err(Reject {
                     status: 400,
@@ -137,7 +138,7 @@ fn parse_lines(head: &[u8]) -> Result<Vec<&[u8]>, Reject> {
     Ok(lines)
 }
 
-/// Valida una línea `nombre: valor` con reglas estrictas (T02).
+/// Validates a `name: value` line with strict rules (T02).
 fn parse_header_line(line: &[u8]) -> Result<(String, String), Reject> {
     if line.first().is_some_and(|b| *b == b' ' || *b == b'\t') {
         return Err(Reject {
@@ -171,7 +172,7 @@ fn parse_header_line(line: &[u8]) -> Result<(String, String), Reject> {
     ))
 }
 
-/// `Content-Length` estricto: solo dígitos, sin ceros a la izquierda, sin signo.
+/// Strict `Content-Length`: digits only, no leading zeros, no sign.
 fn parse_content_length(value: &str) -> Result<u64, Reject> {
     let bad = Reject {
         status: 400,
@@ -186,7 +187,7 @@ fn parse_content_length(value: &str) -> Result<u64, Reject> {
     value.parse().map_err(|_| bad)
 }
 
-/// Framing de cuerpo de petición a partir de las cabeceras (T01).
+/// Request body framing from the headers (T01).
 fn request_framing(
     headers: &[(String, String)],
     version: u8,
@@ -266,7 +267,7 @@ fn request_framing(
     Ok((framing, wants_close, has_upgrade))
 }
 
-/// Parsea la cabecera de petición con reglas estrictas (T01–T03).
+/// Parses the request head with strict rules (T01–T03).
 pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
     let lines = parse_lines(head)?;
     let request_line = lines.first().ok_or(Reject {
@@ -297,7 +298,7 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         });
     }
     if method == b"CONNECT" {
-        // A8 (Fase 4): nunca se simula; rechazo explícito.
+        // A8 (Phase 4): never faked; explicit rejection.
         return Err(Reject {
             status: 501,
             reason: "connect is not implemented (planned for phase 4)",
@@ -307,7 +308,7 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         || target.iter().any(|b| *b <= 0x20 || *b == 0x7f)
         || (!target.starts_with(b"/") && target != b"*")
     {
-        // Rechaza absolute-form ("http://…"): este proxy es origen, no cliente.
+        // Rejects absolute-form ("http://…"): this proxy is an origin, not a client.
         return Err(Reject {
             status: 400,
             reason: "invalid request target",
@@ -343,7 +344,7 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
 
     let (framing, wants_close, wants_upgrade) = request_framing(&headers, version)?;
     if wants_upgrade {
-        // A7 (Fase 4): nunca se simula; rechazo explícito.
+        // A7 (Phase 4): never faked; explicit rejection.
         return Err(Reject {
             status: 501,
             reason: "upgrade is not implemented (planned for phase 4)",
@@ -358,9 +359,9 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
     })
 }
 
-/// Parsea la cabecera de respuesta con las mismas reglas de línea (T02) y el
-/// framing de RFC 9112 §6. Un backend ambiguo responde 502 (nunca se reenvía
-/// un framing que el cliente pueda interpretar de otra forma).
+/// Parses the response head with the same line rules (T02) and the
+/// RFC 9112 §6 framing. An ambiguous backend answers 502 (never forwarded
+/// a framing the client could interpret differently).
 pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHead, Reject> {
     let bad_gateway = Reject {
         status: 502,
@@ -452,7 +453,7 @@ pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHe
 }
 
 // ---------------------------------------------------------------------------
-// Servicio de una conexión cliente
+// Serving one client connection
 // ---------------------------------------------------------------------------
 
 /// Error de copia de cuerpo: distingue framing, corte, inactividad y abort.
@@ -481,7 +482,7 @@ async fn write_with_timeout<W: AsyncWrite + Unpin>(
     }
 }
 
-/// Copia exactamente `n` bytes con timeout de inactividad por operación.
+/// Copies exactly `n` bytes with a per-operation inactivity timeout.
 async fn copy_exact<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
@@ -506,7 +507,7 @@ async fn copy_exact<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     Ok(())
 }
 
-/// Copia hasta EOF del lector.
+/// Copies until reader EOF.
 async fn copy_to_eof<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
@@ -527,9 +528,9 @@ async fn copy_to_eof<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
-/// Lee una línea terminada en CRLF (terminador incluido), estricta (T02).
-/// `ponytail`: lectura byte a byte vía BufReader; optimizar si los benchmarks
-/// de Fase 9 lo exigen.
+/// Reads a CRLF-terminated line (terminator included), strict (T02).
+/// `ponytail`: byte-by-byte reading via BufReader; optimize when Phase 9
+/// benchmarks demand it.
 async fn read_crlf_line<R: AsyncRead + Unpin>(
     reader: &mut R,
     idle: Duration,
@@ -565,7 +566,7 @@ async fn read_crlf_line<R: AsyncRead + Unpin>(
     }
 }
 
-/// `chunk-size [chunk-ext]` estricto: hex puro (extensión sin controles).
+/// Strict `chunk-size [chunk-ext]`: pure hex (extension without controls).
 fn parse_chunk_size(line: &[u8]) -> Result<u64, CopyError> {
     let bad = || {
         CopyError::Framing(Reject {
@@ -593,7 +594,7 @@ fn parse_chunk_size(line: &[u8]) -> Result<u64, CopyError> {
     u64::from_str_radix(text, 16).map_err(|_| bad())
 }
 
-/// Copia un cuerpo `chunked` validando el framing mientras se reenvía (T01).
+/// Copies a `chunked` body validating framing while forwarding (T01).
 async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
@@ -606,7 +607,7 @@ async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let size = parse_chunk_size(&line)?;
         write_with_timeout(writer, &line, idle).await?;
         if size == 0 {
-            // Trailers: vacíos o validados como cabeceras; nunca de framing.
+            // Trailers: empty or validated as headers; never framing.
             loop {
                 let trailer = read_crlf_line(reader, idle, MAX_LINE_BYTES).await?;
                 if trailer == CRLF {
@@ -625,7 +626,7 @@ async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             }
         }
         copy_exact(reader, writer, size, idle, counter, idle_counter).await?;
-        // CRLF tras los datos del chunk.
+        // CRLF after the chunk data.
         let mut crlf = [0u8; 2];
         match tokio::time::timeout(idle, reader.read_exact(&mut crlf)).await {
             Err(_) => return Err(idle_copy_error(idle_counter)),
@@ -642,7 +643,7 @@ async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
-/// Lector que sirve primero un prefijo ya leído (resto de la lectura de cabecera).
+/// Reader that serves an already-read prefix first (head-read remainder).
 struct Prefixed<R> {
     prefix: Vec<u8>,
     pos: usize,
@@ -666,7 +667,7 @@ impl<R: AsyncRead + Unpin> AsyncRead for Prefixed<R> {
     }
 }
 
-/// Lee una cabecera completa: devuelve (cabecera sin terminador, resto leído).
+/// Reads a full head: returns (head without terminator, extra bytes read).
 enum HeadError {
     Eof,
     Timeout,
@@ -712,10 +713,10 @@ async fn write_error<W: AsyncWrite + Unpin>(writer: &mut W, status: u16, reason:
     let _ = tokio::time::timeout(Duration::from_secs(5), writer.shutdown()).await;
 }
 
-/// Sirve una conexión cliente HTTP/1.1 completa (keep-alive incluido).
+/// Serves a full HTTP/1.1 client connection (keep-alive included).
 ///
-/// Recibe las mitades del stream cliente (TCP plano o TLS ya aceptado) y las
-/// direcciones del par para PROXY protocol (A9). Sin servidores disponibles el
+/// Takes the client stream halves (plain TCP or already-accepted TLS) and the
+/// peer addresses for PROXY protocol (A9). With no servers available the
 /// intercambio recibe 503; si el servidor elegido falla, 502 (SPEC §7.4).
 pub async fn serve_http<CR, CW>(
     client_read: CR,
@@ -733,7 +734,7 @@ pub async fn serve_http<CR, CW>(
     let mut first_exchange = true;
 
     loop {
-        // --- Fase cliente: cabecera de petición ---
+        // --- Client phase: request head ---
         let (head_bytes, carry) = match read_head(&mut client_read, cfg.client_header_timeout).await
         {
             Ok(pair) => pair,
@@ -771,7 +772,7 @@ pub async fn serve_http<CR, CW>(
         let conn = match checkout_or_connect(cfg, peer, local, &metrics).await {
             Ok(conn) => conn,
             Err(OutboundError::NoServer) => {
-                // Todos los servidores caídos/drenados (B11): 503 explícito.
+                // All servers down/drained (B11): explicit 503.
                 write_error(&mut client_write, 503, "service unavailable").await;
                 return;
             }
@@ -788,7 +789,7 @@ pub async fn serve_http<CR, CW>(
             inner: &mut client_read,
         };
 
-        // --- Reenvío de cabecera + cuerpo de petición ---
+        // --- Head + request body forwarding ---
         if write_with_timeout(&mut backend_write, &head_bytes, cfg.idle_timeout)
             .await
             .is_err()
@@ -915,7 +916,7 @@ pub async fn serve_http<CR, CW>(
         .await;
         match response_body {
             Ok(()) => {}
-            // Antes de la cabecera de respuesta aún cabe un 502/500 limpio.
+            // Before the response head a clean 502/500 still fits.
             Err(CopyError::Framing(reject)) if !head_forwarded => {
                 write_error(&mut client_write, reject.status, reject.reason).await;
                 return;
@@ -927,14 +928,14 @@ pub async fn serve_http<CR, CW>(
             .http_requests_proxied
             .fetch_add(1, Ordering::Relaxed);
         if !response.wants_close {
-            // Intercambio limpio y servidor en keep-alive: la conexión vuelve
-            // al pool alineada a mensaje (A16). Todos los caminos de error
-            // retornan antes sin devolverla: tras un fallo de framing, corte,
-            // timeout o cierre del servidor nunca se reutiliza.
+            // Clean exchange and server on keep-alive: the connection returns
+            // to the pool message-aligned (A16). Every error path
+            // returns early without it: after a framing failure, cut,
+            // server timeout or close it is never reused.
             cfg.backend
                 .pool
                 .checkin(conn.addr, backend_read, backend_write, Instant::now());
-            // La conexión backend ya no es nuestra: el resto del bucle solo
+            // The backend connection is no longer ours: the rest of the loop only
             // toca el cliente.
             if request.wants_close {
                 let _ = client_write.shutdown().await;
@@ -942,8 +943,8 @@ pub async fn serve_http<CR, CW>(
             }
             continue;
         }
-        // El servidor cerró o cerró el framing (UntilEof): la conexión
-        // backend muere aquí y nunca vuelve al pool.
+        // The server closed or broke framing (UntilEof): the backend
+        // connection dies here and never returns to the pool.
         drop((backend_read, backend_write));
         if request.wants_close || response.wants_close {
             let _ = client_write.shutdown().await;
@@ -962,7 +963,7 @@ mod tests {
 
     #[test]
     fn valid_get_parses_with_no_body() {
-        let parsed = req("GET /a HTTP/1.1\r\nHost: x\r\n").expect("debe parsear");
+        let parsed = req("GET /a HTTP/1.1\r\nHost: x\r\n").expect("must parse");
         assert_eq!(parsed.method, "GET");
         assert_eq!(parsed.framing, BodyFraming::None);
         assert!(!parsed.wants_close);
@@ -1025,7 +1026,7 @@ mod tests {
     #[test]
     fn request_without_trailing_crlf_parses() {
         // read_head entrega la cabecera sin el terminador final.
-        let parsed = req("GET /a HTTP/1.1\r\nHost: x").expect("debe parsear");
+        let parsed = req("GET /a HTTP/1.1\r\nHost: x").expect("must parse");
         assert_eq!(parsed.target, "/a");
     }
 

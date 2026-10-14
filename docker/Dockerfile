@@ -1,11 +1,11 @@
-# Imagen oficial de EQProxy (multi-arquitectura: linux/amd64 + linux/arm64).
+# Official EQProxy image (multi-arch: linux/amd64 + linux/arm64).
 #
-# Uso:
+# Usage:
 #   docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
 #     --tag ghcr.io/ExyonQ/eqproxy:0.1.0 --tag ghcr.io/ExyonQ/eqproxy:latest --push .
 #
-# El binario se ejecuta con `docker run ghcr.io/ExyonQ/eqproxy --help`.
-# El stage `export` deja el binario aislado para extraerlo como artefacto de release:
+# The binary runs with `docker run ghcr.io/ExyonQ/eqproxy --help`.
+# The `export` stage isolates the binary to extract it as a release artifact:
 #   docker buildx build --file docker/Dockerfile --target export \
 #     --platform linux/amd64 --output type=local,dest=docker-out-amd64 .
 ARG RUST_VERSION=1.97
@@ -13,13 +13,13 @@ ARG RUST_VERSION=1.97
 FROM rust:${RUST_VERSION}-bookworm AS builder
 WORKDIR /src
 
-# Dependencias primero: la capa de caché del registry sobrevive a cambios de código.
+# Dependencies first: the registry cache layer survives code changes.
 COPY Cargo.toml Cargo.lock ./
 COPY eqproxy-core/Cargo.toml eqproxy-core/Cargo.toml
 COPY eqproxy-config/Cargo.toml eqproxy-config/Cargo.toml
 COPY eqproxy-net/Cargo.toml eqproxy-net/Cargo.toml
 COPY eqproxy-cli/Cargo.toml eqproxy-cli/Cargo.toml
-# Stubs mínimos: cargo exige targets al parsear los manifiestos.
+# Minimal stubs: cargo requires targets when parsing the manifests.
 RUN mkdir -p eqproxy-core/src eqproxy-config/src eqproxy-net/src eqproxy-cli/src \
     && echo "" > eqproxy-core/src/lib.rs \
     && echo "" > eqproxy-config/src/lib.rs \
@@ -34,12 +34,12 @@ COPY eqproxy-cli eqproxy-cli
 RUN cargo build --release --locked -p eqproxy-cli \
     && cp target/release/eqproxy /opt/eqproxy
 
-# Solo el binario, para extraerlo con --target export --output type=local.
+# Only the binary, to extract with --target export --output type=local.
 FROM scratch AS export
 COPY --from=builder /opt/eqproxy /eqproxy
 
-# Runtime mínimo (stage por defecto): nadie con privilegios, sin toolchain,
-# sin shell.
+# Minimal runtime (default stage): unprivileged user, no toolchain,
+# no shell.
 FROM debian:bookworm-slim AS runtime
 ENV LANG=C.UTF-8
 COPY --from=builder /opt/eqproxy /opt/eqproxy

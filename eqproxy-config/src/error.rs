@@ -1,33 +1,33 @@
-//! Error de configuración accionable: archivo, línea, campo, causa y ejemplo.
+//! Actionable configuration error: file, line, field, cause and example.
 
 use std::fmt;
 use std::path::PathBuf;
 
-/// Ubicación en el archivo fuente (1-based).
+/// Location in the source file (1-based).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Location {
     pub line: usize,
     pub column: Option<usize>,
 }
 
-/// Error de configuración con todo el contexto necesario para corregirlo.
+/// Configuration error with all the context needed to fix it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
-    /// Archivo de configuración afectado.
+    /// Affected configuration file.
     pub file: PathBuf,
-    /// Línea (y columna) cuando se conoce.
+    /// Line (and column) when known.
     pub location: Option<Location>,
-    /// Campo implicado, con ruta serde (p. ej. `listener.web.listen`).
+    /// Involved field, with serde path (e.g. `listener.web.listen`).
     pub field: Option<String>,
-    /// Qué ha fallado.
+    /// What failed.
     pub cause: String,
-    /// Ejemplo de corrección listo para copiar.
+    /// Fix example ready to copy.
     pub example: String,
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "error de configuración en {}", self.file.display())?;
+        write!(f, "configuration error in {}", self.file.display())?;
         if let Some(loc) = &self.location {
             write!(f, ":{}", loc.line)?;
             if let Some(col) = loc.column {
@@ -35,10 +35,10 @@ impl fmt::Display for ConfigError {
             }
         }
         if let Some(field) = &self.field {
-            write!(f, " — campo `{field}`")?;
+            write!(f, " — field `{field}`")?;
         }
         write!(f, ": {}", self.cause)?;
-        write!(f, "\n  ejemplo: {}", self.example)
+        write!(f, "\n  example: {}", self.example)
     }
 }
 
@@ -57,17 +57,17 @@ mod tests {
                 column: Some(3),
             }),
             field: Some("listener.web.listen".to_owned()),
-            cause: "no es una dirección".to_owned(),
+            cause: "is not an address".to_owned(),
             example: "listen = \"127.0.0.1:8080\"".to_owned(),
         };
         let shown = err.to_string();
         for expected in [
             "eqproxy.toml:12:3",
             "listener.web.listen",
-            "no es una dirección",
-            "ejemplo: listen = \"127.0.0.1:8080\"",
+            "is not an address",
+            "example: listen = \"127.0.0.1:8080\"",
         ] {
-            assert!(shown.contains(expected), "falta {expected:?} en: {shown}");
+            assert!(shown.contains(expected), "missing {expected:?} in: {shown}");
         }
     }
 }

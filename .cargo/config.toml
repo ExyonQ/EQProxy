@@ -1,5 +1,5 @@
 # Miri corre por defecto aislado del SO; los tests que escriben en el
 # directorio temporal (eqproxy-config) necesitan -Zmiri-disable-isolation.
-# MIRIFLAGS solo lo lee miri: el resto de invocaciones de cargo no cambian.
+# Only miri reads MIRIFLAGS: other cargo invocations do not change.
 [env]
 MIRIFLAGS = "-Zmiri-disable-isolation"

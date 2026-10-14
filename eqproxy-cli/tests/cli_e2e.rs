@@ -1,5 +1,5 @@
-//! Pruebas E2E a través del **binario real** `eqproxy` (la interfaz que usará
-//! el operador), con sockets reales y señales de proceso reales.
+//! E2E tests through the **real** `eqproxy` binary (the interface the
+//! operator will use), with real sockets and real process signals.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -34,7 +34,7 @@ fn remove_temp(path: &PathBuf) {
     let _ = std::fs::remove_file(path);
 }
 
-/// Backend de eco real en un hilo síncrono.
+/// Real echo backend on a synchronous thread.
 fn start_echo_backend() -> std::net::SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind echo");
     let addr = listener.local_addr().expect("addr echo");
@@ -62,7 +62,7 @@ fn start_echo_backend() -> std::net::SocketAddr {
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_accepts_a_good_config() {
@@ -77,7 +77,7 @@ fn validate_accepts_a_good_config() {
         .args(["config", "validate", "--config"])
         .arg(&config)
         .output()
-        .expect("ejecutar eqproxy config validate");
+        .expect("run eqproxy config validate");
     remove_temp(&config);
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -88,53 +88,53 @@ fn validate_accepts_a_good_config() {
     );
     assert!(stdout.contains("config OK"), "stdout: {stdout}");
     assert!(
-        stdout.contains("1 listener(es), 1 backend(s)"),
+        stdout.contains("1 listener(s), 1 backend(s)"),
         "stdout: {stdout}"
     );
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_reports_file_line_field_cause_example() {
-    // [listener.web] está en la línea 3; el backend referenciado no existe.
+    // [listener.web] is on line 3; the referenced backend does not exist.
     let config = temp_config(
         "bad-ref",
-        "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"fantasma\"\n",
+        "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"ghost\"\n",
     );
     let output = bin()
         .args(["config", "validate", "--config"])
         .arg(&config)
         .output()
-        .expect("ejecutar eqproxy config validate");
+        .expect("run eqproxy config validate");
     remove_temp(&config);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
         Some(1),
-        "debe fallar con código 1; stderr: {stderr}"
+        "must fail with code 1; stderr: {stderr}"
     );
     for expected in [
         &*format!("{}", config.display()),
         ":3",
-        "campo `listener.web.backend`",
-        "fantasma",
-        "ejemplo:",
-        "[backend.fantasma]",
+        "field `listener.web.backend`",
+        "ghost",
+        "example:",
+        "[backend.ghost]",
     ] {
         assert!(
             stderr.contains(expected),
-            "falta {expected:?} en stderr:\n{stderr}"
+            "missing {expected:?} in stderr:\n{stderr}"
         );
     }
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_reports_syntax_errors_with_line() {
@@ -143,22 +143,22 @@ fn validate_reports_syntax_errors_with_line() {
         .args(["config", "validate", "--config"])
         .arg(&config)
         .output()
-        .expect("ejecutar eqproxy config validate");
+        .expect("run eqproxy config validate");
     remove_temp(&config);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr.contains("error de configuración en"),
+        stderr.contains("configuration error in"),
         "stderr:\n{stderr}"
     );
-    assert!(stderr.contains(":2"), "debe ubicar la línea 2:\n{stderr}");
-    assert!(stderr.contains("ejemplo:"), "stderr:\n{stderr}");
+    assert!(stderr.contains(":2"), "must locate line 2:\n{stderr}");
+    assert!(stderr.contains("example:"), "stderr:\n{stderr}");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
@@ -182,22 +182,22 @@ fn unimplemented_commands_fail_explicitly_with_exit_2() {
         assert_eq!(
             output.status.code(),
             Some(2),
-            "{name} debe salir con código 2; stderr: {stderr}"
+            "{name} must exit with code 2; stderr: {stderr}"
         );
         assert!(
-            stderr.contains("no está implementado"),
-            "{name} debe fallar explícitamente; stderr: {stderr}"
+            stderr.contains("not implemented yet"),
+            "{name} must fail explicitly; stderr: {stderr}"
         );
     }
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn run_http_mode_proxies_requests_and_rejects_smuggling() {
-    // Backend HTTP real mínimo: responde 200 con eco del cuerpo.
+    // Minimal real HTTP backend: answers 200 with body echo.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind backend http");
     let backend = listener.local_addr().expect("addr backend");
     std::thread::spawn(move || {
@@ -246,13 +246,13 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     while Instant::now() < deadline {
         line.clear();
         let read = stderr.read_line(&mut line).expect("leer stderr");
-        assert!(read > 0, "eqproxy cerró stderr sin anunciar bind");
-        if let Some(addr) = line.split("escuchando en ").nth(1) {
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
             proxy_addr = addr.trim().to_owned();
             break;
         }
     }
-    assert!(!proxy_addr.is_empty(), "no se anunció la dirección");
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
 
     // Recorrido real: GET proxificado con respuesta observada.
     let mut client = TcpStream::connect(proxy_addr.as_str()).expect("connect al proxy");
@@ -268,7 +268,7 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     assert!(text.starts_with("HTTP/1.1 200 OK"), "respuesta: {text}");
     assert!(text.ends_with("ok"), "cuerpo ecoado: {text}");
 
-    // Caso de error: smuggling CL+TE rechazado con 400 por el binario real.
+    // Error case: CL+TE smuggling rejected with 400 by the real binary.
     let mut evil = TcpStream::connect(proxy_addr.as_str()).expect("connect 2");
     evil.write_all(
         b"POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
@@ -281,16 +281,16 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     let rejected = String::from_utf8_lossy(&rejected);
     assert!(
         rejected.starts_with("HTTP/1.1 400"),
-        "smuggling debe rechazarse: {rejected}"
+        "smuggling must be rejected: {rejected}"
     );
 
-    // SIGINT real → apagado limpio con código 0.
+    // Real SIGINT → clean shutdown with code 0.
     let pid = child.id();
     let kill = Command::new("kill")
         .args(["-INT", &pid.to_string()])
         .status()
         .expect("ejecutar kill");
-    assert!(kill.success(), "kill -INT debe aceptarse");
+    assert!(kill.success(), "kill -INT must be accepted");
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = child.try_wait().expect("try_wait") {
@@ -298,17 +298,17 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            panic!("eqproxy no terminó tras SIGINT");
+            panic!("eqproxy did not finish after SIGINT");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
     remove_temp(&config);
-    assert_eq!(status.code(), Some(0), "apagado limpio debe salir con 0");
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
@@ -330,25 +330,25 @@ fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
         .expect("spawn eqproxy run");
     let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
 
-    // Espera la línea de bind para conocer el puerto efímero real.
+    // Waits for the bind line to learn the real ephemeral port.
     let mut proxy_addr = String::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut line = String::new();
     while Instant::now() < deadline {
         line.clear();
         let read = stderr.read_line(&mut line).expect("leer stderr");
-        assert!(read > 0, "eqproxy cerró stderr sin anunciar bind");
-        if let Some(addr) = line.split("escuchando en ").nth(1) {
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
             proxy_addr = addr.trim().to_owned();
             break;
         }
     }
     assert!(
         !proxy_addr.is_empty(),
-        "no se anunció la dirección de escucha"
+        "the listen address was not announced"
     );
 
-    // Tráfico real a través del proxy.
+    // Real traffic through the proxy.
     let mut client = TcpStream::connect(proxy_addr.as_str()).expect("connect al proxy");
     client.write_all(b"ping").expect("write");
     let mut buf = [0u8; 4];
@@ -356,24 +356,24 @@ fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("read timeout");
     client.read_exact(&mut buf).expect("read eco");
-    assert_eq!(&buf, b"ping", "el eco debe ser byte a byte");
+    assert_eq!(&buf, b"ping", "echo must be byte for byte");
 
-    // SIGINT real → apagado gradual.
+    // Real SIGINT → graceful shutdown.
     let pid = child.id();
     let kill = Command::new("kill")
         .args(["-INT", &pid.to_string()])
         .status()
         .expect("ejecutar kill");
-    assert!(kill.success(), "kill -INT debe aceptarse");
+    assert!(kill.success(), "kill -INT must be accepted");
 
-    // La conexión en curso debe poder terminar tras la señal.
-    client.write_all(b"fin").expect("write tras SIGINT");
+    // The in-flight connection must be able to finish after the signal.
+    client.write_all(b"fin").expect("write after SIGINT");
     let mut tail = [0u8; 3];
-    client.read_exact(&mut tail).expect("eco tras SIGINT");
+    client.read_exact(&mut tail).expect("echo after SIGINT");
     assert_eq!(&tail, b"fin");
     drop(client);
 
-    // El proceso debe terminar solo, con código 0.
+    // The process must exit on its own, with code 0.
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = child.try_wait().expect("try_wait") {
@@ -381,13 +381,13 @@ fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            panic!("eqproxy no terminó tras SIGINT");
+            panic!("eqproxy did not finish after SIGINT");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
     remove_temp(&config);
 
-    assert_eq!(status.code(), Some(0), "el apagado limpio debe salir con 0");
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
     let mut rest = String::new();
     let _ = stderr.read_line(&mut rest);
     let mut remainder = String::new();
@@ -396,13 +396,13 @@ fn run_proxies_traffic_and_shuts_down_gracefully_on_sigint() {
         remainder.push('\n');
     }
     let all = format!("{rest}{remainder}");
-    assert!(all.contains("apagado completado"), "stderr final:\n{all}");
-    assert!(all.contains("METRICAS"), "debe reportar métricas:\n{all}");
+    assert!(all.contains("shutdown complete"), "stderr final:\n{all}");
+    assert!(all.contains("METRICS"), "must report metrics:\n{all}");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_accepts_phase2b_config_with_tls_servers_and_health_checks() {
@@ -437,24 +437,24 @@ fn validate_accepts_phase2b_config_with_tls_servers_and_health_checks() {
         .args(["config", "validate", "--config"])
         .arg(&config)
         .output()
-        .expect("ejecutar eqproxy config validate");
+        .expect("run eqproxy config validate");
     remove_temp(&config);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         output.status.success(),
-        "la config 2b completa debe validarse; stderr: {stderr}"
+        "the full 2b config must validate; stderr: {stderr}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("config OK: 1 listener(es), 1 backend(s)"),
+        stdout.contains("config OK: 1 listener(s), 1 backend(s)"),
         "stdout: {stdout}"
     );
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_rejects_server_and_servers_together() {
@@ -466,25 +466,25 @@ fn validate_rejects_server_and_servers_together() {
         .args(["config", "validate", "--config"])
         .arg(&config)
         .output()
-        .expect("ejecutar eqproxy config validate");
+        .expect("run eqproxy config validate");
     remove_temp(&config);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
         Some(1),
-        "server + servers debe rechazarse; stderr: {stderr}"
+        "server + servers must be rejected; stderr: {stderr}"
     );
     assert!(
-        stderr.contains("campo `backend.api.servers`"),
+        stderr.contains("field `backend.api.servers`"),
         "stderr: {stderr}"
     );
-    assert!(stderr.contains("excluyentes"), "stderr: {stderr}");
+    assert!(stderr.contains("mutually exclusive"), "stderr: {stderr}");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn validate_reports_missing_cert_file_with_actionable_error() {
@@ -496,22 +496,22 @@ fn validate_reports_missing_cert_file_with_actionable_error() {
         .args(["config", "validate", "--config"])
         .arg(&config)
         .output()
-        .expect("ejecutar eqproxy config validate");
+        .expect("run eqproxy config validate");
     remove_temp(&config);
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(
         output.status.code(),
         Some(1),
-        "un cert inexistente debe rechazarse; stderr: {stderr}"
+        "a missing cert must be rejected; stderr: {stderr}"
     );
     assert!(stderr.contains("listener.web.tls.cert"), "stderr: {stderr}");
-    assert!(stderr.contains("no se pudo leer"), "stderr: {stderr}");
+    assert!(stderr.contains("could not read"), "stderr: {stderr}");
 }
 
 #[cfg_attr(
     miri,
-    ignore = "requiere procesos y sockets TCP: miri no los soporta (rust-lang/miri#3449)"
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
 fn run_with_tls_termination_proxies_real_traffic() {
@@ -550,16 +550,16 @@ fn run_with_tls_termination_proxies_real_traffic() {
     while Instant::now() < deadline {
         line.clear();
         let read = stderr.read_line(&mut line).expect("leer stderr");
-        assert!(read > 0, "eqproxy cerró stderr sin anunciar bind");
-        if let Some(addr) = line.split("escuchando en ").nth(1) {
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
             proxy_addr = addr.trim().to_owned();
             break;
         }
     }
-    assert!(!proxy_addr.is_empty(), "no se anunció la dirección TLS");
+    assert!(!proxy_addr.is_empty(), "the TLS address was not announced");
 
     // Cliente TLS real (openssl s_client) contra el listener con termination:
-    // el eco debe volver por el túnel cifrado.
+    // the echo must come back through the encrypted tunnel.
     let mut client = Command::new("openssl")
         .args([
             "s_client",
@@ -572,7 +572,7 @@ fn run_with_tls_termination_proxies_real_traffic() {
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("spawn openssl s_client (necesario para el e2e TLS)");
+        .expect("spawn openssl s_client (needed for the TLS e2e)");
     client
         .stdin
         .take()
@@ -583,16 +583,16 @@ fn run_with_tls_termination_proxies_real_traffic() {
     let echoed = String::from_utf8_lossy(&output.stdout);
     assert!(
         echoed.contains("ping"),
-        "el eco TLS debe volver íntegro; stdout: {echoed}"
+        "the TLS echo must come back intact; stdout: {echoed}"
     );
 
-    // SIGINT real → apagado limpio con código 0.
+    // Real SIGINT → clean shutdown with code 0.
     let pid = child.id();
     let kill = Command::new("kill")
         .args(["-INT", &pid.to_string()])
         .status()
         .expect("ejecutar kill");
-    assert!(kill.success(), "kill -INT debe aceptarse");
+    assert!(kill.success(), "kill -INT must be accepted");
     let deadline = Instant::now() + Duration::from_secs(15);
     let status = loop {
         if let Some(status) = child.try_wait().expect("try_wait") {
@@ -600,10 +600,10 @@ fn run_with_tls_termination_proxies_real_traffic() {
         }
         if Instant::now() >= deadline {
             let _ = child.kill();
-            panic!("eqproxy no terminó tras SIGINT");
+            panic!("eqproxy did not finish after SIGINT");
         }
         std::thread::sleep(Duration::from_millis(50));
     };
     remove_temp(&config);
-    assert_eq!(status.code(), Some(0), "el apagado limpio debe salir con 0");
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
 }

@@ -1,12 +1,12 @@
-//! TLS (A11/A12) con rustls: termination en el listener y cliente a backends.
+//! TLS (A11/A12) with rustls: termination at the listener and client to backends.
 //!
-//! - **Servidor (A11)**: cadena de certificados + clave privada PEM, ALPN
-//!   explícito (A14) y versión mínima TLS 1.2 (TLS 1.0/1.1 nunca se aceptan).
-//! - **Cliente (A12)**: verificación de certificado **y de nombre** activada
-//!   por defecto (SNI derivado de la dirección o `server_name`); `verify =
-//!   false` es un opt-out consciente y peligroso (THREAT_MODEL), y `ca_file`
-//!   añade CAs privadas a las raíces de Mozilla.
-//! - CryptoProvider: aws-lc-rs (ADR-0004). Código 100 % safe Rust.
+//! - **Server (A11)**: certificate chain + PEM private key, explicit ALPN
+//!   (A14) and minimum TLS 1.2 (TLS 1.0/1.1 are never accepted).
+//! - **Client (A12)**: certificate **and name** verification on
+//!   by default (SNI derived from the address or `server_name`); `verify =
+//!   false` is a conscious, dangerous opt-out (THREAT_MODEL), and `ca_file`
+//!   adds private CAs to the Mozilla roots.
+//! - CryptoProvider: aws-lc-rs (ADR-0004). 100 % safe Rust code.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -17,41 +17,41 @@ use rustls_pki_types::pem::PemObject;
 use rustls_pki_types::{CertificateDer, IpAddr, PrivateKeyDer, ServerName};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-/// Versión mínima de TLS aceptada (1.0/1.1 no existen en rustls moderno).
+/// Minimum accepted TLS version (1.0/1.1 do not exist in modern rustls).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TlsVersion {
-    /// TLS 1.2 como mínimo (por defecto).
+    /// TLS 1.2 at minimum (default).
     #[default]
     V1_2,
-    /// Solo TLS 1.3.
+    /// TLS 1.3 only.
     V1_3,
 }
 
-/// Error de configuración TLS accionable.
+/// Actionable TLS configuration error.
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
-    #[error("certificado PEM inválido: {0}")]
+    #[error("invalid PEM certificate: {0}")]
     Cert(String),
-    #[error("clave privada PEM inválida: {0}")]
+    #[error("invalid PEM private key: {0}")]
     Key(String),
-    #[error("CA PEM inválido: {0}")]
+    #[error("invalid PEM CA: {0}")]
     Ca(String),
-    #[error("server_name «{0}» no es un nombre DNS ni una IP válida")]
+    #[error("server_name \"{0}\" is not a valid DNS name or IP")]
     ServerName(String),
-    #[error("configuración TLS inválida: {0}")]
+    #[error("invalid TLS configuration: {0}")]
     Config(String),
 }
 
-/// Cliente TLS hacia backends (A12), listo para conectar.
+/// TLS client to backends (A12), ready to connect.
 #[derive(Clone)]
 pub struct ClientTls {
     pub connector: TlsConnector,
-    /// SNI/verificación fijados en config; si es `None` se deriva de la
-    /// dirección del servidor elegido (IP literal, sin SNI DNS).
+    /// Config-pinned SNI/verification; when `None` it is derived from the
+    /// chosen server address (literal IP, no DNS SNI).
     pub server_name: Option<ServerName<'static>>,
 }
 
-/// Aceptor TLS del listener (A11), con acceso a lo negociado (ALPN).
+/// TLS acceptor of the listener (A11), with access to the negotiated (ALPN).
 #[derive(Clone)]
 pub struct ServerTls {
     pub acceptor: TlsAcceptor,
@@ -59,7 +59,7 @@ pub struct ServerTls {
 }
 
 impl ServerTls {
-    /// Protocolos ALPN configurados en el listener (A14).
+    /// ALPN protocols configured on the listener (A14).
     #[must_use]
     pub fn alpn(&self) -> &[Vec<u8>] {
         &self.config.alpn_protocols
@@ -92,34 +92,34 @@ fn protocol_versions(min: TlsVersion) -> &'static [&'static rustls::SupportedPro
     }
 }
 
-/// Parsea una cadena de certificados PEM (hoja primero).
+/// Parses a PEM certificate chain (leaf first).
 ///
-/// Usa el parser de `rustls-pki-types` (`PemObject`); `rustls-pemfile` está
+/// Uses the `rustls-pki-types` parser (`PemObject`); `rustls-pemfile` is
 /// deprecated (RUSTSEC-2025-0134).
 pub fn parse_certs(pem: &[u8]) -> Result<Vec<CertificateDer<'static>>, TlsError> {
     let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_slice_iter(pem)
         .collect::<Result<_, _>>()
         .map_err(|e| TlsError::Cert(e.to_string()))?;
     if certs.is_empty() {
-        return Err(TlsError::Cert("sin certificados en el PEM".to_owned()));
+        return Err(TlsError::Cert("no certificates in the PEM".to_owned()));
     }
     Ok(certs)
 }
 
-/// Parsea una clave privada PEM (PKCS#8, PKCS#1 o SEC1).
+/// Parses a PEM private key (PKCS#8, PKCS#1 or SEC1).
 pub fn parse_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, TlsError> {
     PrivateKeyDer::pem_slice_iter(pem)
         .next()
         .transpose()
         .map_err(|e| TlsError::Key(e.to_string()))?
-        .ok_or_else(|| TlsError::Key("sin clave privada en el PEM".to_owned()))
+        .ok_or_else(|| TlsError::Key("no private key in the PEM".to_owned()))
 }
 
-/// Construye el acceptor TLS del listener (A11).
+/// Builds the listener TLS acceptor (A11).
 ///
-/// `cert_chain_pem`: cadena completa (hoja primero); `key_pem`: clave privada.
-/// `alpn`: protocolos ofrecidos (vacío = sin ALPN). Error accionable si el PEM
-/// no parsea o la clave no corresponde a la hoja.
+/// `cert_chain_pem`: full chain (leaf first); `key_pem`: private key.
+/// `alpn`: offered protocols (empty = no ALPN). Actionable error when the PEM
+/// does not parse or the key does not match the leaf.
 pub fn server_config(
     cert_chain_pem: &[u8],
     key_pem: &[u8],
@@ -131,7 +131,7 @@ pub fn server_config(
     let mut config = rustls::ServerConfig::builder_with_protocol_versions(protocol_versions(min))
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .map_err(|e| TlsError::Config(format!("clave y certificado no compatibles: {e}")))?;
+        .map_err(|e| TlsError::Config(format!("key and certificate do not match: {e}")))?;
     config.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
     let config = Arc::new(config);
     Ok(ServerTls {
@@ -140,10 +140,10 @@ pub fn server_config(
     })
 }
 
-/// Construye el cliente TLS hacia backends (A12).
+/// Builds the TLS client to backends (A12).
 ///
-/// Verificación activada por defecto; raíces de Mozilla + `ca_pem` opcional.
-/// `verify = false` desactiva la verificación por completo (opt-out consciente).
+/// Verification on by default; Mozilla roots + optional `ca_pem`.
+/// `verify = false` disables verification entirely (conscious opt-out).
 pub fn client_config(
     ca_pem: Option<&[u8]>,
     verify: bool,
@@ -160,7 +160,7 @@ pub fn client_config(
             for cert in parse_certs(ca).map_err(|e| TlsError::Ca(e.to_string()))? {
                 roots
                     .add(cert)
-                    .map_err(|e| TlsError::Ca(format!("raíz inválida: {e}")))?;
+                    .map_err(|e| TlsError::Ca(format!("invalid root: {e}")))?;
             }
         }
         builder.with_root_certificates(roots).with_no_client_auth()
@@ -184,8 +184,8 @@ pub fn client_config(
     })
 }
 
-/// Nombre a verificar/SNI para una conexión concreta: el `server_name` de la
-/// config si existe; si no, la IP del servidor (SNI literal sin DNS).
+/// Name to verify/SNI for a given connection: the config `server_name`
+/// when present; otherwise the server IP (literal SNI, no DNS).
 #[must_use]
 pub fn server_name_for(client: &ClientTls, addr: SocketAddr) -> ServerName<'static> {
     client
@@ -194,8 +194,8 @@ pub fn server_name_for(client: &ClientTls, addr: SocketAddr) -> ServerName<'stat
         .unwrap_or_else(|| ServerName::IpAddress(IpAddr::from(addr.ip())))
 }
 
-/// Verificador sin verificación (`verify = false`): acepta cualquier certificado
-/// pero sigue validando las firmas del handshake.
+/// Non-verifying verifier (`verify = false`): accepts any certificate
+/// but still validates the handshake signatures.
 #[derive(Debug)]
 struct NoVerifier(rustls::crypto::CryptoProvider);
 
@@ -251,27 +251,27 @@ mod tests {
     const CERT: &[u8] = include_bytes!("../tests/fixtures/cert.pem");
     const KEY: &[u8] = include_bytes!("../tests/fixtures/key.pem");
 
-    #[cfg_attr(miri, ignore = "usa rustls/aws-lc-rs (FFI no emulable por miri)")]
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn server_config_accepts_valid_pem_and_alpn() {
         let server = server_config(CERT, KEY, &["http/1.1".to_owned()], TlsVersion::V1_2)
-            .expect("cert/key de test válidos");
+            .expect("valid test cert/key");
         assert_eq!(server.alpn(), vec![b"http/1.1".to_vec()]);
     }
 
-    #[cfg_attr(miri, ignore = "usa rustls/aws-lc-rs (FFI no emulable por miri)")]
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn server_config_rejects_garbage_with_actionable_error() {
         let err = server_config(b"no es PEM", KEY, &[], TlsVersion::V1_2)
-            .expect_err("debe rechazar basura");
+            .expect_err("must reject garbage");
         assert!(matches!(err, TlsError::Cert(_)), "error: {err}");
 
         let err = server_config(CERT, b"no es PEM", &[], TlsVersion::V1_2)
-            .expect_err("debe rechazar clave basura");
+            .expect_err("must reject garbage key");
         assert!(matches!(err, TlsError::Key(_)), "error: {err}");
     }
 
-    #[cfg_attr(miri, ignore = "usa rustls/aws-lc-rs (FFI no emulable por miri)")]
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn client_config_rejects_invalid_server_name() {
         let err = client_config(
@@ -281,14 +281,14 @@ mod tests {
             &[],
             TlsVersion::V1_2,
         )
-        .expect_err("debe rechazar el nombre");
+        .expect_err("must reject the name");
         assert!(matches!(err, TlsError::ServerName(_)), "error: {err}");
     }
 
-    #[cfg_attr(miri, ignore = "usa rustls/aws-lc-rs (FFI no emulable por miri)")]
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn server_name_defaults_to_server_ip() {
-        let client = client_config(None, false, None, &[], TlsVersion::V1_2).expect("cliente");
+        let client = client_config(None, false, None, &[], TlsVersion::V1_2).expect("client");
         let addr: SocketAddr = "127.0.0.1:9000".parse().expect("addr");
         assert!(matches!(
             server_name_for(&client, addr),

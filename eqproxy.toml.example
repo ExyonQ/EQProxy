@@ -1,52 +1,52 @@
-# Ejemplo de configuración de EQProxy (Fase 2b).
+# Example EQProxy configuration (Phase 2b).
 #
-# Errores de validación: archivo, línea, campo, causa y ejemplo de corrección.
+# Validation errors: file, line, field, cause and a fix example.
 
 schema_version = 1
 
-# Ventana de drenaje al apagar (SIGINT): las conexiones vivas pueden terminar.
+# Drain window on shutdown (SIGINT): live connections may finish.
 shutdown_grace = "10s"
 
 [listener.web]
-listen = "127.0.0.1:8080"   # IP:PUERTO (puerto 0 = efímero)
-backend = "api"             # referencia a una sección [backend.*]
-mode = "tcp"                # "tcp" (túnel) u "http" (HTTP/1.1 estricto)
-maxconn = 1024              # conexiones simultáneas; al llenarse se rechaza
-connect_timeout = "5s"      # conexión al backend
-idle_timeout = "60s"        # inactividad por dirección del túnel
-# Solo mode = "http": timeouts por fase de mensaje
-client_header_timeout = "5s"   # cabecera de petición (cliente → proxy)
-server_header_timeout = "30s"  # cabecera de respuesta (backend → proxy)
+listen = "127.0.0.1:8080"   # IP:PORT (port 0 = ephemeral)
+backend = "api"             # reference to a [backend.*] section
+mode = "tcp"                # "tcp" (tunnel) or "http" (strict HTTP/1.1)
+maxconn = 1024              # concurrent connections; newcomers are refused when full
+connect_timeout = "5s"      # connect to the backend
+idle_timeout = "60s"        # inactivity per tunnel direction
+# mode = "http" only: per-message-phase timeouts
+client_header_timeout = "5s"   # request head (client → proxy)
+server_header_timeout = "30s"  # response head (backend → proxy)
 
-# TLS termination (A11): opcional. Sin esta sección el listener es TCP plano.
+# TLS termination (A11): optional. Without this section the listener is plain TCP.
 #[listener.web.tls]
-#cert = "certs/fullchain.pem"  # cadena PEM (hoja primero)
-#key = "certs/privkey.pem"     # clave privada PEM (PKCS#8/PKCS#1/SEC1)
-#alpn = ["http/1.1"]           # ALPN ofrecido (A14); vacío = sin ALPN
-#min_version = "1.2"           # "1.2" (por defecto) o "1.3"
+#cert = "certs/fullchain.pem"  # PEM chain (leaf first)
+#key = "certs/privkey.pem"     # PEM private key (PKCS#8/PKCS#1/SEC1)
+#alpn = ["http/1.1"]           # offered ALPN (A14); empty = no ALPN
+#min_version = "1.2"           # "1.2" (default) or "1.3"
 
 [backend.api]
-# Un servidor (compat 0.1.0) …
+# One server (compat 0.1.0) …
 server = "127.0.0.1:9000"
-# … o varios con peso (B1/B7). `server` y `servers` son excluyentes.
+# … or several with weights (B1/B7). `server` and `servers` are mutually exclusive.
 #servers = [
-#  { addr = "10.0.0.1:9000", weight = 3 },   # weight 0..=256; 0 = drenado
+#  { addr = "10.0.0.1:9000", weight = 3 },   # weight 0..=256; 0 = drained
 #  { addr = "10.0.0.2:9000", weight = 1 },
 #]
-#balance = "roundrobin"        # Fase 2b: solo roundrobin ponderado
-#proxy_protocol = "v1"         # envía PROXY protocol v1 a los servidores (A9)
+#balance = "roundrobin"        # Phase 2b: weighted round-robin only
+#proxy_protocol = "v1"         # send PROXY protocol v1 to the servers (A9)
 
-# Health check TCP activo (B11). Ausente = todos los servidores operativos.
+# Active TCP health check (B11). Absent = all servers operational.
 #[backend.api.health_check]
-#interval = "2s"   # entre ciclos de comprobación
-#timeout = "1s"    # por intento de conexión
-#fall = 3          # fallos consecutivos → servidor caído
-#rise = 2          # éxitos consecutivos → servidor operativo
+#interval = "2s"   # between check cycles
+#timeout = "1s"    # per connection attempt
+#fall = 3          # consecutive failures → server down
+#rise = 2          # consecutive successes → server up
 
-# TLS hacia los servidores (A12). Ausente = TCP plano.
+# TLS to the servers (A12). Absent = plain TCP.
 #[backend.api.tls]
-#verify = true               # verificación de certificado y nombre (por defecto)
-#ca_file = "certs/ca.pem"    # CA adicionales (CAs privadas)
-#server_name = "api.internal"  # SNI/verificación; por defecto el host de `addr`
+#verify = true               # certificate and name verification (default)
+#ca_file = "certs/ca.pem"    # extra CAs (private CAs)
+#server_name = "api.internal"  # SNI/verification; defaults to the `addr` host
 #alpn = ["http/1.1"]
 #min_version = "1.2"

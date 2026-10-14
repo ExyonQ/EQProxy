@@ -1,18 +1,18 @@
-# Auditoría Veyra Proof — EQProxy.
+# Veyra Proof audit — EQProxy.
 #
-# Los escenarios E2E ejercitan el binario `eqproxy` construido por cargo a
-# través de su interfaz pública (argv + stdin) y comparan lo observado
-# (exit, stdout, stderr) con lo declarado aquí. Sin expectativas observables
-# un escenario es un hallazgo (E2E00), no un pass.
+# The E2E scenarios exercise the cargo-built `eqproxy` binary through
+# its public interface (argv + stdin) and compare the observed
+# (exit, stdout, stderr) against what is declared here. With no observable
+# expectations a scenario is a finding (E2E00), not a pass.
 
 [e2e]
 binaries = ["eqproxy"]
 timeout_seconds = 60
 
-# Recorrido feliz real: una config válida se acepta y reporta el resumen.
+# Real happy path: a valid config is accepted and reports the summary.
 # /dev/stdin permite entregar la config por stdin sin rutas del checkout.
 [[e2e.scenarios]]
-name = "validate-acepta-config-valida"
+name = "validate-accepts-valid-config"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -25,22 +25,22 @@ backend = "app"
 server = "127.0.0.1:9000"
 '''
 expect_exit = 0
-expect_stdout_regex = "config OK: 1 listener\\(es\\), 1 backend\\(s\\)"
+expect_stdout_regex = "config OK: 1 listener\\(s\\), 1 backend\\(s\\)"
 
-# Error accionable: schema_version no soportado → exit 1 con campo y ejemplo.
+# Actionable error: unsupported schema_version → exit 1 with field and example.
 [[e2e.scenarios]]
-name = "validate-reporta-schema-version-no-soportado"
+name = "validate-reports-unsupported-schema-version"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 99
 '''
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "schema_version = 99 no soportado por este binario"
+expect_stderr_regex = "schema_version = 99 not supported by this binary"
 
-# Entrada inválida real: TOML con error de sintaxis → línea y ejemplo.
+# Real invalid input: TOML with a syntax error → line and example.
 [[e2e.scenarios]]
-name = "validate-reporta-error-de-sintaxis-con-linea"
+name = "validate-reports-syntax-error-with-line"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -48,36 +48,36 @@ listener.web listen =
 '''
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "error de configuración en /dev/stdin:[0-9]+"
+expect_stderr_regex = "configuration error in /dev/stdin:[0-9]+"
 
-# Archivo inexistente: fallo explícito con causa y ejemplo; nunca éxito
-# silencioso ni pánico.
+# Missing file: explicit failure with cause and example; never silent
+# success nor panic.
 [[e2e.scenarios]]
-name = "validate-con-config-inexistente-falla"
+name = "validate-with-missing-config-fails"
 argv = ["config", "validate", "--config", "no-existe.toml"]
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "no se pudo leer el archivo"
+expect_stderr_regex = "could not read the file"
 
-# El dataplane no arranca a medias sin config.
+# The dataplane does not half-start without config.
 [[e2e.scenarios]]
-name = "run-con-config-inexistente-falla"
+name = "run-with-missing-config-fails"
 argv = ["run", "--config", "no-existe.toml"]
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "no se pudo leer el archivo"
+expect_stderr_regex = "could not read the file"
 
-# Funcionalidad no implementada: exit 2 explícito (nunca simula éxito).
+# Unimplemented functionality: explicit exit 2 (never fakes success).
 [[e2e.scenarios]]
-name = "comando-no-implementado-sale-con-2"
+name = "unimplemented-command-exits-2"
 argv = ["config", "explain", "--config", "eqproxy.toml"]
 expect_failure = true
 expect_exit = 2
-expect_stderr_regex = "no está implementado todavía"
+expect_stderr_regex = "not implemented yet"
 
-# Fase 2b: servidores con pesos y health check se aceptan y resumen.
+# Phase 2b: weighted servers and health check are accepted and summarized.
 [[e2e.scenarios]]
-name = "validate-acepta-servers-pesos-y-health-check"
+name = "validate-accepts-servers-weights-and-health-check"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -95,11 +95,11 @@ fall = 3
 rise = 2
 '''
 expect_exit = 0
-expect_stdout_regex = "config OK: 1 listener\\(es\\), 1 backend\\(s\\)"
+expect_stdout_regex = "config OK: 1 listener\\(s\\), 1 backend\\(s\\)"
 
-# `server` y `servers` son excluyentes: error accionable con el campo.
+# `server` and `servers` are mutually exclusive: actionable error with the field.
 [[e2e.scenarios]]
-name = "validate-rechaza-server-y-servers"
+name = "validate-rejects-server-and-servers"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -109,11 +109,11 @@ servers = [{ addr = "127.0.0.1:9001" }]
 '''
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "backend.api.servers.*excluyentes"
+expect_stderr_regex = "backend.api.servers.*mutually exclusive"
 
-# Peso fuera de rango (HAProxy: 0..=256) → error con rango y ejemplo.
+# Out-of-range weight (HAProxy: 0..=256) → error with range and example.
 [[e2e.scenarios]]
-name = "validate-rechaza-peso-fuera-de-rango"
+name = "validate-rejects-out-of-range-weight"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -122,11 +122,11 @@ servers = [{ addr = "127.0.0.1:9000", weight = 257 }]
 '''
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "weight = 257 fuera de rango"
+expect_stderr_regex = "weight = 257 out of range"
 
-# ALPN duplicado (A14): la lista debe ser un conjunto.
+# Duplicate ALPN (A14): the list must be a set.
 [[e2e.scenarios]]
-name = "validate-rechaza-alpn-duplicado"
+name = "validate-rejects-duplicate-alpn"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -142,11 +142,11 @@ server = "127.0.0.1:9000"
 '''
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "ALPN duplicado"
+expect_stderr_regex = "duplicate ALPN"
 
-# Health check con umbrales 0: inválido (fall/rise ≥ 1).
+# Health check with 0 thresholds: invalid (fall/rise ≥ 1).
 [[e2e.scenarios]]
-name = "validate-rechaza-health-check-cero"
+name = "validate-rejects-zero-health-check"
 argv = ["config", "validate", "--config", "/dev/stdin"]
 stdin = '''
 schema_version = 1
@@ -158,11 +158,11 @@ rise = 0
 '''
 expect_failure = true
 expect_exit = 1
-expect_stderr_regex = "health_check.fall debe ser al menos 1"
+expect_stderr_regex = "health_check.fall must be at least 1"
 
-# Mutants acotado a la lógica crítica de configuración (presupuesto de
-# recursos, validación semántica y errores accionables). Un glob sin
-# mutantes sería un OK falso: los prefijos de ruta son del workspace.
+# Mutants scoped to the critical configuration logic (resource
+# budget, semantic validation and actionable errors). A glob with no
+# mutants would be a false OK: the path prefixes belong to the workspace.
 [mutants]
 paths = [
     "eqproxy-config/src/validate.rs",

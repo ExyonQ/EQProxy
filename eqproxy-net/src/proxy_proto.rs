@@ -1,14 +1,14 @@
-//! PROXY protocol v1 (A9): generación de la cabecera hacia el backend.
+//! PROXY protocol v1 (A9): header generation towards the backend.
 //!
-//! Solo **envío** (Fase 2b); la recepción llega en Fase 3 con su política de
-//! confianza (THREAT_MODEL: nunca confiar en PROXY de fuentes no autorizadas).
-//! Formato según la especificación PROXY protocol v1 (máx. 107 bytes).
+//! **Send** only (Phase 2b); reception arrives in Phase 3 with its trust
+//! trust (THREAT_MODEL: never trust PROXY from unauthorized sources).
+//! Format per the PROXY protocol v1 spec (max 107 bytes).
 
 use std::net::SocketAddr;
 
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
-/// Modo de envío de PROXY protocol (A9).
+/// PROXY protocol send mode (A9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProxyProtocolMode {
     /// Sin cabecera PROXY (por defecto).
@@ -18,8 +18,8 @@ pub enum ProxyProtocolMode {
     V1,
 }
 
-/// Codifica la cabecera PROXY v1 para el par (cliente, dirección local del
-/// proxy). Familias mixtas o no TCP → `PROXY UNKNOWN\r\n` (semántica HAProxy).
+/// Encodes the PROXY v1 header for the pair (client, proxy local address).
+/// Mixed families or non-TCP → `PROXY UNKNOWN\r\n` (HAProxy semantics).
 #[must_use]
 pub fn encode_v1(peer: SocketAddr, local: SocketAddr) -> Vec<u8> {
     match (peer, local) {
@@ -43,8 +43,8 @@ pub fn encode_v1(peer: SocketAddr, local: SocketAddr) -> Vec<u8> {
     }
 }
 
-/// Escribe la cabecera PROXY v1 en el stream (una sola escritura, flush
-/// incluido) antes de bombear el payload.
+/// Writes the PROXY v1 header to the stream (single write, flush
+/// included) before pumping the payload.
 pub async fn write_v1<W: AsyncWrite + Unpin>(
     writer: &mut W,
     peer: SocketAddr,
@@ -78,7 +78,7 @@ mod tests {
             header,
             b"PROXY TCP6 2001:db8::1 2001:db8::2 51234 443\r\n".to_vec()
         );
-        assert!(header.len() <= 107, "la cabecera v1 máx. son 107 bytes");
+        assert!(header.len() <= 107, "the v1 header is 107 bytes max");
     }
 
     #[test]
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn write_v1_writes_exact_header() {
-        // Runtime sin driver IO (mio/kqueue): el test solo escribe en memoria.
+        // Runtime without IO driver (mio/kqueue): the test only writes to memory.
         tokio::runtime::Builder::new_current_thread()
             .enable_time()
             .build()

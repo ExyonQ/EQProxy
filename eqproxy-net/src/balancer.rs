@@ -1,13 +1,13 @@
-//! Balanceo round-robin ponderado (B1/B7) con estado de salud por servidor.
+//! Weighted round-robin balancing (B1/B7) with per-server health state.
 //!
-//! Algoritmo: *smooth weighted round-robin* (determinista; el desempate sigue
-//! el orden de configuración). Un servidor con `weight = 0` nunca se selecciona
-//! (drenado) pero sigue siendo comprobado por los health checks (B11).
+//! Algorithm: *smooth weighted round-robin* (deterministic; ties follow
+//! configuration order). A server with `weight = 0` is never selected
+//! (drained) but keeps being probed by health checks (B11).
 //!
-//! Estado de salud: máquina `fall`/`rise` — `fall` fallos consecutivos caen al
-//! servidor, `rise` éxitos consecutivos lo levantan. Los servidores arrancan
-//! operativos (como HAProxy antes del primer check); sin health check
-//! configurado permanecen operativos siempre.
+//! Health state: `fall`/`rise` machine — `fall` consecutive failures drop
+//! the server, `rise` consecutive successes raise it. Servers start
+//! operational (like HAProxy before the first check); with no health check
+//! configured they stay operational forever.
 
 use std::net::SocketAddr;
 use std::sync::{Mutex, MutexGuard};
@@ -28,7 +28,7 @@ struct ServerState {
     consecutive_rises: u32,
 }
 
-/// Round-robin ponderado con estado de salud compartido (por backend).
+/// Weighted round-robin with shared health state (per backend).
 #[derive(Debug)]
 pub struct Balancer {
     fall: u32,
@@ -38,8 +38,8 @@ pub struct Balancer {
 }
 
 impl Balancer {
-    /// Crea el balancer para `servers` (en orden de configuración). `fall` y
-    /// `rise` son los umbrales de la máquina de salud (B11).
+    /// Creates the balancer for `servers` (in configuration order). `fall` and
+    /// `rise` are the health-machine thresholds (B11).
     #[must_use]
     pub fn new(servers: Vec<ResolvedServer>, fall: u32, rise: u32) -> Self {
         let addrs: Vec<SocketAddr> = servers.iter().map(|s| s.addr).collect();
@@ -61,22 +61,22 @@ impl Balancer {
         }
     }
 
-    /// Estado compartido; un lock envenenado (pánico previo en otro hilo) se
-    /// recupera con el estado íntegro en vez de propagar el pánico.
+    /// Shared state; a poisoned lock (a previous panic on another thread)
+    /// recovers with the state intact instead of propagating the panic.
     fn state(&self) -> MutexGuard<'_, Vec<ServerState>> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Direcciones de los servidores (orden de configuración).
+    /// Server addresses (configuration order).
     #[must_use]
     pub fn servers(&self) -> &[SocketAddr] {
         &self.addrs
     }
 
-    /// Selecciona el siguiente servidor operativo, o `None` si todos caídos
-    /// (o todos con `weight = 0`).
+    /// Selects the next operational server, or `None` when all are down
+    /// (or all with `weight = 0`).
     #[must_use]
     pub fn pick(&self) -> Option<SocketAddr> {
         let mut state = self.state();
@@ -102,12 +102,12 @@ impl Balancer {
         self.addrs.get(chosen).copied()
     }
 
-    /// Registra un health check exitoso (máquina `rise`).
+    /// Records a successful health check (`rise` machine).
     pub fn report_ok(&self, addr: SocketAddr) {
         self.report(addr, true);
     }
 
-    /// Registra un health check fallido (máquina `fall`).
+    /// Records a failed health check (`fall` machine).
     pub fn report_fail(&self, addr: SocketAddr) {
         self.report(addr, false);
     }
@@ -135,7 +135,7 @@ impl Balancer {
         }
     }
 
-    /// ¿Está operativo el servidor?
+    /// Is the server operational?
     #[must_use]
     pub fn is_up(&self, addr: SocketAddr) -> bool {
         let state = self.state();
@@ -174,7 +174,7 @@ mod tests {
         assert_eq!(
             picks,
             vec![1, 2, 3, 1, 2, 3],
-            "rotación fija en orden de config"
+            "fixed rotation in config order"
         );
     }
     #[test]
@@ -184,10 +184,14 @@ mod tests {
             .filter_map(|_| balancer.pick())
             .map(|a| a.port())
             .collect();
-        assert_eq!(picks.len(), 8, "con operativos siempre hay pick");
+        assert_eq!(
+            picks.len(),
+            8,
+            "with operational servers there is always a pick"
+        );
         let a = picks.iter().filter(|port| **port == 1).count();
         let b = picks.iter().filter(|port| **port == 2).count();
-        assert_eq!((a, b), (2, 6), "proporción 1:3 en dos ciclos completos");
+        assert_eq!((a, b), (2, 6), "1:3 ratio over two full cycles");
     }
 
     #[test]
@@ -196,7 +200,7 @@ mod tests {
         for _ in 0..4 {
             assert_eq!(balancer.pick().map(|a| a.port()), Some(2));
         }
-        assert_eq!(balancer.up_count(), 2, "weight=0 sigue operativo");
+        assert_eq!(balancer.up_count(), 2, "weight=0 stays operational");
     }
 
     #[test]
@@ -220,13 +224,16 @@ mod tests {
         balancer.report_fail(addr);
         assert!(!balancer.is_up(addr), "2 fallos con fall=2 derriban");
 
-        // Un éxito seguido de un fallo reinicia la cuenta de rise.
+        // A success followed by a failure resets the rise count.
         balancer.report_ok(addr);
-        assert!(!balancer.is_up(addr), "1 éxito con rise=2 no levanta");
+        assert!(
+            !balancer.is_up(addr),
+            "1 success with rise=2 does not raise"
+        );
         balancer.report_fail(addr);
         assert!(!balancer.is_up(addr));
         balancer.report_ok(addr);
         balancer.report_ok(addr);
-        assert!(balancer.is_up(addr), "2 éxitos con rise=2 levantan");
+        assert!(balancer.is_up(addr), "2 successes with rise=2 raise");
     }
 }

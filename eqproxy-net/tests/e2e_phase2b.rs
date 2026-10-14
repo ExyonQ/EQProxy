@@ -1,7 +1,7 @@
-//! Pruebas E2E de Fase 2b con **sockets reales**: TLS termination (A11),
-//! TLS a backends (A12), ALPN (A14), balanceo RR ponderado (B1/B7), health
-//! checks TCP (B11) y PROXY protocol v1 (A9). Una prueba por fila de la
-//! PARITY_MATRIX + casos de error y límite.
+//! Phase 2b E2E tests with **real sockets**: TLS termination (A11),
+//! TLS to backends (A12), ALPN (A14), weighted RR balancing (B1/B7), TCP
+//! health checks (B11) and PROXY protocol v1 (A9). One test per
+//! PARITY_MATRIX row + error and limit cases.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -25,7 +25,7 @@ const KEY: &[u8] = include_bytes!("fixtures/key.pem");
 
 // ---------------------------------------------------------------- helpers ---
 
-/// Backend de eco puro (sin byte de identificación).
+/// Pure echo backend (no identification byte).
 async fn start_echo() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
     let addr = listener.local_addr().expect("addr echo");
@@ -49,7 +49,7 @@ async fn start_echo() -> SocketAddr {
     addr
 }
 
-/// Backend que escribe su `id` al aceptar y hace eco del resto.
+/// Backend that writes its `id` on accept and echoes the rest.
 async fn start_marker_echo(id: u8) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
     let addr = listener.local_addr().expect("addr echo");
@@ -74,7 +74,7 @@ async fn start_marker_echo(id: u8) -> SocketAddr {
     addr
 }
 
-/// Backend eco TLS (A12 como servidor de origen).
+/// TLS echo backend (A12 as origin server).
 async fn start_tls_echo() -> SocketAddr {
     let server = tls::server_config(CERT, KEY, &[], TlsVersion::V1_2).expect("server tls");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
@@ -147,7 +147,7 @@ async fn stop_proxy(handle: shutdown::ShutdownHandle, serve: JoinHandle<()>) {
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
-        .expect("serve debe terminar")
+        .expect("serve must finish")
         .expect("join");
 }
 
@@ -164,7 +164,7 @@ async fn tls_roundtrip(stream: &mut tokio_rustls::client::TlsStream<TcpStream>, 
         .await
         .expect("eco tls a tiempo")
         .expect("eco tls completo");
-    assert_eq!(received, payload, "el eco TLS debe ser byte a byte");
+    assert_eq!(received, payload, "TLS echo must be byte for byte");
 }
 
 // ----------------------------------------------------------- A11 / A14 -----
@@ -221,7 +221,7 @@ async fn alpn_negotiation() {
         .with_server_tls(server);
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::new(Metrics::default())).await;
 
-    // Cliente que ofrece h2 y http/1.1: negocia http/1.1 (lo único soportado).
+    // Client offering h2 and http/1.1: negotiates http/1.1 (the only one supported).
     let client = test_client(Some("localhost"), &["h2", "http/1.1"]);
     let name = tls::server_name_for(&client, proxy_addr);
     let stream = tokio::time::timeout(
@@ -236,11 +236,11 @@ async fn alpn_negotiation() {
     assert_eq!(
         stream.get_ref().1.alpn_protocol(),
         Some(&b"http/1.1"[..]),
-        "debe negociar http/1.1"
+        "must negotiate http/1.1"
     );
     drop(stream);
 
-    // Cliente que solo ofrece h2: el handshake debe fallar (sin protocolo común).
+    // Client offering only h2: the handshake must fail (no common protocol).
     let h2_only = test_client(Some("localhost"), &["h2"]);
     let name = tls::server_name_for(&h2_only, proxy_addr);
     let result = tokio::time::timeout(
@@ -253,7 +253,7 @@ async fn alpn_negotiation() {
     .expect("handshake a tiempo");
     assert!(
         result.is_err(),
-        "h2-only no debe negociar contra un listener h1"
+        "h2-only must not negotiate against an h1 listener"
     );
 
     stop_proxy(handle, serve).await;
@@ -283,10 +283,7 @@ async fn tls_backend_e2e() {
         .await
         .expect("eco a tiempo")
         .expect("eco completo");
-    assert_eq!(
-        received, payload,
-        "el eco sobre TLS de backend debe ser íntegro"
-    );
+    assert_eq!(received, payload, "backend TLS echo must be intact");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(metrics.snapshot().tls_handshake_failures, 0);
@@ -300,8 +297,8 @@ async fn tls_backend_e2e() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn tls_backend_verification_failure_is_counted_and_rejected() {
-    // El backend usa el cert de test; sin `ca_file` no está en las raíces de
-    // Mozilla → la verificación (activada por defecto) debe rechazar.
+    // The backend uses the test cert; without `ca_file` it is not in the
+    // Mozilla roots → verification (on by default) must reject.
     let backend_addr = start_tls_echo().await;
     let metrics = Arc::new(Metrics::default());
     let backend_tls = tls::client_config(None, true, None, &[], TlsVersion::V1_2).expect("tls");
@@ -314,11 +311,11 @@ async fn tls_backend_verification_failure_is_counted_and_rejected() {
     let mut buf = [0u8; 16];
     let read = tokio::time::timeout(WAIT, client.read(&mut buf)).await;
     // EOF o RST (con datos sin leer en el buffer el SO responde RST), pero
-    // nunca datos de eco: el TLS al backend falló, no hay túnel.
+    // never echo data: TLS to the backend failed, there is no tunnel.
     match read {
         Ok(Ok(0)) => {}
         Ok(Err(err)) if err.kind() == std::io::ErrorKind::ConnectionReset => {}
-        other => panic!("el túnel debe cerrarse sin datos si el TLS falla: {other:?}"),
+        other => panic!("the tunnel must close without data when TLS fails: {other:?}"),
     }
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -366,7 +363,7 @@ async fn balancer_roundrobin() {
     assert_eq!(
         seen,
         vec!['A', 'B', 'C', 'A', 'B', 'C'],
-        "RR con pesos iguales debe rotar en orden de configuración"
+        "RR with equal weights must rotate in configuration order"
     );
     stop_proxy(handle, serve).await;
 }
@@ -402,7 +399,7 @@ async fn balancer_weights() {
         counts[usize::from(id[0] - b'A')] += 1;
     }
 
-    assert_eq!(counts, [2, 6], "pesos 1:3 → proporción 2:6 en dos ciclos");
+    assert_eq!(counts, [2, 6], "weights 1:3 → 2:6 ratio over two cycles");
     stop_proxy(handle, serve).await;
 }
 
@@ -434,7 +431,7 @@ async fn healthchecks_e2e() {
     let cfg = base_listener("web", Arc::new(backend));
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    // Con B muerto, `fall = 2` lo derriba en ~2 ciclos; el tráfico va solo a A.
+    // With B dead, `fall = 2` drops it in ~2 cycles; traffic goes only to A.
     tokio::time::sleep(Duration::from_millis(600)).await;
     for _ in 0..6 {
         let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
@@ -443,10 +440,10 @@ async fn healthchecks_e2e() {
             .await
             .expect("id a tiempo")
             .expect("id");
-        assert_eq!(id[0], b'A', "con B caído todo el tráfico va a A");
+        assert_eq!(id[0], b'A', "with B down all traffic goes to A");
     }
 
-    // Levantamos B en su misma dirección: `rise = 2` lo recupera en ~2 ciclos.
+    // We raise B at its same address: `rise = 2` recovers it in ~2 cycles.
     let listener = TcpListener::bind(b_addr).await.expect("rebind de B");
     let acceptor = tokio::spawn(async move {
         while let Ok((mut socket, _)) = listener.accept().await {
@@ -470,7 +467,7 @@ async fn healthchecks_e2e() {
             seen_b = true;
         }
     }
-    assert!(seen_b, "con B operativo debe recibir tráfico de nuevo");
+    assert!(seen_b, "with B operational it must receive traffic again");
     acceptor.abort();
 
     stop_proxy(handle, serve).await;
@@ -524,14 +521,14 @@ async fn proxy_protocol_v1() {
     assert_eq!(
         response,
         expected.as_bytes(),
-        "la cabecera PROXY v1 debe reflejar par y destino reales"
+        "the PROXY v1 header must reflect the real peer and destination"
     );
 
-    drop(client); // sin esto, `serve` espera el drenado del túnel vivo
+    drop(client); // without this, `serve` waits for the live tunnel to drain
     stop_proxy(handle, serve).await;
 }
 
-// --------------------------------------------------- errores y límites -----
+// --------------------------------------------------- errors and limits -----
 
 #[cfg_attr(
     miri,
@@ -558,7 +555,7 @@ async fn all_servers_down_returns_503_in_http_mode() {
     cfg.mode = ProxyMode::Http;
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    // Esperamos a que el health check derribe el único servidor (fall = 1).
+    // We wait for the health check to drop the single server (fall = 1).
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
@@ -574,7 +571,7 @@ async fn all_servers_down_returns_503_in_http_mode() {
     let text = String::from_utf8_lossy(&response[..n]).to_string();
     assert!(
         text.starts_with("HTTP/1.1 503"),
-        "sin servidores debe ser 503: {text}"
+        "with no servers it must be 503: {text}"
     );
 
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -615,7 +612,7 @@ async fn all_servers_down_closes_connection_in_tcp_mode() {
         .await
         .expect("cierre a tiempo")
         .expect("read");
-    assert_eq!(read, 0, "TCP mode debe cerrar sin datos");
+    assert_eq!(read, 0, "TCP mode must close without data");
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(metrics.snapshot().no_available_server >= 1);
@@ -653,7 +650,7 @@ async fn drained_server_is_skipped() {
             .await
             .expect("id a tiempo")
             .expect("id");
-        assert_eq!(id[0], b'A', "weight = 0 nunca debe recibir tráfico");
+        assert_eq!(id[0], b'A', "weight = 0 must never receive traffic");
     }
 
     stop_proxy(handle, serve).await;
@@ -673,20 +670,20 @@ async fn client_garbage_handshake_is_counted_as_tls_failure() {
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
     let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
-    client.write_all(b"esto no es TLS").await.expect("write");
+    client.write_all(b"this is not TLS").await.expect("write");
     let mut buf = [0u8; 8];
     let _ = tokio::time::timeout(WAIT, client.read(&mut buf)).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
         metrics.snapshot().tls_handshake_failures >= 1,
-        "el handshake basura debe contarse"
+        "the garbage handshake must be counted"
     );
 
     stop_proxy(handle, serve).await;
 }
 
-// Aviso al compilador de que Balancer se usa en el módulo (helpers públicos).
+// Tell the compiler Balancer is used in the module (public helpers).
 #[allow(dead_code)]
 fn _balancer_is_exported() -> Balancer {
     Balancer::new(vec![], 3, 2)

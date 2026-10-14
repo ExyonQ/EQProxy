@@ -1,7 +1,7 @@
-//! Configuración de EQProxy: esquema TOML tipado, validación semántica y
-//! errores con archivo, línea, campo, causa y ejemplo de corrección.
+//! EQProxy configuration: typed TOML schema, semantic validation and
+//! errors with file, line, field, cause and fix example.
 //!
-//! Decisión de formato: ADR-0002 (TOML canónico). Código 100 % safe Rust.
+//! Format decision: ADR-0002 (canonical TOML). 100 % safe Rust code.
 
 #![forbid(unsafe_code)]
 
@@ -19,18 +19,18 @@ pub use schema::{
 };
 pub use validate::CheckResult;
 
-/// Carga y parsea un archivo de configuración TOML.
+/// Loads and parses a TOML configuration file.
 ///
-/// La validación semántica (referencias, rangos, advertencias) se ejecuta con
-/// [`check`]; este parseo solo garantiza estructura y tipos.
+/// Semantic validation (references, ranges, warnings) runs in
+/// [`check`]; this parse only guarantees structure and types.
 pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
     let path = path.as_ref();
     let meta = std::fs::metadata(path).map_err(|e| ConfigError {
         file: path.to_path_buf(),
         location: None,
         field: None,
-        cause: format!("no se pudo leer el archivo: {e}"),
-        example: "crea un eqproxy.toml (ver eqproxy.toml.example) y pasa --config <ruta>"
+        cause: format!("could not read the file: {e}"),
+        example: "create an eqproxy.toml (see eqproxy.toml.example) and pass --config <path>"
             .to_owned(),
     })?;
     if meta.len() > MAX_CONFIG_BYTES as u64 {
@@ -40,14 +40,14 @@ pub fn load(path: impl AsRef<Path>) -> Result<Config, ConfigError> {
         file: path.to_path_buf(),
         location: None,
         field: None,
-        cause: format!("no se pudo leer el archivo: {e}"),
-        example: "crea un eqproxy.toml (ver eqproxy.toml.example) y pasa --config <ruta>"
+        cause: format!("could not read the file: {e}"),
+        example: "create an eqproxy.toml (see eqproxy.toml.example) and pass --config <path>"
             .to_owned(),
     })?;
     parse_str(&source, path)
 }
 
-/// Parsea texto TOML ya leído. `file` solo se usa para los mensajes de error.
+/// Parses already-read TOML text. `file` is only used for error messages.
 pub fn parse_str(source: &str, file: &Path) -> Result<Config, ConfigError> {
     if source.len() > MAX_CONFIG_BYTES {
         return Err(oversized(file, source.len()));
@@ -77,19 +77,19 @@ pub fn parse_str(source: &str, file: &Path) -> Result<Config, ConfigError> {
     }
 }
 
-/// Error de configuración excedida del presupuesto de recursos (ADR-0002).
+/// Configuration error exceeding the resource budget (ADR-0002).
 fn oversized(file: &Path, size: usize) -> ConfigError {
     ConfigError {
         file: file.to_path_buf(),
         location: None,
         field: None,
-        cause: format!("configuración demasiado grande: {size} bytes (máximo {MAX_CONFIG_BYTES})"),
-        example: "reduce el archivo o divídelo por servicios; el límite es 1 MiB (ADR-0002)"
+        cause: format!("configuration too large: {size} bytes (maximum {MAX_CONFIG_BYTES})"),
+        example: "shrink the file or split it per service; the limit is 1 MiB (ADR-0002)"
             .to_owned(),
     }
 }
 
-/// Traduce un offset de byte del texto a línea/columna (1-based).
+/// Translates a byte offset in the text to line/column (1-based).
 #[must_use]
 pub fn offset_location(source: &str, offset: usize) -> Option<Location> {
     let mut consumed = 0usize;
@@ -106,8 +106,8 @@ pub fn offset_location(source: &str, offset: usize) -> Option<Location> {
     None
 }
 
-/// Busca la primera línea que contiene `needle` (1-based) para errores
-/// semánticos, que no disponen de offset del parser.
+/// Finds the first line containing `needle` (1-based) for semantic
+/// errors, which have no parser offset.
 #[must_use]
 pub fn find_line(source: &str, needle: &str) -> Option<usize> {
     source
@@ -116,7 +116,7 @@ pub fn find_line(source: &str, needle: &str) -> Option<usize> {
         .map(|idx| idx + 1)
 }
 
-/// Ejemplo de corrección según el campo y el mensaje del parser.
+/// Fix example by field and parser message.
 fn example_for(field_path: &str, cause: &str) -> String {
     let last = field_path.rsplit('.').next().unwrap_or_default();
     let cause_lower = cause.to_ascii_lowercase();
@@ -126,26 +126,26 @@ fn example_for(field_path: &str, cause: &str) -> String {
             "backend" => "backend = \"api\"".to_owned(),
             "server" => "server = \"127.0.0.1:9000\"".to_owned(),
             "schema_version" => "schema_version = 1".to_owned(),
-            _ => "verifica los campos obligatorios en eqproxy.toml.example".to_owned(),
+            _ => "check the required fields in eqproxy.toml.example".to_owned(),
         };
     }
     if cause_lower.contains("unknown field") {
-        return "elimina o corrige el nombre del campo; los campos válidos están en eqproxy.toml.example"
+        return "remove or fix the field name; the valid fields are in eqproxy.toml.example"
             .to_owned();
     }
     match last {
-        "listen" | "server" => "listen = \"127.0.0.1:8080\" (formato IP:PUERTO)".to_owned(),
+        "listen" | "server" => "listen = \"127.0.0.1:8080\" (IP:PORT format)".to_owned(),
         "connect_timeout"
         | "idle_timeout"
         | "shutdown_grace"
         | "client_header_timeout"
         | "server_header_timeout" => {
-            format!("{last} = \"5s\" (sufijos válidos: ms, s, m, h)")
+            format!("{last} = \"5s\" (valid suffixes: ms, s, m, h)")
         }
         "maxconn" => "maxconn = 1024".to_owned(),
-        "mode" => "mode = \"tcp\" (o \"http\")".to_owned(),
+        "mode" => "mode = \"tcp\" (or \"http\")".to_owned(),
         "schema_version" => "schema_version = 1".to_owned(),
-        _ => "ver eqproxy.toml.example".to_owned(),
+        _ => "see eqproxy.toml.example".to_owned(),
     }
 }
 
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn offset_location_maps_offsets_to_line_and_column() {
         let source = "a = 1\nbb = 2\n";
-        let loc = offset_location(source, 8).expect("offset dentro del texto");
+        let loc = offset_location(source, 8).expect("offset inside the text");
         assert_eq!(loc.line, 2);
         assert_eq!(loc.column, Some(3));
     }
@@ -172,7 +172,7 @@ mod tests {
     #[test]
     fn parse_str_returns_config_on_valid_toml() {
         let source = "schema_version = 1\n";
-        let cfg = parse_str(source, &PathBuf::from("t.toml")).expect("debe parsear");
+        let cfg = parse_str(source, &PathBuf::from("t.toml")).expect("must parse");
         assert_eq!(cfg.schema_version, 1);
     }
 
@@ -180,18 +180,14 @@ mod tests {
     fn oversized_source_is_rejected_with_actionable_error() {
         let file = PathBuf::from("grande.toml");
         let source = "x".repeat(MAX_CONFIG_BYTES + 1);
-        let err = parse_str(&source, &file).expect_err("debe rechazar");
-        assert!(
-            err.cause.contains("demasiado grande"),
-            "causa: {}",
-            err.cause
-        );
-        assert!(err.example.contains("1 MiB"), "ejemplo: {}", err.example);
+        let err = parse_str(&source, &file).expect_err("must reject");
+        assert!(err.cause.contains("too large"), "cause: {}", err.cause);
+        assert!(err.example.contains("1 MiB"), "example: {}", err.example);
     }
 
     #[cfg_attr(
         miri,
-        ignore = "parse de 1 MiB interpretado: coste desproporcionado (>8 min); frontera cubierta por tests normales y CI"
+        ignore = "1 MiB parse under interpretation: disproportionate cost (>8 min); boundary covered by normal tests and CI"
     )]
     #[test]
     fn source_at_the_limit_is_accepted() {
@@ -199,7 +195,7 @@ mod tests {
         let mut source = String::from("schema_version = 1\n");
         source.push_str(&"#".repeat(MAX_CONFIG_BYTES - source.len()));
         assert_eq!(source.len(), MAX_CONFIG_BYTES);
-        let cfg = parse_str(&source, &file).expect("en el límite debe parsear");
+        let cfg = parse_str(&source, &file).expect("must parse at the limit");
         assert_eq!(cfg.schema_version, 1);
     }
 
@@ -256,45 +252,45 @@ mod tests {
             (
                 "listener.web.nombre",
                 "missing field `nombre`",
-                "verifica los campos obligatorios en eqproxy.toml.example",
+                "check the required fields in eqproxy.toml.example",
             ),
             (
                 "listener.web.listen",
                 "unknown field `foo`",
-                "elimina o corrige el nombre del campo; los campos válidos están en eqproxy.toml.example",
+                "remove or fix the field name; the valid fields are in eqproxy.toml.example",
             ),
             (
                 "listener.web.listen",
                 "invalid string",
-                "listen = \"127.0.0.1:8080\" (formato IP:PUERTO)",
+                "listen = \"127.0.0.1:8080\" (IP:PORT format)",
             ),
             (
                 "backend.api.server",
                 "invalid string",
-                "listen = \"127.0.0.1:8080\" (formato IP:PUERTO)",
+                "listen = \"127.0.0.1:8080\" (IP:PORT format)",
             ),
             (
                 "listener.web.connect_timeout",
                 "invalid string",
-                "connect_timeout = \"5s\" (sufijos válidos: ms, s, m, h)",
+                "connect_timeout = \"5s\" (valid suffixes: ms, s, m, h)",
             ),
             ("listener.web.maxconn", "invalid integer", "maxconn = 1024"),
             (
                 "listener.web.mode",
                 "unknown variant",
-                "mode = \"tcp\" (o \"http\")",
+                "mode = \"tcp\" (or \"http\")",
             ),
             ("schema_version", "invalid integer", "schema_version = 1"),
             (
                 "listener.web.nombre",
                 "invalid string",
-                "ver eqproxy.toml.example",
+                "see eqproxy.toml.example",
             ),
         ] {
             assert_eq!(
                 example_for(field, cause),
                 expected,
-                "campo {field}, causa {cause}"
+                "field {field}, cause {cause}"
             );
         }
     }
@@ -310,7 +306,7 @@ mod tests {
 
         let small = temp("small");
         std::fs::write(&small, "schema_version = 1\n").unwrap();
-        let cfg = load(&small).expect("archivo pequeño debe cargar");
+        let cfg = load(&small).expect("small file must load");
         assert_eq!(cfg.schema_version, 1);
 
         let over = temp("over");
@@ -321,25 +317,21 @@ mod tests {
         assert_eq!(content.len(), MAX_CONFIG_BYTES);
         content.push('a');
         std::fs::write(&over, &content).unwrap();
-        let err = load(&over).expect_err("un byte más debe rechazarse");
-        assert!(
-            err.cause.contains("demasiado grande"),
-            "causa: {}",
-            err.cause
-        );
+        let err = load(&over).expect_err("one byte more must be rejected");
+        assert!(err.cause.contains("too large"), "cause: {}", err.cause);
 
         let _ = std::fs::remove_file(small);
         let _ = std::fs::remove_file(over);
     }
 
-    /// El lado «acepta exactamente en el límite» vive separado porque su parse
-    /// de 1 MiB interpretado por miri cuesta >8 min medidos (mismo coste en
-    /// `source_at_the_limit_is_accepted`); la frontera se cubre en la suite
-    /// normal y la CI, y arriba queda el rechazo del presupuesto también
-    /// bajo miri.
+    /// The "accepts exactly at the limit" side lives apart because its
+    /// miri-interpreted 1 MiB parse costs >8 min measured (same cost in
+    /// `source_at_the_limit_is_accepted`); the boundary is covered in the
+    /// normal suite and CI, with the budget rejection above also running
+    /// under miri.
     #[cfg_attr(
         miri,
-        ignore = "parse de 1 MiB interpretado: >8 min medidos bajo miri; frontera cubierta por la suite normal y CI"
+        ignore = "1 MiB parse under interpretation: >8 min measured under miri; boundary covered by the normal suite and CI"
     )]
     #[test]
     fn load_accepts_a_file_at_the_size_limit() {
@@ -353,14 +345,14 @@ mod tests {
         content.push('\n');
         assert_eq!(content.len(), MAX_CONFIG_BYTES);
         std::fs::write(&at, &content).unwrap();
-        load(&at).expect("exactamente en el límite debe cargar");
+        load(&at).expect("must load exactly at the limit");
         let _ = std::fs::remove_file(at);
     }
 
     #[test]
     fn schema_defaults_match_the_documented_values() {
         let source = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n";
-        let cfg = parse_str(source, &PathBuf::from("t.toml")).expect("debe parsear");
+        let cfg = parse_str(source, &PathBuf::from("t.toml")).expect("must parse");
         assert_eq!(cfg.listener["web"].maxconn, 1024, "default maxconn");
     }
 }

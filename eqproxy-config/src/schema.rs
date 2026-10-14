@@ -1,8 +1,7 @@
-//! Esquema versionado de la configuración canónica (TOML).
+//! Versioned schema of the canonical configuration (TOML).
 //!
-//! Tipos estrictos + `deny_unknown_fields`: un campo desconocido es error, no
-//! se ignora en silencio (regla del conversor aplicada a nuestro propio
-//! formato).
+//! Strict types + `deny_unknown_fields`: an unknown field is an error, never
+//! silently ignored (the converter rule applied to our own format).
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -11,15 +10,15 @@ use serde::Deserialize;
 
 use crate::duration;
 
-/// Versión de esquema soportada por este binario.
+/// Schema version supported by this binary.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Presupuesto de recursos (ADR-0002): tamaño máximo del archivo de
-/// configuración. Un config mayor es rechazado antes de parsear.
+/// Resource budget (ADR-0002): maximum configuration file size.
+/// A larger config is rejected before parsing.
 pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 
-/// Presupuesto de recursos (ADR-0002): máximo de secciones
-/// `[listener.*]` + `[backend.*]` combinadas.
+/// Resource budget (ADR-0002): maximum combined
+/// `[listener.*]` + `[backend.*]` sections.
 pub const MAX_SECTIONS: usize = 1024;
 
 fn default_maxconn() -> u32 {
@@ -70,44 +69,44 @@ fn default_rise() -> u32 {
     2
 }
 
-/// Peso máximo por servidor (rango HAProxy `weight`, cfg 3.4 «server»).
+/// Maximum weight per server (HAProxy `weight` range, cfg 3.4 "server").
 pub const MAX_SERVER_WEIGHT: u32 = 256;
 
-/// Modo de proxy de un listener (A1 `tcp`, A2 `http`).
+/// Proxy mode of a listener (A1 `tcp`, A2 `http`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ListenerMode {
-    /// Túnel TCP sin interpretación (Fase 1).
+    /// TCP tunnel without interpretation (Phase 1).
     #[default]
     Tcp,
-    /// Proxy HTTP/1.1 con framing estricto (Fase 2a).
+    /// HTTP/1.1 proxy with strict framing (Phase 2a).
     Http,
 }
 
-/// Algoritmo de balanceo (Fase 2b: solo `roundrobin`; B2–B5 en fases siguientes).
+/// Balancing algorithm (Phase 2b: `roundrobin` only; B2–B5 in later phases).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BalanceAlgorithm {
-    /// Round-robin ponderado suave (B1 + B7).
+    /// Smooth weighted round-robin (B1 + B7).
     #[default]
     RoundRobin,
 }
 
-/// Envío de PROXY protocol hacia el backend (A9; recepción en Fase 3).
+/// PROXY protocol send to the backend (A9; reception in Phase 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyProtocolMode {
-    /// Sin cabecera PROXY (por defecto).
+    /// No PROXY header (default).
     #[default]
     None,
-    /// Cabecera PROXY protocol v1 (`PROXY TCP4/TCP6 …`).
+    /// PROXY protocol v1 header (`PROXY TCP4/TCP6 …`).
     V1,
 }
 
-/// Versión mínima de TLS aceptada (A11/A12).
+/// Minimum accepted TLS version (A11/A12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 pub enum TlsVersion {
-    /// TLS 1.2 (por defecto; TLS 1.0/1.1 nunca se aceptan).
+    /// TLS 1.2 (default; TLS 1.0/1.1 are never accepted).
     #[default]
     #[serde(rename = "1.2")]
     V1_2,
@@ -116,146 +115,146 @@ pub enum TlsVersion {
     V1_3,
 }
 
-/// TLS termination en el listener (A11): certificado, clave y ALPN.
+/// TLS termination at the listener (A11): certificate, key and ALPN.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsServerConfig {
-    /// Ruta a la cadena de certificados PEM (hoja primero).
+    /// Path to the PEM certificate chain (leaf first).
     pub cert: String,
-    /// Ruta a la clave privada PEM (PKCS#8, PKCS#1 o SEC1).
+    /// Path to the PEM private key (PKCS#8, PKCS#1 or SEC1).
     pub key: String,
-    /// Protocolos ALPN ofrecidos (p. ej. `["http/1.1"]`); vacío = sin ALPN.
+    /// Offered ALPN protocols (e.g. `["http/1.1"]`); empty = no ALPN.
     #[serde(default)]
     pub alpn: Vec<String>,
-    /// Versión mínima de TLS (por defecto 1.2).
+    /// Minimum TLS version (default 1.2).
     #[serde(default)]
     pub min_version: TlsVersion,
 }
 
-/// TLS hacia el backend (A12): verificación activada por defecto.
+/// TLS to the backend (A12): verification on by default.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsClientConfig {
-    /// Verificación de certificado y nombre del servidor (por defecto `true`).
+    /// Server certificate and name verification (default `true`).
     #[serde(default = "default_true")]
     pub verify: bool,
-    /// PEM de CA adicionales para verificar el backend (CAs privadas, tests).
+    /// Extra CA PEM to verify the backend (private CAs, tests).
     pub ca_file: Option<String>,
-    /// Nombre a verificar/SNI; por defecto la parte de host de la dirección.
+    /// Name to verify/SNI; defaults to the host part of the address.
     pub server_name: Option<String>,
-    /// Protocolos ALPN a ofrecer en el handshake; vacío = sin ALPN.
+    /// ALPN protocols to offer in the handshake; empty = no ALPN.
     #[serde(default)]
     pub alpn: Vec<String>,
-    /// Versión mínima de TLS (por defecto 1.2).
+    /// Minimum TLS version (default 1.2).
     #[serde(default)]
     pub min_version: TlsVersion,
 }
 
-/// Un servidor del backend con su peso (B7).
+/// One backend server with its weight (B7).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
-    /// Dirección `IP:PUERTO` del servidor.
+    /// Server `IP:PORT` address.
     pub addr: String,
-    /// Peso en el balanceo (0 = drenado: nunca seleccionado, sí health-checked).
+    /// Balancing weight (0 = drained: never selected, still health-checked).
     #[serde(default = "default_weight")]
     pub weight: u32,
 }
 
-/// Health check TCP activo (B11 TCP): `fall` fallos seguidos caen al servidor,
-/// `rise` éxitos seguidos lo levantan.
+/// Active TCP health check (B11 TCP): `fall` consecutive failures drop the
+/// server, `rise` consecutive successes raise it.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
-    /// Intervalo entre ciclos de comprobación.
+    /// Interval between check cycles.
     #[serde(default = "default_health_interval", with = "duration")]
     pub interval: Duration,
-    /// Timeout de cada intento de conexión TCP.
+    /// Timeout of each TCP connection attempt.
     #[serde(default = "default_health_timeout", with = "duration")]
     pub timeout: Duration,
-    /// Fallos consecutivos para marcar un servidor caído.
+    /// Consecutive failures to mark a server down.
     #[serde(default = "default_fall")]
     pub fall: u32,
-    /// Éxitos consecutivos para marcar un servidor operativo.
+    /// Consecutive successes to mark a server up.
     #[serde(default = "default_rise")]
     pub rise: u32,
 }
 
-/// Configuración completa de EQProxy.
+/// Full EQProxy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Versión del esquema; debe ser [`SCHEMA_VERSION`].
+    /// Schema version; must be [`SCHEMA_VERSION`].
     pub schema_version: u32,
-    /// Frontends TCP/HTTP definidos por nombre.
+    /// TCP/HTTP frontends defined by name.
     #[serde(default)]
     pub listener: BTreeMap<String, ListenerConfig>,
-    /// Backends definidos por nombre.
+    /// Backends defined by name.
     #[serde(default)]
     pub backend: BTreeMap<String, BackendConfig>,
-    /// Ventana de drenaje al apagar: conexiones vivas pueden terminar.
+    /// Drain window on shutdown: live connections may finish.
     #[serde(default = "default_shutdown_grace", with = "duration")]
     pub shutdown_grace: Duration,
 }
 
-/// Un frontend: dónde escuchar y a qué backend enviar.
+/// A frontend: where to listen and which backend to send to.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerConfig {
-    /// Dirección `IP:PUERTO` de escucha (puerto 0 = efímero, útil en tests).
+    /// Listen `IP:PORT` address (port 0 = ephemeral, useful in tests).
     pub listen: String,
-    /// Modo: `"tcp"` (túnel, por defecto) u `"http"` (HTTP/1.1 estricto).
+    /// Mode: `"tcp"` (tunnel, default) or `"http"` (strict HTTP/1.1).
     #[serde(default)]
     pub mode: ListenerMode,
-    /// Nombre del backend ([`BackendConfig`] en `Config::backend`).
+    /// Backend name ([`BackendConfig`] in `Config::backend`).
     pub backend: String,
-    /// Conexiones simultáneas máximas; al llenarse se rechaza explícitamente.
+    /// Maximum concurrent connections; newcomers are explicitly refused when full.
     #[serde(default = "default_maxconn")]
     pub maxconn: u32,
-    /// Timeout de conexión al backend.
+    /// Timeout for connecting to the backend.
     #[serde(default = "default_connect_timeout", with = "duration")]
     pub connect_timeout: Duration,
-    /// Timeout de inactividad por dirección (sin bytes en ninguno de los sentidos).
+    /// Inactivity timeout per direction (no bytes in either direction).
     #[serde(default = "default_idle_timeout", with = "duration")]
     pub idle_timeout: Duration,
-    /// Fase cliente: máximo para recibir la cabecera de petición (solo `http`).
+    /// Client phase: maximum to receive the request head (`http` only).
     #[serde(default = "default_client_header_timeout", with = "duration")]
     pub client_header_timeout: Duration,
-    /// Fase servidor: máximo para recibir la cabecera de respuesta (solo `http`).
+    /// Server phase: maximum to receive the response head (`http` only).
     #[serde(default = "default_server_header_timeout", with = "duration")]
     pub server_header_timeout: Duration,
-    /// TLS termination en este listener (A11). Ausente = TCP plano.
+    /// TLS termination at this listener (A11). Absent = plain TCP.
     #[serde(default)]
     pub tls: Option<TlsServerConfig>,
 }
 
-/// Un backend: uno o varios servidores de origen con balanceo (Fase 2b).
+/// A backend: one or more origin servers with balancing (Phase 2b).
 ///
-/// `server` (un servidor, compat 0.1) y `servers` (lista con pesos) son
-/// excluyentes: exactamente uno debe estar presente (validado en [`crate::check`]).
+/// `server` (one server, compat 0.1) and `servers` (weighted list) are
+/// mutually exclusive: exactly one must be present (validated in [`crate::check`]).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
-    /// Dirección `IP:PUERTO` del servidor de origen (compat 0.1.0).
+    /// Origin server `IP:PORT` address (compat 0.1.0).
     pub server: Option<String>,
-    /// Servidores con peso (B1/B7). Excluyente con `server`.
+    /// Weighted servers (B1/B7). Mutually exclusive with `server`.
     pub servers: Option<Vec<ServerConfig>>,
-    /// Algoritmo de balanceo (Fase 2b: `"roundrobin"`).
+    /// Balancing algorithm (Phase 2b: `"roundrobin"`).
     #[serde(default)]
     pub balance: BalanceAlgorithm,
-    /// Envío de PROXY protocol v1 hacia los servidores (A9).
+    /// PROXY protocol v1 send to the servers (A9).
     #[serde(default)]
     pub proxy_protocol: ProxyProtocolMode,
-    /// Health check TCP activo (B11). Ausente = todos los servidores operativos.
+    /// Active TCP health check (B11). Absent = all servers operational.
     #[serde(default)]
     pub health_check: Option<HealthCheckConfig>,
-    /// TLS hacia los servidores (A12). Ausente = TCP plano.
+    /// TLS to the servers (A12). Absent = plain TCP.
     #[serde(default)]
     pub tls: Option<TlsClientConfig>,
 }
 
 impl BackendConfig {
-    /// Pares (dirección, peso) declarados, sea por `server` o por `servers`.
+    /// Declared (address, weight) pairs, via `server` or `servers`.
     #[must_use]
     pub fn server_entries(&self) -> Vec<(&str, u32)> {
         match (&self.server, &self.servers) {

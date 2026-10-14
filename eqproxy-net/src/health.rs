@@ -1,10 +1,10 @@
-//! Health checks TCP activos (B11 TCP): un task por backend con checks
-//! configurados.
+//! Active TCP health checks (B11 TCP): one task per backend with configured
+//! checks.
 //!
-//! Ciclo: cada `interval`, intento de conexión TCP a cada servidor con
-//! `timeout`; el resultado alimenta la máquina `fall`/`rise` del
-//! [`Balancer`](crate::balancer::Balancer). Los checks de HTTP con `expect`
-//! llegan en Fase 3 (B11 HTTP).
+//! Cycle: every `interval`, a TCP connection attempt to each server with
+//! `timeout`; the result feeds the `fall`/`rise` machine of
+//! [`Balancer`](crate::balancer::Balancer). HTTP checks with `expect`
+//! arrive in Phase 3 (B11 HTTP).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -17,19 +17,19 @@ use eqproxy_core::Shutdown;
 
 use crate::balancer::Balancer;
 
-/// Parámetros de un health check TCP (B11).
+/// Parameters of a TCP health check (B11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HealthCheck {
-    /// Intervalo entre ciclos de comprobación.
+    /// Interval between check cycles.
     pub interval: Duration,
-    /// Timeout de cada intento de conexión.
+    /// Timeout of each connection attempt.
     pub timeout: Duration,
 }
 
-/// Ejecuta los health checks hasta la señal de apagado.
+/// Runs the health checks until the shutdown signal.
 ///
-/// El primer ciclo se ejecuta tras `interval` (los servidores arrancan
-/// operativos; la primera ronda de checks puede derribarlos).
+/// The first cycle runs after `interval` (servers start
+/// operational; the first check round may drop them).
 pub async fn run(balancer: Arc<Balancer>, check: HealthCheck, mut shutdown: Shutdown) {
     loop {
         tokio::select! {
@@ -69,7 +69,7 @@ mod tests {
     )]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn check_task_marks_server_down_and_up_again() {
-        // Servidor que acepta: lo abrimos y cerramos para alternar estado.
+        // Server that accepts: we open and close it to toggle state.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -104,18 +104,18 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert!(
             balancer.is_up(addr),
-            "el servidor vivo debe seguir operativo"
+            "the live server must stay operational"
         );
 
         // Cerramos el listener: los checks fallan → down (fall=1).
         acceptor.abort();
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(!balancer.is_up(addr), "el servidor muerto debe caer");
+        assert!(!balancer.is_up(addr), "the dead server must drop");
 
         handle.trigger();
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
-            .expect("el task de checks debe terminar con la señal")
+            .expect("the check task must finish on the signal")
             .expect("join");
     }
 }

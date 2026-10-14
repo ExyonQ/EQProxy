@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "CLI de EQProxy: run, config validate y comandos de operación"
+description = "EQProxy CLI: run, config validate and operations commands"
 
 [[bin]]
 name = "eqproxy"
