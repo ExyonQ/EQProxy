@@ -17,7 +17,7 @@
 # Env:   RUST_IMAGE (default rust:1.97-bookworm) for the Linux builds.
 set -euo pipefail
 
-VER="0.4.2"
+VER="0.4.3"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 RUST_IMAGE="${RUST_IMAGE:-rust:1.97-bookworm}"

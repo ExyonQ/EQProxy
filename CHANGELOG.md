@@ -5,6 +5,18 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.4.3] — 2026-10-15
+
+### Fixed
+
+- `config apply` consumed `/dev/stdin` (or any pipe) on its first read
+  and then failed gating on the empty second read. It now reads the
+  candidate once and gates from those bytes (found by the Veyra audit's
+  `apply-stores-first-configuration` scenario; no released file-based
+  workflow was affected).
+- Two Clippy lints in the new code (`collapsible_if` in history listing,
+  `needless_borrow` in the SIGINT-shutdown test helper).
+
 ## [v0.4.2] — 2026-10-15
 
 ### Added

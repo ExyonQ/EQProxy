@@ -162,7 +162,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "eqproxy-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "clap",
  "eqproxy-config",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-config"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "serde",
  "serde_path_to_error",
@@ -182,14 +182,14 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-core"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "eqproxy-net"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "eqproxy-core",
  "rustls",

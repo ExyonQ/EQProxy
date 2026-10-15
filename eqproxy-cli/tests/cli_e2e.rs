@@ -879,6 +879,47 @@ fn run_apply(state: &PathBuf, config: &PathBuf) -> std::process::Output {
         .expect("run eqproxy config apply")
 }
 
+/// `apply` must gate from a single read: pipes like `/dev/stdin` cannot be
+/// read twice (regression test for the audit-found stdin bug).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn apply_reads_piped_stdin_once() {
+    let state = fresh_state("stdin");
+    let mut child = bin()
+        .env("EQPROXY_STATE_DIR", &state)
+        .args(["config", "apply", "--config", "/dev/stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy config apply");
+    child
+        .stdin
+        .take()
+        .expect("apply stdin")
+        .write_all(APPLY_V1.as_bytes())
+        .expect("write piped config");
+    let output = child.wait_with_output().expect("wait for apply");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "piped apply must exit 0; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("(no previous configuration)"),
+        "stdout: {stdout}"
+    );
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("current stored"),
+        APPLY_V1.as_bytes()
+    );
+    remove_state(&state);
+}
+
 fn run_rollback(state: &PathBuf) -> std::process::Output {
     bin()
         .env("EQPROXY_STATE_DIR", state)

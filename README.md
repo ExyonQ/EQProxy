@@ -13,7 +13,7 @@ diagnostics, configuration, administration, extensibility and security.
 > protocol v1 send**, backend keep-alive pool, typed TOML configuration with
 > actionable errors and the `eqproxy` CLI (`validate`, `explain`, `diff`,
 > `plan` dry run, offline `apply`/`rollback` with versioned state), with
-> 128 tests green (including E2E over real sockets,
+> 129 tests green (including E2E over real sockets,
 > the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.1
 > published (binaries and multi-arch image, see Install). Performance (first runs vs
 > 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): after the A16 backend
