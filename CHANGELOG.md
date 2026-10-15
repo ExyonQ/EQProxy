@@ -5,6 +5,25 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.4.2] — 2026-10-15
+
+### Added
+
+- `config apply` / `config rollback` (offline versioned state): `apply`
+  gates the candidate exactly like `run` (load, validate, resolve; exit 1
+  leaves the state untouched), pushes the previous `current.toml` to
+  `history/` (capped at 32, oldest pruned) and installs the candidate via
+  atomic rename; re-applying identical bytes is a no-op report.
+  `rollback` re-gates the newest backup (relative cert paths resolve
+  against the apply-time directory recorded in its header) and pops it
+  into current, so walking back takes one rollback per apply. State lives
+  in `./.eqproxy` (`EQPROXY_STATE_DIR` overrides it). Hot-apply to a
+  running process stays pending (S-CFG-01).
+
+### Changed
+
+- Dependencies: `equivalent` 1.0.2 → 1.0.3 (transitive, semver-compatible).
+
 ## [v0.4.1] — 2026-10-15
 
 ### Added

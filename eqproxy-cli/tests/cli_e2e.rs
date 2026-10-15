@@ -162,12 +162,10 @@ fn validate_reports_syntax_errors_with_line() {
 )]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
-    // `config explain` and `config plan` used to be in this list; both are
-    // now implemented (Phase 3 slices) and covered by explain_*/plan_*
-    // tests below.
+    // `config explain`, `config plan` and now `config apply`/`config rollback`
+    // used to be in this list; all are implemented (Phase 3 slices) and
+    // covered by explain_*/plan_*/apply_*/rollback_* tests below.
     let cases: &[(&[&str], &str)] = &[
-        (&["config", "apply", "--config", "x.toml"], "config apply"),
-        (&["config", "rollback"], "config rollback"),
         (
             &["config", "import", "--input", "a.cfg", "--output", "b.toml"],
             "config import",
@@ -850,7 +848,303 @@ fn run_with_tls_termination_proxies_real_traffic() {
         echoed.contains("ping"),
         "the TLS echo must come back intact; stdout: {echoed}"
     );
+    wait_for_sigint_shutdown(&mut child, &config);
+}
 
+// --- `config apply` / `config rollback` (Phase 3, offline) ---
+//
+// The state (`current.toml` + `history/`) lives in `EQPROXY_STATE_DIR`, so
+// parallel tests isolate without touching the process working directory.
+
+/// Isolated state dir for one test (removed first in case of stale runs).
+fn fresh_state(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("eqproxy-state-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir
+}
+
+fn remove_state(dir: &PathBuf) {
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+const APPLY_V1: &str = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\n";
+const APPLY_V2: &str = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9\" }, { addr = \"127.0.0.1:10\" }]\n";
+
+fn run_apply(state: &PathBuf, config: &PathBuf) -> std::process::Output {
+    bin()
+        .env("EQPROXY_STATE_DIR", state)
+        .args(["config", "apply", "--config"])
+        .arg(config)
+        .output()
+        .expect("run eqproxy config apply")
+}
+
+fn run_rollback(state: &PathBuf) -> std::process::Output {
+    bin()
+        .env("EQPROXY_STATE_DIR", state)
+        .args(["config", "rollback"])
+        .output()
+        .expect("run eqproxy config rollback")
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn apply_stores_first_configuration_with_inventory() {
+    let state = fresh_state("first");
+    let config = temp_config("apply-v1", APPLY_V1);
+    let output = run_apply(&state, &config);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "apply must exit 0; stderr: {stderr}"
+    );
+    for expected in [
+        "applied:",
+        "(no previous configuration)",
+        "plan: 1 listener(s), 1 backend(s)",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("current stored"),
+        APPLY_V1.as_bytes(),
+        "current.toml must hold the exact candidate bytes"
+    );
+    let history: Vec<_> = std::fs::read_dir(state.join("history"))
+        .expect("history dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(history.is_empty(), "first apply records no backup");
+    remove_temp(&config);
+    remove_state(&state);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn apply_reports_diff_and_keeps_backup() {
+    let state = fresh_state("diff");
+    let v1 = temp_config("apply-d-v1", APPLY_V1);
+    let v2 = temp_config("apply-d-v2", APPLY_V2);
+    assert!(run_apply(&state, &v1).status.success());
+    let output = run_apply(&state, &v2);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "second apply must exit 0; stderr: {stderr}"
+    );
+    for expected in [
+        "applied:",
+        "1 difference(s) vs previous",
+        "backup 0001-",
+        "~ backend \"api\" servers:",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("current stored"),
+        APPLY_V2.as_bytes()
+    );
+    let history: Vec<_> = std::fs::read_dir(state.join("history"))
+        .expect("history dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(history.len(), 1, "one backup for one superseded current");
+    remove_temp(&v1);
+    remove_temp(&v2);
+    remove_state(&state);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn apply_is_idempotent_for_identical_bytes() {
+    let state = fresh_state("idem");
+    let config = temp_config("apply-idem", APPLY_V1);
+    assert!(run_apply(&state, &config).status.success());
+    let output = run_apply(&state, &config);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert!(
+        stdout.contains("already applied"),
+        "re-apply must be a no-op report; stdout: {stdout}"
+    );
+    let history: Vec<_> = std::fs::read_dir(state.join("history"))
+        .expect("history dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(history.is_empty(), "idempotent re-apply records no backup");
+    remove_temp(&config);
+    remove_state(&state);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn apply_gate_leaves_state_untouched() {
+    let state = fresh_state("gate");
+    let good = temp_config("apply-g-good", APPLY_V1);
+    assert!(run_apply(&state, &good).status.success());
+    // Invalid candidate: exit 1, current and history unchanged.
+    let bad = temp_config(
+        "apply-g-bad",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"ghost\"\n",
+    );
+    let output = run_apply(&state, &bad);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "gate failure must exit 1");
+    assert!(
+        stderr.contains("ghost"),
+        "actionable error; stderr: {stderr}"
+    );
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("current kept"),
+        APPLY_V1.as_bytes(),
+        "failed apply must not touch current"
+    );
+    let history: Vec<_> = std::fs::read_dir(state.join("history"))
+        .expect("history dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(history.is_empty(), "failed apply records no backup");
+    // Missing file: exit 1 without creating any state.
+    let missing_state = fresh_state("gate-missing");
+    let output = bin()
+        .env("EQPROXY_STATE_DIR", &missing_state)
+        .args(["config", "apply", "--config", "no-existe.toml"])
+        .output()
+        .expect("run eqproxy config apply");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(stderr.contains("could not read"), "stderr: {stderr}");
+    assert!(
+        !missing_state.exists(),
+        "a failed gate must not create state"
+    );
+    remove_temp(&good);
+    remove_temp(&bad);
+    remove_state(&state);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn rollback_restores_previous_current() {
+    let state = fresh_state("rb");
+    let v1 = temp_config("rb-v1", APPLY_V1);
+    let v2 = temp_config("rb-v2", APPLY_V2);
+    assert!(run_apply(&state, &v1).status.success());
+    assert!(run_apply(&state, &v2).status.success());
+    let output = run_rollback(&state);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "rollback must exit 0; stderr: {stderr}"
+    );
+    for expected in [
+        "rolled back:",
+        "restored from 0001-",
+        "difference(s) vs applied",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("current restored"),
+        APPLY_V1.as_bytes(),
+        "rollback must restore the exact previous bytes"
+    );
+    let history: Vec<_> = std::fs::read_dir(state.join("history"))
+        .expect("history dir")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(history.is_empty(), "rollback pops the spent backup");
+    remove_temp(&v1);
+    remove_temp(&v2);
+    remove_state(&state);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn rollback_without_history_fails_explicitly() {
+    let state = fresh_state("rb-empty");
+    let output = run_rollback(&state);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("no previous configuration"),
+        "stderr: {stderr}"
+    );
+    remove_state(&state);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn rollback_walks_back_one_apply_at_a_time() {
+    let state = fresh_state("rb-walk");
+    let v1 = temp_config("rb-w-v1", APPLY_V1);
+    let v2 = temp_config("rb-w-v2", APPLY_V2);
+    let v3 = temp_config(
+        "rb-w-v3",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmaxconn = 7\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9\" }, { addr = \"127.0.0.1:10\" }]\n",
+    );
+    assert!(run_apply(&state, &v1).status.success());
+    assert!(run_apply(&state, &v2).status.success());
+    assert!(run_apply(&state, &v3).status.success());
+    assert!(run_rollback(&state).status.success());
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("back to v2"),
+        APPLY_V2.as_bytes()
+    );
+    assert!(run_rollback(&state).status.success());
+    assert_eq!(
+        std::fs::read(state.join("current.toml")).expect("back to v1"),
+        APPLY_V1.as_bytes()
+    );
+    let output = run_rollback(&state);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "empty history must exit 1; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    remove_temp(&v1);
+    remove_temp(&v2);
+    remove_temp(&v3);
+    remove_state(&state);
+}
+
+/// Shared SIGINT-shutdown tail: real SIGINT to a live proxy must end it
+/// with code 0 (extracted so the apply/rollback suite can sit above it).
+fn wait_for_sigint_shutdown(child: &mut std::process::Child, config: &PathBuf) {
     // Real SIGINT → clean shutdown with code 0.
     let pid = child.id();
     let kill = Command::new("kill")

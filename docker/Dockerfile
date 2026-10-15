@@ -2,9 +2,9 @@
 #
 # Usage:
 #   docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
-#     --tag ghcr.io/ExyonQ/eqproxy:0.4.1 --tag ghcr.io/ExyonQ/eqproxy:latest --push .
+#     --tag ghcr.io/exyonq/eqproxy:0.4.1 --tag ghcr.io/exyonq/eqproxy:latest --push .
 #
-# The binary runs with `docker run ghcr.io/ExyonQ/eqproxy --help`.
+# The binary runs with `docker run ghcr.io/exyonq/eqproxy --help`.
 # The `export` stage isolates the binary to extract it as a release artifact:
 #   docker buildx build --file docker/Dockerfile --target export \
 #     --platform linux/amd64 --output type=local,dest=docker-out-amd64 .

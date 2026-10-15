@@ -1,5 +1,5 @@
 #!/bin/bash
-# Release pipeline for EQProxy (v0.4.1+).
+# Release pipeline for EQProxy (v0.4.2+).
 #
 # Builds four release binaries, regenerates the SBOM, and E2E-verifies
 # EVERY artifact (real binary, real sockets, observable results) BEFORE
@@ -17,7 +17,7 @@
 # Env:   RUST_IMAGE (default rust:1.97-bookworm) for the Linux builds.
 set -euo pipefail
 
-VER="0.4.1"
+VER="0.4.2"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 RUST_IMAGE="${RUST_IMAGE:-rust:1.97-bookworm}"
@@ -62,6 +62,25 @@ verify_cli() {
     cp /tmp/e2e-left.toml /tmp/e2e-right.toml
     run config diff /tmp/e2e-left.toml /tmp/e2e-right.toml 2>/dev/null \
         | grep -q "no differences" || fail "$bin diff identical"
+    log "E2E $bin: apply stores offline and rollback walks back"
+    export EQPROXY_STATE_DIR
+    EQPROXY_STATE_DIR="$(mktemp -d /tmp/e2e-state-XXXXXX)"
+    printf '%s' "$GOOD_CONFIG" > /tmp/e2e-cand.toml
+    run config apply --config /tmp/e2e-cand.toml > /tmp/e2e-apply.txt \
+        || fail "$bin apply first failed"
+    grep -q "no previous configuration" /tmp/e2e-apply.txt \
+        || fail "$bin apply first"
+    run config apply --config /tmp/e2e-cand.toml > /tmp/e2e-apply.txt \
+        || fail "$bin apply idempotent failed"
+    grep -q "already applied" /tmp/e2e-apply.txt \
+        || fail "$bin apply idempotent"
+    if run config rollback 2>/tmp/e2e-err.txt; then
+        fail "$bin rollback with empty history succeeded"
+    fi
+    grep -q "no previous configuration" /tmp/e2e-err.txt \
+        || fail "$bin rollback empty not explicit"
+    rm -rf "$EQPROXY_STATE_DIR"
+    unset EQPROXY_STATE_DIR
 }
 
 # Waits until 127.0.0.1:$1 accepts TCP (bounded); fails with logs on timeout.
@@ -211,6 +230,6 @@ printf '%s\n' \
     "Next (operator, needs credentials — NOT run by this script):" \
     "  docker buildx build --file docker/Dockerfile \\" \
     "    --platform linux/amd64,linux/arm64 \\" \
-    "    --tag ghcr.io/ExyonQ/eqproxy:$VER --tag ghcr.io/ExyonQ/eqproxy:latest --push ." \
+    "    --tag ghcr.io/exyonq/eqproxy:$VER --tag ghcr.io/exyonq/eqproxy:latest --push ." \
     "  git tag v$VER && git push origin v$VER" \
     "  gh release create v$VER dist/* sbom/*.cdx.json --title v$VER --notes-file CHANGELOG.md"

@@ -162,7 +162,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "eqproxy-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "clap",
  "eqproxy-config",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-config"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "serde",
  "serde_path_to_error",
@@ -182,14 +182,14 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-core"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "eqproxy-net"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "eqproxy-core",
  "rustls",
@@ -202,9 +202,9 @@ dependencies = [
 
 [[package]]
 name = "equivalent"
-version = "1.0.2"
+version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"

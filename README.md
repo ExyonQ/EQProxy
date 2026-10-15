@@ -12,7 +12,8 @@ diagnostics, configuration, administration, extensibility and security.
 > default), ALPN h1, weighted round-robin with TCP health checks and PROXY
 > protocol v1 send**, backend keep-alive pool, typed TOML configuration with
 > actionable errors and the `eqproxy` CLI (`validate`, `explain`, `diff`,
-> `plan` dry run), with 117 tests green (including E2E over real sockets,
+> `plan` dry run, offline `apply`/`rollback` with versioned state), with
+> 128 tests green (including E2E over real sockets,
 > the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.1
 > published (binaries and multi-arch image, see Install). Performance (first runs vs
 > 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): after the A16 backend
@@ -21,7 +22,8 @@ diagnostics, configuration, administration, extensibility and security.
 > reference).
 >
 > **Scope honesty:** v0.4.1 is not declared production ready (Phase 9 gate
-> pending): TCP + HTTP/1.1 only, no hot config reload, no rollback.
+> pending): TCP + HTTP/1.1 only; `apply`/`rollback` manage versioned files
+> offline, hot config reload under traffic stays pending (S-CFG-01).
 
 > **Docs language:** documentation is published in English only.
 

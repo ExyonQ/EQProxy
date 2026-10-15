@@ -92,12 +92,14 @@ enum ConfigCommand {
         #[arg(short, long)]
         config: PathBuf,
     },
-    /// Applies a configuration hot (Phase 3)
+    /// Applies a candidate configuration to the local versioned state (Phase 3,
+    /// offline: validate + resolve gate, backup, atomic swap; no running
+    /// process is touched)
     Apply {
         #[arg(short, long)]
         config: PathBuf,
     },
-    /// Rolls back to the previously applied configuration (Phase 3)
+    /// Restores the most recent backup into current (Phase 3, offline)
     Rollback,
     /// Reference-proxy to EQProxy configuration converter (Phase 8)
     Import {
@@ -136,8 +138,8 @@ fn config_command(command: ConfigCommand) -> u8 {
         } => explain(&config, listener.as_deref(), &method, &host, &path),
         ConfigCommand::Diff { left, right } => diff(&left, &right),
         ConfigCommand::Plan { config } => plan(&config),
-        ConfigCommand::Apply { .. } => not_implemented("config apply", "Phase 3"),
-        ConfigCommand::Rollback => not_implemented("config rollback", "Phase 3"),
+        ConfigCommand::Apply { config } => apply(&config),
+        ConfigCommand::Rollback => rollback(),
         ConfigCommand::Import { .. } => not_implemented("config import", "Phase 8"),
     }
 }
@@ -245,6 +247,22 @@ fn diff(left: &Path, right: &Path) -> u8 {
 /// legacy single `server` and the `servers` list use one vocabulary.
 fn diff_report(left: &Config, right: &Config) -> String {
     use std::fmt::Write as _;
+    let changes = diff_changes(left, right);
+    let mut out = String::new();
+    if changes.is_empty() {
+        out.push_str("no differences");
+    } else {
+        let _ = writeln!(out, "{} difference(s):", changes.len());
+        for change in &changes {
+            let _ = writeln!(out, "{change}");
+        }
+    }
+    out
+}
+
+/// The individual change lines of [`diff_report`], exposed so `apply` and
+/// `rollback` can count them for their verdict line.
+fn diff_changes(left: &Config, right: &Config) -> Vec<String> {
     let mut changes = Vec::new();
     if left.schema_version != right.schema_version {
         changes.push(format!(
@@ -394,16 +412,7 @@ fn diff_report(left: &Config, right: &Config) -> String {
             ));
         }
     }
-    let mut out = String::new();
-    if changes.is_empty() {
-        out.push_str("no differences");
-    } else {
-        let _ = writeln!(out, "{} difference(s):", changes.len());
-        for change in &changes {
-            let _ = writeln!(out, "{change}");
-        }
-    }
-    out
+    changes
 }
 
 /// `addr(weight), …` for a normalized server list; `[]` when empty.
@@ -612,6 +621,349 @@ fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
         }
     }
     out
+}
+
+/// Local versioned state for `apply`/`rollback` (Phase 3, offline).
+///
+/// Layout: `<dir>/current.toml` plus `<dir>/history/NNNN-<nanos>.toml`.
+/// `<dir>` is `./.eqproxy` unless `EQPROXY_STATE_DIR` overrides it (that
+/// override is also how the E2E tests isolate parallel runs without
+/// touching the process working directory).
+fn state_dir() -> PathBuf {
+    std::env::var_os("EQPROXY_STATE_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".eqproxy"))
+}
+
+/// Maximum retained backups; older ones are pruned on `apply`.
+const HISTORY_CAP: usize = 32;
+
+/// History entry names, ascending (the zero-padded sequence sorts first,
+/// so lexical order is chronological).
+fn list_history(history: &Path) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(history) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.file_name().to_str() {
+                if name.ends_with(".toml") && entry.file_type().is_ok_and(|t| t.is_file()) {
+                    names.push(name.to_owned());
+                }
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// Next history name after `entries` (pure, unit-tested). `unique` only
+/// disambiguates two applies within the same sequence slot.
+fn next_history_name(entries: &[String], unique: u128) -> String {
+    let seq = entries
+        .iter()
+        .filter_map(|n| n.split_at_checked(4))
+        .filter_map(|(prefix, _)| prefix.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    format!("{seq:04}-{unique}.toml")
+}
+
+/// Drops the oldest entries beyond `cap`; returns how many were removed.
+/// A pruning failure never fails the apply itself: the operator is warned
+/// and the new backup is already safely stored.
+fn prune_history(history: &Path, cap: usize) -> usize {
+    let entries = list_history(history);
+    if entries.len() <= cap {
+        return 0;
+    }
+    let mut pruned = 0;
+    for stale in entries.iter().take(entries.len() - cap) {
+        match std::fs::remove_file(history.join(stale)) {
+            Ok(()) => pruned += 1,
+            Err(e) => eprintln!(
+                "warning: cannot prune old backup {}: {e}",
+                history.join(stale).display()
+            ),
+        }
+    }
+    pruned
+}
+
+/// Header stamped on every history entry: the directory the candidate was
+/// applied from, so `rollback` resolves relative cert/CA paths against the
+/// same base (TOML `#` comments, ignored by the parser).
+fn history_header(origin: &Path, unique: u128) -> String {
+    format!(
+        "# eqproxy-history: applied-from={} unix_nanos={unique}\n",
+        origin.display()
+    )
+}
+
+/// The directory a history entry was applied from, if it carries the header.
+fn history_origin(raw: &[u8]) -> Option<PathBuf> {
+    let text = std::str::from_utf8(raw).ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("# eqproxy-history:") {
+            continue;
+        }
+        for field in line.split_whitespace() {
+            if let Some(dir) = field.strip_prefix("applied-from=") {
+                return Some(PathBuf::from(dir));
+            }
+        }
+    }
+    None
+}
+
+/// The candidate bytes of a history entry, without the header lines.
+fn history_body(raw: &[u8]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(raw.len());
+    for line in raw.split_inclusive(|b| *b == b'\n') {
+        let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
+        let trimmed = trimmed.strip_suffix(b"\r").unwrap_or(trimmed);
+        if trimmed.starts_with(b"# eqproxy-history:") {
+            continue;
+        }
+        body.extend_from_slice(line);
+    }
+    body
+}
+
+/// Same-directory write + rename: the target is either the complete new
+/// content or the untouched previous one, never a half-written file.
+fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = target.with_extension(format!("tmp.{}", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    match std::fs::rename(&tmp, target) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(e)
+        }
+    }
+}
+
+/// Applies a candidate configuration to the local state (Phase 3, offline).
+///
+/// Fail-closed gate first: the candidate must load, validate and resolve
+/// exactly like `run` needs it (certificates are read, addresses parsed);
+/// exit 1 leaves the state untouched. Then the previous current, if any
+/// and different, is pushed to `history/` and the candidate bytes become
+/// the new `current.toml` via atomic rename. Re-applying identical bytes
+/// is a no-op report (exit 0, no new backup).
+///
+/// This touches no running process: hot-apply under traffic stays pending
+/// (S-CFG-01); the operator keeps pointing `run --config` at their file.
+fn apply(path: &Path) -> u8 {
+    let candidate = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            eprintln!(
+                "error: cannot apply {}: could not read the file: {e}",
+                path.display()
+            );
+            eprintln!(
+                "  example: create an eqproxy.toml (see eqproxy.toml.example) and pass --config <path>"
+            );
+            return 1;
+        }
+    };
+    let (config, result) = match load_and_check(path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !result.is_valid() {
+        for err in &result.errors {
+            eprintln!("{err}");
+        }
+        return 1;
+    }
+    let listeners = match resolve(&config, base_dir(path)) {
+        Ok(listeners) => listeners,
+        Err(msg) => {
+            eprintln!("error: inconsistent configuration after validation: {msg}");
+            return 1;
+        }
+    };
+    if listeners.is_empty() {
+        eprintln!("error: the configuration defines no listeners; nothing to serve");
+        return 1;
+    }
+
+    let dir = state_dir();
+    let history = dir.join("history");
+    if let Err(e) = std::fs::create_dir_all(&history) {
+        eprintln!(
+            "error: cannot use state in {}: {e} (check permissions or set EQPROXY_STATE_DIR=<path>)",
+            dir.display()
+        );
+        return 1;
+    }
+    let current = dir.join("current.toml");
+    let previous = std::fs::read(&current).ok();
+    if previous.as_deref() == Some(candidate.as_slice()) {
+        println!(
+            "already applied: {} matches current (no changes)",
+            path.display()
+        );
+        return 0;
+    }
+    // The previous current was valid when applied; parse-only is enough
+    // for the change report (a hand-edited current still diffs or skips).
+    let previous_config = previous.as_deref().and_then(|bytes| {
+        eqproxy_config::parse_str(&String::from_utf8_lossy(bytes), &current).ok()
+    });
+    let mut backup_note = String::new();
+    if let Some(prev) = previous.as_deref() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let name = next_history_name(&list_history(&history), unique);
+        let entry = history.join(&name);
+        let mut stored = history_header(&absolute_base(path), unique).into_bytes();
+        stored.extend_from_slice(prev);
+        if let Err(e) = std::fs::write(&entry, &stored) {
+            eprintln!("error: cannot back up current to {}: {e}", entry.display());
+            return 1;
+        }
+        backup_note = format!(", backup {name}");
+        if prune_history(&history, HISTORY_CAP) > 0 {
+            backup_note.push_str(" (oldest backup pruned)");
+        }
+    }
+    if let Err(e) = atomic_write(&current, &candidate) {
+        eprintln!(
+            "error: cannot install {} as current: {e}",
+            current.display()
+        );
+        return 1;
+    }
+    match previous_config {
+        Some(prev) => {
+            let changes = diff_changes(&prev, &config);
+            println!(
+                "applied: {} -> {} ({} difference(s) vs previous{backup_note})",
+                path.display(),
+                current.display(),
+                changes.len()
+            );
+            println!("{}", diff_report(&prev, &config));
+        }
+        None => {
+            println!(
+                "applied: {} -> {} (no previous configuration)",
+                path.display(),
+                current.display()
+            );
+            println!("{}", plan_report(&config, &listeners));
+        }
+    }
+    0
+}
+
+/// Absolute base directory of a config path, for the history header.
+fn absolute_base(path: &Path) -> PathBuf {
+    let base = base_dir(path);
+    std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf())
+}
+
+/// Restores the most recent backup into current (Phase 3, offline).
+///
+/// Fail-closed like `apply`: the backup must parse, validate and resolve
+/// (relative cert paths against the apply-time directory recorded in its
+/// header) before anything is replaced; exit 1 leaves the state
+/// untouched. On success the entry is popped: walking back takes one
+/// `rollback` per `apply`, and going forward again is a fresh `apply`.
+fn rollback() -> u8 {
+    let dir = state_dir();
+    let history = dir.join("history");
+    let mut entries = list_history(&history);
+    let Some(name) = entries.pop() else {
+        eprintln!(
+            "error: no previous configuration to restore (history in {} is empty)",
+            history.display()
+        );
+        eprintln!(
+            "  example: eqproxy config apply --config <candidate> records the previous current first"
+        );
+        return 1;
+    };
+    let entry = history.join(&name);
+    let raw = match std::fs::read(&entry) {
+        Ok(raw) => raw,
+        Err(e) => {
+            eprintln!("error: cannot read backup {}: {e}", entry.display());
+            return 1;
+        }
+    };
+    let body = history_body(&raw);
+    let text = String::from_utf8_lossy(&body);
+    let config = match eqproxy_config::parse_str(&text, &entry) {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("error: backup {name} is not usable: {err}");
+            return 1;
+        }
+    };
+    let result = validate::check(&config, &text, &entry);
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !result.is_valid() {
+        for err in &result.errors {
+            eprintln!("error: backup {name} is not usable: {err}");
+        }
+        return 1;
+    }
+    let base = history_origin(&raw).unwrap_or_else(|| history.clone());
+    let listeners = match resolve(&config, &base) {
+        Ok(listeners) => listeners,
+        Err(msg) => {
+            eprintln!("error: backup {name} is not usable: {msg}");
+            return 1;
+        }
+    };
+    if listeners.is_empty() {
+        eprintln!("error: backup {name} defines no listeners; refusing to restore");
+        return 1;
+    }
+    let current = dir.join("current.toml");
+    let displaced = std::fs::read(&current).ok().and_then(|bytes| {
+        eqproxy_config::parse_str(&String::from_utf8_lossy(&bytes), &current).ok()
+    });
+    if let Err(e) = atomic_write(&current, &body) {
+        eprintln!(
+            "error: cannot restore {} as current: {e}",
+            current.display()
+        );
+        return 1;
+    }
+    if let Err(e) = std::fs::remove_file(&entry) {
+        eprintln!("warning: restored {name} but cannot remove the spent backup: {e}");
+    }
+    match displaced {
+        Some(prev) => {
+            let changes = diff_changes(&prev, &config);
+            println!(
+                "rolled back: current restored from {name} ({} difference(s) vs applied)",
+                changes.len()
+            );
+            println!("{}", diff_report(&prev, &config));
+        }
+        None => {
+            println!("rolled back: current restored from {name} (no previous current to compare)");
+            println!("{}", plan_report(&config, &listeners));
+        }
+    }
+    0
 }
 
 /// Picks the listener to explain: by name when requested, the only one when
@@ -1112,5 +1464,48 @@ mod tests {
                 "missing {expected:?} in:\n{report}"
             );
         }
+    }
+
+    #[test]
+    fn history_names_sequence_and_sort() {
+        assert_eq!(next_history_name(&[], 7), "0001-7.toml");
+        let entries = vec!["0001-9.toml".to_owned(), "0009-1.toml".to_owned()];
+        assert_eq!(next_history_name(&entries, 3), "0010-3.toml");
+        // Non-conforming names never reset the sequence.
+        let entries = vec!["scratch.toml".to_owned(), "0002-0.toml".to_owned()];
+        assert_eq!(next_history_name(&entries, 0), "0003-0.toml");
+    }
+
+    #[test]
+    fn history_header_round_trips_origin_and_body() {
+        let raw = [
+            history_header(Path::new("/etc/eqproxy"), 42).into_bytes(),
+            b"schema_version = 1\n".to_vec(),
+        ]
+        .concat();
+        assert_eq!(history_origin(&raw), Some(PathBuf::from("/etc/eqproxy")));
+        assert_eq!(history_body(&raw), b"schema_version = 1\n");
+        // Entries without a header resolve against the history dir.
+        assert_eq!(history_origin(b"schema_version = 1\n"), None);
+        assert_eq!(
+            history_body(b"schema_version = 1\n"),
+            b"schema_version = 1\n"
+        );
+    }
+
+    #[test]
+    fn atomic_write_replaces_whole_content() {
+        let target = std::env::temp_dir().join(format!(
+            "eqproxy-atomic-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::write(&target, b"old").expect("seed");
+        atomic_write(&target, b"new").expect("replace");
+        assert_eq!(std::fs::read(&target).expect("read"), b"new");
+        std::fs::remove_file(&target).expect("cleanup");
     }
 }

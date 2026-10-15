@@ -68,14 +68,42 @@ expect_exit = 1
 expect_stderr_regex = "could not read the file"
 
 # Unimplemented functionality: explicit exit 2 (never fakes success).
-# (`config explain` and `config plan` left this list when they were
-# implemented in Phase 3; `config apply` still holds the contract.)
+# (`config explain`, `config plan` and `config apply`/`config rollback`
+# left this list when they were implemented in Phase 3; `config import`
+# and `doctor` still hold the contract.)
 [[e2e.scenarios]]
 name = "unimplemented-command-exits-2"
-argv = ["config", "apply", "--config", "eqproxy.toml"]
+argv = ["doctor"]
 expect_failure = true
 expect_exit = 2
 expect_stderr_regex = "not implemented yet"
+
+# Phase 3: `config apply` stores the first configuration offline and
+# reports the activation inventory (each scenario runs in a fresh
+# sandbox cwd, so `./.eqproxy` starts empty and stays isolated).
+[[e2e.scenarios]]
+name = "apply-stores-first-configuration"
+argv = ["config", "apply", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:8080"
+mode = "http"
+backend = "api"
+[backend.api]
+servers = [{ addr = "127.0.0.1:9000", weight = 3 }]
+'''
+expect_exit = 0
+expect_stdout_regex = "applied:.*\\(no previous configuration\\)"
+
+# Phase 3: `config rollback` with no history fails explicitly (exit 1),
+# never inventing a configuration.
+[[e2e.scenarios]]
+name = "rollback-without-history-fails"
+argv = ["config", "rollback"]
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "no previous configuration"
 
 # Phase 3: `config plan` reports the activation inventory without starting
 # anything (dry run over the resolved model).
