@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:c4c20d86-866b-4c71-9f43-4eae452215d2",
+  "serialNumber": "urn:uuid:f9bdee85-2dd8-49be-bac9-c915c5d0cf6b",
   "metadata": {
-    "timestamp": "2026-10-15T13:43:15.098437000Z",
+    "timestamp": "2026-10-15T19:40:59.471025000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -19,10 +19,10 @@
     ],
     "component": {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.4",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.5",
       "author": "The EQProxy Authors",
       "name": "eqproxy-config",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "description": "EQProxy configuration: typed TOML schema, semantic validation and actionable errors",
       "scope": "required",
       "licenses": [
@@ -30,14 +30,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-config@0.4.4?download_url=file://.",
+      "purl": "pkg:cargo/eqproxy-config@0.4.5?download_url=file://.",
       "components": [
         {
           "type": "library",
-          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.4 bin-target-0",
+          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.5 bin-target-0",
           "name": "eqproxy_config",
-          "version": "0.4.4",
-          "purl": "pkg:cargo/eqproxy-config@0.4.4?download_url=file://.#src/lib.rs"
+          "version": "0.4.5",
+          "purl": "pkg:cargo/eqproxy-config@0.4.5?download_url=file://.#src/lib.rs"
         }
       ]
     },
@@ -616,7 +616,7 @@
   ],
   "dependencies": [
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.4",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.5",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
         "registry+https://github.com/rust-lang/crates.io-index#serde_path_to_error@0.1.20",

@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:77121db7-f3f4-4f6e-abea-5e3feef70474",
+  "serialNumber": "urn:uuid:798e9aa9-6b46-48b2-9c1c-2fe775368b1d",
   "metadata": {
-    "timestamp": "2026-10-15T13:43:15.099210000Z",
+    "timestamp": "2026-10-15T19:40:59.472373000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -19,10 +19,10 @@
     ],
     "component": {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.4",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.5",
       "author": "The EQProxy Authors",
       "name": "eqproxy-net",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "description": "EQProxy dataplane: listeners, connections and bounded TCP proxy",
       "scope": "required",
       "licenses": [
@@ -30,14 +30,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-net@0.4.4?download_url=file://.",
+      "purl": "pkg:cargo/eqproxy-net@0.4.5?download_url=file://.",
       "components": [
         {
           "type": "library",
-          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.4 bin-target-0",
+          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.5 bin-target-0",
           "name": "eqproxy_net",
-          "version": "0.4.4",
-          "purl": "pkg:cargo/eqproxy-net@0.4.4?download_url=file://.#src/lib.rs"
+          "version": "0.4.5",
+          "purl": "pkg:cargo/eqproxy-net@0.4.5?download_url=file://.#src/lib.rs"
         }
       ]
     },
@@ -51,10 +51,10 @@
   "components": [
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.4",
+      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
       "author": "The EQProxy Authors",
       "name": "eqproxy-core",
-      "version": "0.4.4",
+      "version": "0.4.5",
       "description": "Shared EQProxy types: metrics and graceful shutdown",
       "scope": "required",
       "licenses": [
@@ -62,7 +62,7 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-core@0.4.4?download_url=file://../eqproxy-core"
+      "purl": "pkg:cargo/eqproxy-core@0.4.5?download_url=file://../eqproxy-core"
     },
     {
       "type": "library",
@@ -1251,15 +1251,15 @@
   ],
   "dependencies": [
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.4",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3"
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.4",
+      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.5",
       "dependsOn": [
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.4",
+        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
         "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46",
         "registry+https://github.com/rust-lang/crates.io-index#rustls-pki-types@1.15.1",
         "registry+https://github.com/rust-lang/crates.io-index#thiserror@2.0.21",
