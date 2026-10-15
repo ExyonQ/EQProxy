@@ -5,6 +5,24 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.4.4] — 2026-10-15
+
+### Added
+
+- `eqproxy doctor [--config <file>]`: pre-flight environment diagnostics
+  (Phase 3). With a config it gates exactly like `run`, then reports one
+  `ok:`/`warn:`/`err:` line per check: a momentary TCP bind per listener
+  (proves the port is free and permitted), the TLS state per listener
+  (material already parsed by the gate), and the FD budget from SPEC §7.3
+  and T07 (2 FDs per connection across all `maxconn` plus one per
+  listener with 10 % margin, against the soft `NOFILE` limit; a short
+  budget warns, never fails). Verdict line last (`doctor: PASS/FAIL` with
+  counts); exit 0 unless the gate fails or any check errors. With no
+  `--config`, environment only (FD limit + pointer to `--config`).
+  Backend reachability is deliberately not probed: a down backend is not
+  a config error, and dialing would pollute backends. New dependency:
+  `rlimit` 0.10 (safe `NOFILE` reads; `unsafe` stays forbidden).
+
 ## [v0.4.3] — 2026-10-15
 
 ### Fixed

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+rlimit = { workspace = true }
 tokio = { workspace = true }
 eqproxy-core = { path = "../eqproxy-core", version = "0.4.1" }
 eqproxy-config = { path = "../eqproxy-config", version = "0.4.1" }

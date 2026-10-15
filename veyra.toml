@@ -68,15 +68,39 @@ expect_exit = 1
 expect_stderr_regex = "could not read the file"
 
 # Unimplemented functionality: explicit exit 2 (never fakes success).
-# (`config explain`, `config plan` and `config apply`/`config rollback`
-# left this list when they were implemented in Phase 3; `config import`
-# and `doctor` still hold the contract.)
+# (Every Phase 3 CLI command is now implemented — `explain`, `plan`,
+# `apply`/`rollback` and `doctor` each left this list in their slice;
+# only `config import` (Phase 8) still holds the contract.)
 [[e2e.scenarios]]
 name = "unimplemented-command-exits-2"
-argv = ["doctor"]
+argv = ["config", "import", "--input", "a.cfg", "--output", "b.toml"]
 expect_failure = true
 expect_exit = 2
 expect_stderr_regex = "not implemented yet"
+
+# Phase 3: `doctor` passes pre-flight on a free port (each scenario runs
+# in a fresh sandbox cwd; port 0 always binds; warnings never fail).
+[[e2e.scenarios]]
+name = "doctor-passes-for-a-free-port"
+argv = ["doctor", "--config", "/dev/stdin"]
+stdin = '''
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:0"
+backend = "api"
+[backend.api]
+server = "127.0.0.1:9"
+'''
+expect_exit = 0
+expect_stdout_regex = "doctor: PASS"
+
+# Phase 3: `doctor` with a missing config fails explicitly (exit 1).
+[[e2e.scenarios]]
+name = "doctor-reports-missing-config"
+argv = ["doctor", "--config", "no-existe.toml"]
+expect_failure = true
+expect_exit = 1
+expect_stderr_regex = "could not read the file"
 
 # Phase 3: `config apply` stores the first configuration offline and
 # reports the activation inventory (each scenario runs in a fresh

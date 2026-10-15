@@ -162,18 +162,19 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "eqproxy-cli"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "clap",
  "eqproxy-config",
  "eqproxy-core",
  "eqproxy-net",
+ "rlimit",
  "tokio",
 ]
 
 [[package]]
 name = "eqproxy-config"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "serde",
  "serde_path_to_error",
@@ -182,14 +183,14 @@ dependencies = [
 
 [[package]]
 name = "eqproxy-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "eqproxy-net"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "eqproxy-core",
  "rustls",
@@ -383,6 +384,15 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rlimit"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7043b63bd0cd1aaa628e476b80e6d4023a3b50eb32789f2728908107bd0c793a"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

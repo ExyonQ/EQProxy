@@ -17,7 +17,7 @@
 # Env:   RUST_IMAGE (default rust:1.97-bookworm) for the Linux builds.
 set -euo pipefail
 
-VER="0.4.3"
+VER="0.4.4"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 RUST_IMAGE="${RUST_IMAGE:-rust:1.97-bookworm}"
@@ -74,6 +74,13 @@ verify_cli() {
         || fail "$bin apply idempotent failed"
     grep -q "already applied" /tmp/e2e-apply.txt \
         || fail "$bin apply idempotent"
+    log "E2E $bin: doctor passes pre-flight on a free port"
+    run doctor --config /tmp/e2e-cand.toml > /tmp/e2e-doctor.txt \
+        || fail "$bin doctor failed"
+    grep -q "doctor: PASS" /tmp/e2e-doctor.txt \
+        || fail "$bin doctor verdict"
+    grep -q "ok: bind" /tmp/e2e-doctor.txt \
+        || fail "$bin doctor bind probe"
     if run config rollback 2>/tmp/e2e-err.txt; then
         fail "$bin rollback with empty history succeeded"
     fi

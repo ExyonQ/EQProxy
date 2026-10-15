@@ -1,7 +1,8 @@
 //! EQProxy CLI.
 //!
-//! Implemented: `run`, `config validate`, `config explain` and `config diff`.
-//! The rest **fail explicitly** with exit code 2 (never fake success).
+//! Implemented: `run`, `config validate/explain/diff/plan/apply/rollback`
+//! and `doctor`. The rest **fail explicitly** with exit code 2
+//! (never fake success).
 
 #![forbid(unsafe_code)]
 
@@ -49,8 +50,13 @@ enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
-    /// Environment diagnostics (Phase 3)
-    Doctor,
+    /// Environment diagnostics (Phase 3): config gate, listener bind
+    /// probes and the FD budget. With no `--config`, environment only.
+    Doctor {
+        /// TOML configuration file to check readiness for
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -121,7 +127,7 @@ async fn main() -> ExitCode {
             metrics_interval,
         } => run(config, metrics_interval).await,
         Command::Config { command } => config_command(command),
-        Command::Doctor => not_implemented("eqproxy doctor", "Phase 3"),
+        Command::Doctor { config } => doctor(config.as_deref()),
     };
     ExitCode::from(code)
 }
@@ -981,6 +987,213 @@ fn rollback() -> u8 {
     0
 }
 
+/// Environment diagnostics for a config that is about to run (Phase 3).
+///
+/// Side-effect discipline: nothing is dialed and no state is touched. The
+/// only interaction with the outside world is a momentary TCP bind per
+/// listener (proving the port is free and permitted) plus reading the
+/// process FD limit. Backend reachability is deliberately NOT probed: a
+/// down backend at check time is not a config error, and dialing would
+/// pollute backend logs and health state.
+///
+/// Exit 0 unless the config gate fails or any check errors; warnings
+/// (e.g. a tight FD budget) never fail the run.
+fn doctor(path: Option<&Path>) -> u8 {
+    let Some(path) = path else {
+        let mut report = DoctorReport::new("environment only (no --config)".to_owned());
+        report.push_fd(None);
+        print!("{report}");
+        return 0;
+    };
+    let (config, result) = match load_and_check(path) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            eprintln!("{err}");
+            return 1;
+        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !result.is_valid() {
+        for err in &result.errors {
+            eprintln!("{err}");
+        }
+        return 1;
+    }
+    let listeners = match resolve(&config, base_dir(path)) {
+        Ok(listeners) => listeners,
+        Err(msg) => {
+            eprintln!("error: inconsistent configuration after validation: {msg}");
+            return 1;
+        }
+    };
+    if listeners.is_empty() {
+        eprintln!("error: the configuration defines no listeners; nothing to serve");
+        return 1;
+    }
+    let mut report = DoctorReport::new(path.display().to_string());
+    for listener in &listeners {
+        report.push_bind(listener);
+        report.push_tls(listener);
+    }
+    report.push_fd(Some(&listeners));
+    let code = report.exit_code();
+    print!("{report}");
+    code
+}
+
+/// One `ok:`/`warn:`/`err:`/`info:` line.
+struct DoctorLine {
+    level: &'static str,
+    detail: String,
+}
+
+/// The rendered doctor report: check lines plus a verdict (pure data,
+/// unit-tested; the only I/O of `doctor` is printing it).
+struct DoctorReport {
+    subject: String,
+    lines: Vec<DoctorLine>,
+}
+
+impl DoctorReport {
+    fn new(subject: String) -> Self {
+        Self {
+            subject,
+            lines: Vec::new(),
+        }
+    }
+
+    fn ok(&mut self, detail: String) {
+        self.lines.push(DoctorLine {
+            level: "ok",
+            detail,
+        });
+    }
+
+    fn warn(&mut self, detail: String) {
+        self.lines.push(DoctorLine {
+            level: "warn",
+            detail,
+        });
+    }
+
+    fn err(&mut self, detail: String) {
+        self.lines.push(DoctorLine {
+            level: "err",
+            detail,
+        });
+    }
+
+    /// Momentary TCP bind: proves the port is free and permitted.
+    fn push_bind(&mut self, listener: &ResolvedListener) {
+        match std::net::TcpListener::bind(listener.listen) {
+            Ok(bound) => {
+                drop(bound);
+                self.ok(format!(
+                    "bind {} (listener \"{}\")",
+                    listener.listen, listener.name
+                ));
+            }
+            Err(e) => self.err(format!(
+                "bind {} (listener \"{}\"): {e} — run would fail to start this listener",
+                listener.listen, listener.name
+            )),
+        }
+    }
+
+    /// TLS material already loaded by `resolve`: surfacing per listener.
+    fn push_tls(&mut self, listener: &ResolvedListener) {
+        self.ok(format!(
+            "tls {} (listener \"{}\")",
+            if listener.server_tls.is_some() {
+                "enabled, cert/key parsed"
+            } else {
+                "disabled (plain TCP)"
+            },
+            listener.name
+        ));
+    }
+
+    /// FD budget (SPEC §7.3, T07): 2 FDs per proxied connection plus one
+    /// per listener, with a 10 % margin, against the soft `NOFILE` limit.
+    fn push_fd(&mut self, listeners: Option<&[ResolvedListener]>) {
+        let limit = fd_soft_limit();
+        let Some(listeners) = listeners else {
+            match limit {
+                Some(n) => self.lines.push(DoctorLine {
+                    level: "info",
+                    detail: format!("fd limit={n} (pass --config to assess it against maxconn)"),
+                }),
+                None => self.warn("fd limit unreadable; cannot assess the FD budget".to_owned()),
+            }
+            return;
+        };
+        let needed = fd_needed(listeners);
+        let maxconn: u32 = listeners.iter().map(|l| l.maxconn).sum();
+        match limit {
+            Some(n) if n >= needed => self.ok(format!(
+                "fds: limit={n} need~{needed} (2x maxconn {maxconn} + {} listeners + 10% margin)",
+                listeners.len()
+            )),
+            Some(n) => self.warn(format!(
+                "fds: limit={n} below need~{needed} (2x maxconn {maxconn} + {} listeners + 10% margin); raise `ulimit -n` or lower maxconn",
+                listeners.len()
+            )),
+            None => self.warn("fd limit unreadable; cannot assess the FD budget".to_owned()),
+        }
+    }
+
+    fn counts(&self) -> (usize, usize, usize) {
+        let mut ok = 0;
+        let mut warn = 0;
+        let mut err = 0;
+        for line in &self.lines {
+            match line.level {
+                // `info` is a satisfied observation, never a problem.
+                "ok" | "info" => ok += 1,
+                "warn" => warn += 1,
+                _ => err += 1,
+            }
+        }
+        (ok, warn, err)
+    }
+
+    fn exit_code(&self) -> u8 {
+        if self.counts().2 > 0 { 1 } else { 0 }
+    }
+}
+
+impl std::fmt::Display for DoctorReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (ok, warn, err) = self.counts();
+        let _ = writeln!(f, "doctor checks for {}", self.subject);
+        for line in &self.lines {
+            let _ = writeln!(f, "{}: {}", line.level, line.detail);
+        }
+        let _ = writeln!(
+            f,
+            "doctor: {} ({ok} ok, {warn} warn, {err} err)",
+            if err > 0 { "FAIL" } else { "PASS" }
+        );
+        Ok(())
+    }
+}
+
+/// FDs `run` may hold: 2 per connection across all listeners plus one per
+/// listener, with a 10 % margin (SPEC §7.3). Pure, unit-tested.
+fn fd_needed(listeners: &[ResolvedListener]) -> u64 {
+    let conns: u64 = listeners.iter().map(|l| u64::from(l.maxconn)).sum();
+    (2 * conns + listeners.len() as u64) * 11 / 10
+}
+
+/// Soft `NOFILE` limit of this process; `None` when unreadable.
+fn fd_soft_limit() -> Option<u64> {
+    rlimit::getrlimit(rlimit::Resource::NOFILE)
+        .ok()
+        .map(|(soft, _)| soft)
+}
+
 /// Picks the listener to explain: by name when requested, the only one when
 /// unambiguous, otherwise an error that lists the candidates (never guesses).
 fn select_listener<'a>(
@@ -1522,5 +1735,48 @@ mod tests {
         atomic_write(&target, b"new").expect("replace");
         assert_eq!(std::fs::read(&target).expect("read"), b"new");
         std::fs::remove_file(&target).expect("cleanup");
+    }
+
+    #[test]
+    fn fd_needed_matches_the_spec_budget() {
+        assert_eq!(fd_needed(&[]), 0);
+        // (2*1024 + 1 listener) * 11/10 = 2253.
+        let (_, listener) = two_server_listener();
+        assert_eq!(fd_needed(&[listener]), 2253);
+    }
+
+    #[test]
+    fn doctor_report_counts_and_verdict() {
+        let mut report = DoctorReport::new("test".to_owned());
+        report.ok("bind 127.0.0.1:0".to_owned());
+        report.warn("fds tight".to_owned());
+        let shown = report.to_string();
+        assert!(
+            shown.contains("doctor: PASS (1 ok, 1 warn, 0 err)"),
+            "{shown}"
+        );
+        assert_eq!(report.exit_code(), 0);
+        report.err("bind 127.0.0.1:1: permission denied".to_owned());
+        let shown = report.to_string();
+        assert!(
+            shown.contains("doctor: FAIL (1 ok, 1 warn, 1 err)"),
+            "{shown}"
+        );
+        assert_eq!(report.exit_code(), 1);
+    }
+
+    #[test]
+    fn doctor_fd_line_names_limit_and_formula() {
+        let (_, listener) = two_server_listener();
+        let mut report = DoctorReport::new("test".to_owned());
+        report.push_fd(Some(&[listener]));
+        let shown = report.to_string();
+        assert!(shown.contains("need~2253"), "{shown}");
+        assert!(
+            shown.contains("fds: limit=") || shown.contains("fd limit unreadable"),
+            "{shown}"
+        );
+        // Warnings never fail the run.
+        assert_eq!(report.exit_code(), 0);
     }
 }

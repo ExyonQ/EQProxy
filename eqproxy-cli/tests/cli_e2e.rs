@@ -162,16 +162,14 @@ fn validate_reports_syntax_errors_with_line() {
 )]
 #[test]
 fn unimplemented_commands_fail_explicitly_with_exit_2() {
-    // `config explain`, `config plan` and now `config apply`/`config rollback`
-    // used to be in this list; all are implemented (Phase 3 slices) and
-    // covered by explain_*/plan_*/apply_*/rollback_* tests below.
-    let cases: &[(&[&str], &str)] = &[
-        (
-            &["config", "import", "--input", "a.cfg", "--output", "b.toml"],
-            "config import",
-        ),
-        (&["doctor"], "eqproxy doctor"),
-    ];
+    // `config explain`/`plan`/`apply`/`rollback` and now `doctor` used to
+    // be in this list; all are implemented (Phase 3 slices) and covered
+    // by explain_*/plan_*/apply_*/rollback_*/doctor_* tests below. Only
+    // `config import` (Phase 8) still holds the exit-2 contract.
+    let cases: &[(&[&str], &str)] = &[(
+        &["config", "import", "--input", "a.cfg", "--output", "b.toml"],
+        "config import",
+    )];
     for (args, name) in cases {
         let output = bin().args(*args).output().expect("run eqproxy");
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1206,4 +1204,110 @@ fn wait_for_sigint_shutdown(child: &mut std::process::Child, config: &Path) {
     };
     remove_temp(config);
     assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+}
+
+// --- `doctor` (Phase 3, environment diagnostics) ---
+
+fn run_doctor(args: &[&str]) -> std::process::Output {
+    bin()
+        .arg("doctor")
+        .args(args)
+        .output()
+        .expect("run eqproxy doctor")
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn doctor_passes_for_a_free_port() {
+    let config = temp_config(
+        "doctor-ok",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\n",
+    );
+    let config_str = config.to_string_lossy().into_owned();
+    let output = run_doctor(&["--config", &config_str]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    remove_temp(&config);
+    assert!(
+        output.status.success(),
+        "doctor must exit 0; stderr: {stderr}"
+    );
+    for expected in [
+        "doctor checks for",
+        "ok: bind 127.0.0.1:0 (listener \"web\")",
+        "tls disabled (plain TCP)",
+        "doctor: PASS",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn doctor_fails_on_an_occupied_port() {
+    // The echo backend holds its port: doctor's bind probe must fail
+    // loudly (exit 1 + FAIL), the way `run` would fail to start.
+    let backend = start_echo_backend();
+    let config = temp_config(
+        "doctor-busy",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"{backend}\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\n"
+        ),
+    );
+    let config_str = config.to_string_lossy().into_owned();
+    let output = run_doctor(&["--config", &config_str]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    remove_temp(&config);
+    assert_eq!(output.status.code(), Some(1), "stdout: {stdout}");
+    assert!(
+        stdout.contains(&format!("err: bind {backend} (listener \"web\")")),
+        "stdout: {stdout}"
+    );
+    for expected in ["run would fail to start", "doctor: FAIL"] {
+        assert!(
+            stdout.contains(expected),
+            "missing {expected:?} in: {stdout}"
+        );
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn doctor_reports_missing_config_actionably() {
+    let output = run_doctor(&["--config", "no-existe.toml"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(stderr.contains("could not read"), "stderr: {stderr}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn doctor_without_config_checks_the_environment() {
+    let output = run_doctor(&[]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "env-only doctor must exit 0; stderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("fd limit=") || stdout.contains("fd limit unreadable"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("doctor: PASS"), "stdout: {stdout}");
 }
