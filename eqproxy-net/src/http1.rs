@@ -1063,10 +1063,11 @@ pub async fn serve_http<CR, CW>(
             continue;
         }
         if !clean_boundary {
-            eprintln!(
-                "WARN [{}] backend {} sent bytes past the end of the response (peer {peer}); connection dropped, not pooled",
-                cfg.name, conn.addr
-            );
+            // Counted, not logged: the counter is what operators alert on
+            // (bounded cardinality, no labels).
+            metrics
+                .backend_connections_discarded
+                .fetch_add(1, Ordering::Relaxed);
         }
         // The server closed or broke framing (UntilEof): the backend
         // connection dies here and never returns to the pool.

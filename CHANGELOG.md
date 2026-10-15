@@ -28,13 +28,16 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   the connection returned to the keep-alive pool, breaking the A16
   byte-alignment contract (the next exchange could consume the stale tail).
   The connection is now dropped instead of pooled, the bytes are never
-  forwarded to the client, and the anomaly is logged (audit finding on the
-  interim-response change; also reachable before it via `response_carry`).
+  forwarded to the client, and the drop increments the new bounded
+  `backend_connections_discarded` counter (metrics snapshot) so operators
+  can alert on it (audit finding on the interim-response change; also
+  reachable before it via `response_carry`).
 - `100 Continue` is only generated when the request actually expects a body
   (a bodiless request with `Expect: 100-continue` gets no interim).
 - Upstream failures are now diagnosable: invalid response heads, refused
   protocol switches (101) and interim floods log a WARN with listener,
-  backend and peer (no secrets).
+  backend and peer (no secrets); pool drops are counted in the metrics
+  (`backend_connections_discarded`).
 
 ## [v0.4.4] — 2026-10-15
 

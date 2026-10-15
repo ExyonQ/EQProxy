@@ -151,15 +151,18 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncWriteExt, duplex};
 
-    fn pair() -> (BufReader<BoxRead>, BoxWrite) {
+    /// The third element holds the far halves: the test must keep them
+    /// bound for its whole duration (the pool owns the other side), and
+    /// drop them at its end — a `mem::forget` here is a real leak that
+    /// miri reports.
+    fn pair() -> (BufReader<BoxRead>, BoxWrite, (BoxRead, BoxWrite)) {
         let (a, b) = duplex(64 * 1024);
         let (ra, wa) = tokio::io::split(a);
         let (rb, wb) = tokio::io::split(b);
-        // Keep the far halves alive inside the test; the pool owns one side.
-        std::mem::forget((rb, wb));
         let read: BoxRead = Box::new(ra);
         let write: BoxWrite = Box::new(wa);
-        (BufReader::new(read), write)
+        let far: (BoxRead, BoxWrite) = (Box::new(rb), Box::new(wb));
+        (BufReader::new(read), write, far)
     }
 
     fn addr() -> SocketAddr {
@@ -171,7 +174,7 @@ mod tests {
         let pool = Pool::new(4, Duration::from_secs(60));
         let now = Instant::now();
         assert!(pool.checkout(&addr(), now).is_none());
-        let (read, write) = pair();
+        let (read, write, _far) = pair();
         pool.checkin(addr(), read, write, now);
         assert_eq!(pool.idle_count(&addr()), 1);
         assert!(pool.checkout(&addr(), now).is_some());
@@ -183,7 +186,7 @@ mod tests {
         let pool = Pool::new(2, Duration::from_secs(60));
         let now = Instant::now();
         for _ in 0..5 {
-            let (read, write) = pair();
+            let (read, write, _far) = pair();
             pool.checkin(addr(), read, write, now);
         }
         assert_eq!(pool.idle_count(&addr()), 2);
@@ -192,13 +195,20 @@ mod tests {
     #[test]
     fn stale_entries_are_never_handed_out() {
         let pool = Pool::new(4, Duration::from_millis(50));
-        let (read, write) = pair();
+        let (read, write, _far) = pair();
         pool.checkin(addr(), read, write, Instant::now());
         std::thread::sleep(Duration::from_millis(80));
         assert!(pool.checkout(&addr(), Instant::now()).is_none());
         assert_eq!(pool.idle_count(&addr()), 0);
     }
 
+    // `#[tokio::test]` starts the tokio reactor (mio `kqueue` FFI),
+    // which miri cannot execute on macOS. The test runs in every normal
+    // `cargo test`; only the miri pass skips it (repo convention).
+    #[cfg_attr(
+        miri,
+        ignore = "needs the tokio reactor (mio kqueue FFI): miri does not support foreign functions on macOS"
+    )]
     #[tokio::test]
     async fn connection_with_pending_bytes_is_dropped() {
         let pool = Pool::new(4, Duration::from_secs(60));
@@ -231,7 +241,7 @@ mod tests {
         let pool = Pool::with_defaults();
         let now = Instant::now();
         let other: SocketAddr = "127.0.0.1:9001".parse().expect("addr");
-        let (read, write) = pair();
+        let (read, write, _far) = pair();
         pool.checkin(addr(), read, write, now);
         assert!(pool.checkout(&other, now).is_none());
         assert!(pool.checkout(&addr(), now).is_some());

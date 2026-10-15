@@ -1765,6 +1765,13 @@ mod tests {
         assert_eq!(report.exit_code(), 1);
     }
 
+    // `push_fd` reads the soft NOFILE limit through `rlimit::getrlimit`
+    // (FFI): miri has no shim for it on macOS. The test runs in every
+    // normal `cargo test`; only the miri pass skips it (repo convention).
+    #[cfg_attr(
+        miri,
+        ignore = "needs getrlimit (FFI): miri does not support foreign functions on macOS"
+    )]
     #[test]
     fn doctor_fd_line_names_limit_and_formula() {
         let (_, listener) = two_server_listener();

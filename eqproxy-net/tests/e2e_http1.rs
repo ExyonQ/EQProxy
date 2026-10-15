@@ -939,6 +939,10 @@ async fn oversent_backend_bytes_are_never_forwarded_or_pooled() {
         snap.backend_connections_reused, 0,
         "a connection holding bytes past the message must never return to the pool"
     );
+    assert_eq!(
+        snap.backend_connections_discarded, 1,
+        "the drop must be counted exactly once so operators can alert on it (the clean second exchange must not count)"
+    );
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)

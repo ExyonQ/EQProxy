@@ -40,6 +40,10 @@ pub struct Metrics {
     pub backend_connections_reused: AtomicU64,
     /// Freshly dialed backend connections (not reused).
     pub backend_connections_opened: AtomicU64,
+    /// Backend connections dropped instead of pooled: bytes past the
+    /// message end broke the A16 boundary contract. Operators can alert
+    /// on this counter (no labels: bounded cardinality).
+    pub backend_connections_discarded: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -60,6 +64,7 @@ pub struct MetricsSnapshot {
     pub no_available_server: u64,
     pub backend_connections_reused: u64,
     pub backend_connections_opened: u64,
+    pub backend_connections_discarded: u64,
 }
 
 impl Metrics {
@@ -81,6 +86,9 @@ impl Metrics {
             no_available_server: self.no_available_server.load(Ordering::Relaxed),
             backend_connections_reused: self.backend_connections_reused.load(Ordering::Relaxed),
             backend_connections_opened: self.backend_connections_opened.load(Ordering::Relaxed),
+            backend_connections_discarded: self
+                .backend_connections_discarded
+                .load(Ordering::Relaxed),
         }
     }
 
@@ -135,8 +143,10 @@ impl fmt::Display for MetricsSnapshot {
         )?;
         write!(
             f,
-            " pool[reused={} opened={}]",
-            self.backend_connections_reused, self.backend_connections_opened
+            " pool[reused={} opened={} discarded={}]",
+            self.backend_connections_reused,
+            self.backend_connections_opened,
+            self.backend_connections_discarded
         )
     }
 }
@@ -168,12 +178,17 @@ mod tests {
         metrics
             .bytes_client_to_backend
             .fetch_add(42, Ordering::Relaxed);
+        metrics
+            .backend_connections_discarded
+            .fetch_add(1, Ordering::Relaxed);
         let snap = metrics.snapshot();
         assert_eq!(snap.connections_active, 1);
         assert_eq!(snap.bytes_client_to_backend, 42);
+        assert_eq!(snap.backend_connections_discarded, 1);
         let shown = snap.to_string();
         assert!(shown.contains("active=1"), "display: {shown}");
         assert!(shown.contains("c2b=42"), "display: {shown}");
+        assert!(shown.contains("discarded=1"), "display: {shown}");
     }
 
     #[test]
