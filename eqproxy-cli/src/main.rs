@@ -152,16 +152,27 @@ fn not_implemented(feature: &str, phase: &str) -> u8 {
 
 /// Reads, parses and validates. The parse error already carries line, field and example.
 fn load_and_check(path: &Path) -> Result<(Config, CheckResult), ConfigError> {
-    let source = std::fs::read_to_string(path).map_err(|e| ConfigError {
+    let source = read_config_source(path)?;
+    parse_and_check(&source, path)
+}
+
+/// Reads the raw config text (single read: `/dev/stdin` pipes cannot be
+/// read twice, which `apply` learned when it read-then-reloaded).
+fn read_config_source(path: &Path) -> Result<String, ConfigError> {
+    std::fs::read_to_string(path).map_err(|e| ConfigError {
         file: path.to_path_buf(),
         location: None,
         field: None,
         cause: format!("could not read the file: {e}"),
         example: "create an eqproxy.toml (see eqproxy.toml.example) and pass --config <path>"
             .to_owned(),
-    })?;
-    let config = eqproxy_config::parse_str(&source, path)?;
-    let result = validate::check(&config, &source, path);
+    })
+}
+
+/// Parses and semantically checks already-read config text.
+fn parse_and_check(source: &str, path: &Path) -> Result<(Config, CheckResult), ConfigError> {
+    let config = eqproxy_config::parse_str(source, path)?;
+    let result = validate::check(&config, source, path);
     Ok((config, result))
 }
 
@@ -644,10 +655,11 @@ fn list_history(history: &Path) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(history) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".toml") && entry.file_type().is_ok_and(|t| t.is_file()) {
-                    names.push(name.to_owned());
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && name.ends_with(".toml")
+                && entry.file_type().is_ok_and(|t| t.is_file())
+            {
+                names.push(name.to_owned());
             }
         }
     }
@@ -756,6 +768,8 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// This touches no running process: hot-apply under traffic stays pending
 /// (S-CFG-01); the operator keeps pointing `run --config` at their file.
 fn apply(path: &Path) -> u8 {
+    // Single read: the bytes gate the config AND become the stored
+    // current (pipes like /dev/stdin cannot be read twice).
     let candidate = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) => {
@@ -769,7 +783,8 @@ fn apply(path: &Path) -> u8 {
             return 1;
         }
     };
-    let (config, result) = match load_and_check(path) {
+    let source = String::from_utf8_lossy(&candidate);
+    let (config, result) = match parse_and_check(&source, path) {
         Ok(loaded) => loaded,
         Err(err) => {
             eprintln!("{err}");

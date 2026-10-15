@@ -3,7 +3,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -30,7 +30,7 @@ fn temp_config(name: &str, contents: &str) -> PathBuf {
     path
 }
 
-fn remove_temp(path: &PathBuf) {
+fn remove_temp(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
@@ -1144,7 +1144,7 @@ fn rollback_walks_back_one_apply_at_a_time() {
 
 /// Shared SIGINT-shutdown tail: real SIGINT to a live proxy must end it
 /// with code 0 (extracted so the apply/rollback suite can sit above it).
-fn wait_for_sigint_shutdown(child: &mut std::process::Child, config: &PathBuf) {
+fn wait_for_sigint_shutdown(child: &mut std::process::Child, config: &Path) {
     // Real SIGINT → clean shutdown with code 0.
     let pid = child.id();
     let kill = Command::new("kill")
@@ -1163,6 +1163,6 @@ fn wait_for_sigint_shutdown(child: &mut std::process::Child, config: &PathBuf) {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    remove_temp(&config);
+    remove_temp(config);
     assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
 }
