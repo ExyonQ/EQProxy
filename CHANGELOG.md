@@ -5,6 +5,8 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.4.5] — 2026-10-15
+
 ### Fixed
 
 - HTTP/1.1 interim responses (1xx) no longer desync a keep-alive client or a

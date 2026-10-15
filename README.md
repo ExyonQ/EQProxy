@@ -13,16 +13,17 @@ diagnostics, configuration, administration, extensibility and security.
 > protocol v1 send**, backend keep-alive pool, typed TOML configuration with
 > actionable errors and the `eqproxy` CLI (`validate`, `explain`, `diff`,
 > `plan` dry run, offline `apply`/`rollback` with versioned state,
-> `doctor` pre-flight checks), with 144 tests green (including E2E over
+> `doctor` pre-flight checks), RFC 9112 conformance for interim responses
+> (1xx) and `Expect: 100-continue`, with 144 tests green (including E2E over
 > real sockets,
-> the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.4
+> the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.5
 > published (binaries and multi-arch image, see Install). Performance (first runs vs
 > 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): after the A16 backend
 > keep-alive pool landed, S-TCP-01, S-H1-01 and S-TLS-01 measure
 > **Comparable** (zero non-2xx; tails comparable, H1/TLS at or below the
 > reference).
 >
-> **Scope honesty:** v0.4.4 is not declared production ready (Phase 9 gate
+> **Scope honesty:** v0.4.5 is not declared production ready (Phase 9 gate
 > pending): TCP + HTTP/1.1 only; `apply`/`rollback` manage versioned files
 > offline, hot config reload under traffic stays pending (S-CFG-01).
 
@@ -35,17 +36,17 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.4.4
+## Install from release v0.4.5
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.4.4).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.4.5).
 
 ```bash
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.4/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.4/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.5/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.4.5/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 config validate --config eqproxy.toml.example
@@ -54,8 +55,8 @@ chmod +x eqproxy-linux-amd64
 Docker (linux/amd64 + linux/arm64):
 
 ```bash
-docker pull ghcr.io/exyonq/eqproxy:0.4.4
-docker run --rm ghcr.io/exyonq/eqproxy:0.4.4 --version
+docker pull ghcr.io/exyonq/eqproxy:0.4.5
+docker run --rm ghcr.io/exyonq/eqproxy:0.4.5 --version
 ```
 
 ## Documentation
