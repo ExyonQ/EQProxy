@@ -5,11 +5,14 @@ Language: **English**.
 Minimal-observability TCP/HTTP reverse proxy, written in safe Rust
 (`#![forbid(unsafe_code)]`).
 
-## Status — Phase 2c: real HTTP/1.1 proxy (strict framing, per-phase timeouts,
-signal cancellation) + TLS (termination, backend TLS verified by default,
-ALPN h1), weighted round-robin with TCP health checks, PROXY protocol v1
-send, framing fuzz corpus + live fuzz, first benchmarks vs 3.4.6 and measured
-per-connection budgets (see [docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)).
+## Status — Phase 3: real HTTP/1.1 proxy (strict framing including interim
+1xx and `Expect: 100-continue`, per-phase timeouts, signal cancellation) +
+TLS (termination, backend TLS verified by default, ALPN h1), weighted
+round-robin with TCP health checks, PROXY protocol v1 send, backend
+keep-alive pool (A16), the diagnostic CLI (`explain`/`diff`/`plan`, offline
+`apply`/`rollback`, `doctor`), framing fuzz corpus + live fuzz, and first
+benchmarks vs 3.4.6 (all comparable after the pool; see
+[docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)).
 See [SPEC.md](SPEC.md) for the specified behaviour and [ROADMAP.md](ROADMAP.md)
 for the plan.
 
@@ -34,9 +37,10 @@ eqproxy run --config eqproxy.toml
 ```
 
 Planned commands that today exit with explicit code 2 ("not implemented yet",
-never simulated success): `config import`
-(reference proxy converter, Phase 8) and `config explain/diff/plan/apply/rollback`
-(Phase 3).
+never simulated success): `config import` (reference proxy converter,
+Phase 8). `config explain/diff/plan/apply/rollback` and `doctor` are
+implemented (Phase 3); `apply`/`rollback` manage versioned state offline —
+hot config reload under traffic stays pending (S-CFG-01).
 
 The canonical format is documented in
 [docs/adr/0002-configuration-format.md](docs/adr/0002-configuration-format.md);

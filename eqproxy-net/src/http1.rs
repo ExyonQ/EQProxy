@@ -10,9 +10,16 @@
 //! - obs-fold, spaces in names, bare CR/LF, control characters → 400 (T02).
 //! - Per-message limits: header count, header and line size → 431 (T03).
 //! - `CONNECT` and `Upgrade` (A7/A8, Phase 4) → explicit 501, never faked.
+//! - `Expect` other than `100-continue` → 417; `Expect: 100-continue`
+//!   releases the client with a real interim `100` (RFC 9112 §10.1.2).
+//! - Interim (1xx) responses are never final: they are forwarded (RFC 9112
+//!   §6.2) and the loop keeps reading until the final response, so a stale
+//!   message is never left queued on a pooled connection. `101` → 502
+//!   (upgrade tunneling unsupported).
 //!
-//! Connection semantics: one backend connection **per exchange** (pool in
-//! Phase 3, A16); client keep-alive with `Connection`/version per RFC 9112.
+//! Connection semantics: one backend connection per exchange, reused
+//! through the bounded pool when the exchange was clean (A16); client
+//! keep-alive with `Connection`/version per RFC 9112.
 //! A client abort closes the backend instantly (A19): the exchange
 //! aborted never leaves live tasks.
 
@@ -39,6 +46,11 @@ pub const MAX_LINE_BYTES: usize = 8 * 1024;
 
 const CRLF: &[u8] = b"\r\n";
 const HEAD_END: &[u8] = b"\r\n\r\n";
+/// Real interim response that releases an `Expect: 100-continue` client.
+const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
+/// Interim responses accepted before the final one (bounded, never an
+/// endless 1xx stream).
+const MAX_INTERIM_RESPONSES: u32 = 8;
 
 /// Headers forbidden in chunked trailers (T01).
 const FORBIDDEN_TRAILERS: [&str; 6] = [
@@ -79,6 +91,9 @@ pub struct RequestHead {
     pub version: u8,
     pub framing: BodyFraming,
     pub wants_close: bool,
+    /// The client asked for a `100 Continue` before the body (HTTP/1.1
+    /// only; ignored in HTTP/1.0 per RFC 9112 §10.1.2).
+    pub expect_continue: bool,
 }
 
 /// Parsed and validated response.
@@ -350,12 +365,32 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
             reason: "upgrade is not implemented (planned for phase 4)",
         });
     }
+
+    // `Expect` (RFC 9112 §10.1.2): only `100-continue` is understood and
+    // only in HTTP/1.1 (HTTP/1.0 ignores it). Any other expectation is
+    // refused explicitly (417), never silently dropped or faked.
+    let mut expect_continue = false;
+    for (name, value) in &headers {
+        if name == "expect" {
+            if value.trim().eq_ignore_ascii_case("100-continue") {
+                expect_continue = true;
+            } else {
+                return Err(Reject {
+                    status: 417,
+                    reason: "expectation failed",
+                });
+            }
+        }
+    }
+    let expect_continue = expect_continue && version >= 11;
+
     Ok(RequestHead {
         method: String::from_utf8_lossy(method).into_owned(),
         target: String::from_utf8_lossy(target).into_owned(),
         version,
         framing,
         wants_close,
+        expect_continue,
     })
 }
 
@@ -387,6 +422,9 @@ pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHe
         .ok()
         .and_then(|s| s.parse().ok())
         .ok_or(bad_gateway)?;
+    if !(100..=599).contains(&status) {
+        return Err(bad_gateway);
+    }
 
     if lines.len() - 1 > MAX_HEADERS {
         return Err(bad_gateway);
@@ -800,6 +838,23 @@ pub async fn serve_http<CR, CW>(
             write_error(&mut client_write, 502, "bad gateway").await;
             return;
         }
+
+        // `Expect: 100-continue` (RFC 9112 §10.1.2): the client waits for an
+        // interim response before sending the body. Now that the request
+        // head reached the backend, release it with a real `100 Continue`
+        // (never simulated: the client sees the actual interim message).
+        // Only when a body is actually expected: a request without one is
+        // not waiting for anything.
+        let sent_continue =
+            request.expect_continue && !matches!(request.framing, BodyFraming::None);
+        if sent_continue
+            && write_with_timeout(&mut client_write, CONTINUE, cfg.idle_timeout)
+                .await
+                .is_err()
+        {
+            return;
+        }
+
         let request_body = match request.framing {
             BodyFraming::None => Ok(()),
             BodyFraming::ContentLength(len) => {
@@ -847,8 +902,19 @@ pub async fn serve_http<CR, CW>(
         }
 
         // --- Server phase: response head ---
-        let (response_head_bytes, response_carry) =
-            match read_head(&mut backend_read, cfg.server_header_timeout).await {
+        // Interim (1xx) responses are never final (RFC 9112 §6.2): forward
+        // them and keep reading until the final message, so a stale head is
+        // never left queued on the connection (which would desync the next
+        // exchange that reuses it from the pool).
+        let mut carry: Vec<u8> = Vec::new();
+        let mut interim_count = 0u32;
+        let (response_head_bytes, response) = loop {
+            let mut source = Prefixed {
+                prefix: std::mem::take(&mut carry),
+                pos: 0,
+                inner: &mut backend_read,
+            };
+            let (head_bytes, rest) = match read_head(&mut source, cfg.server_header_timeout).await {
                 Ok(pair) => pair,
                 Err(HeadError::Timeout) => {
                     metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
@@ -860,16 +926,63 @@ pub async fn serve_http<CR, CW>(
                     return;
                 }
             };
-        let response = match parse_response_head(&response_head_bytes, request.method == "HEAD") {
-            Ok(response) => response,
-            Err(reject) => {
-                write_error(&mut client_write, reject.status, reject.reason).await;
+            // Bytes read past the head terminator, plus any prefix bytes
+            // read_head never consumed: the exact stream remainder, in order.
+            let unread_prefix = source.prefix.split_off(source.pos);
+            carry = rest;
+            carry.extend(unread_prefix);
+
+            let response = match parse_response_head(&head_bytes, request.method == "HEAD") {
+                Ok(response) => response,
+                Err(reject) => {
+                    eprintln!(
+                        "WARN [{}] invalid response head from {} (peer {peer}): {} — refusing with {}",
+                        cfg.name, conn.addr, reject.reason, reject.status
+                    );
+                    write_error(&mut client_write, reject.status, reject.reason).await;
+                    return;
+                }
+            };
+            if response.status >= 200 {
+                break (head_bytes, response);
+            }
+            // Interim: `101` would open an upgrade tunnel (unsupported,
+            // A7/A8): explicit 502, never half-forwarded.
+            if response.status == 101 {
+                eprintln!(
+                    "WARN [{}] backend {} offered a protocol switch (101); refused (peer {peer})",
+                    cfg.name, conn.addr
+                );
+                write_error(&mut client_write, 502, "bad gateway").await;
+                return;
+            }
+            interim_count += 1;
+            if interim_count > MAX_INTERIM_RESPONSES {
+                eprintln!(
+                    "WARN [{}] backend {} sent more than {MAX_INTERIM_RESPONSES} interim responses; refused (peer {peer})",
+                    cfg.name, conn.addr
+                );
+                write_error(&mut client_write, 502, "bad gateway").await;
+                return;
+            }
+            if sent_continue && response.status == 100 {
+                // The client already got our own `100 Continue`: the
+                // backend's redundant one is consumed, never forwarded.
+                continue;
+            }
+            if write_with_timeout(&mut client_write, &head_bytes, cfg.idle_timeout)
+                .await
+                .is_err()
+                || write_with_timeout(&mut client_write, HEAD_END, cfg.idle_timeout)
+                    .await
+                    .is_err()
+            {
                 return;
             }
         };
 
         let mut from_backend = Prefixed {
-            prefix: response_carry,
+            prefix: carry,
             pos: 0,
             inner: &mut backend_read,
         };
@@ -927,7 +1040,13 @@ pub async fn serve_http<CR, CW>(
         metrics
             .http_requests_proxied
             .fetch_add(1, Ordering::Relaxed);
-        if !response.wants_close {
+        // Reuse-safety contract (A16): a pooled connection must end the
+        // exchange byte-aligned at a message boundary. Bytes the backend
+        // sent past the body land in the carry; silently discarding them
+        // and pooling would hand the next exchange a connection whose
+        // stream disagrees with ours (and hide the over-send).
+        let clean_boundary = from_backend.pos == from_backend.prefix.len();
+        if !response.wants_close && clean_boundary {
             // Clean exchange and server on keep-alive: the connection returns
             // to the pool message-aligned (A16). Every error path
             // returns early without it: after a framing failure, cut,
@@ -942,6 +1061,12 @@ pub async fn serve_http<CR, CW>(
                 return;
             }
             continue;
+        }
+        if !clean_boundary {
+            eprintln!(
+                "WARN [{}] backend {} sent bytes past the end of the response (peer {peer}); connection dropped, not pooled",
+                cfg.name, conn.addr
+            );
         }
         // The server closed or broke framing (UntilEof): the backend
         // connection dies here and never returns to the pool.
@@ -1070,6 +1195,32 @@ mod tests {
         )
         .expect_err("CL+TE en respuesta");
         assert_eq!(err.status, 502);
+    }
+
+    #[test]
+    fn expect_100_continue_is_flagged_and_ignored_in_http10() {
+        let parsed =
+            req("POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nExpect: 100-continue\r\n")
+                .expect("expect");
+        assert!(parsed.expect_continue);
+        // HTTP/1.0 ignores the expectation (RFC 9112 §10.1.2).
+        let parsed =
+            req("POST /a HTTP/1.0\r\nContent-Length: 3\r\nExpect: 100-continue\r\n").expect("1.0");
+        assert!(!parsed.expect_continue);
+    }
+
+    #[test]
+    fn unsupported_expectation_is_rejected_with_417() {
+        let err = req("GET / HTTP/1.1\r\nHost: x\r\nExpect: the-unexpected\r\n").expect_err("417");
+        assert_eq!(err.status, 417);
+    }
+
+    #[test]
+    fn response_status_out_of_range_is_rejected_as_502() {
+        for head in ["HTTP/1.1 999 X\r\n", "HTTP/1.1 016 X\r\n"] {
+            let err = parse_response_head(head.as_bytes(), false).expect_err(head);
+            assert_eq!(err.status, 502, "case: {head}");
+        }
     }
 
     #[test]

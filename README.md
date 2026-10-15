@@ -13,7 +13,7 @@ diagnostics, configuration, administration, extensibility and security.
 > protocol v1 send**, backend keep-alive pool, typed TOML configuration with
 > actionable errors and the `eqproxy` CLI (`validate`, `explain`, `diff`,
 > `plan` dry run, offline `apply`/`rollback` with versioned state,
-> `doctor` pre-flight checks), with 136 tests green (including E2E over
+> `doctor` pre-flight checks), with 144 tests green (including E2E over
 > real sockets,
 > the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.4.4
 > published (binaries and multi-arch image, see Install). Performance (first runs vs

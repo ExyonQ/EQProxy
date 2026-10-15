@@ -5,6 +5,37 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- HTTP/1.1 interim responses (1xx) no longer desync a keep-alive client or a
+  pooled backend connection. Before, a `100`/`103` head from the backend was
+  mistaken for the final response: the client saw the interim as its only
+  answer and the real response stayed queued for the next exchange. Interim
+  responses are now forwarded (RFC 9112 §6.2) and the loop keeps reading
+  until the final message; a redundant backend `100` after the proxy's own
+  is consumed exactly once. `101 Switching Protocols` is refused with 502
+  (upgrade tunneling is unsupported) and 1xx floods are bounded (8 max).
+- `Expect: 100-continue` deadlocked until the inactivity timeout: the client
+  waited for an interim response that never came while the proxy waited for
+  the body. The proxy now releases the client with a real `100 Continue`
+  (RFC 9112 §10.1.2) once the request head has reached the backend.
+- Unsupported `Expect` values are rejected explicitly with 417 instead of
+  being silently forwarded (RFC 9112 §10.1.2). HTTP/1.0 requests ignore the
+  `100-continue` expectation as the RFC requires.
+- Malformed backend status lines (`HTTP/1.1 999 …`, `016`, …) are rejected
+  with 502; status codes outside 100–599 were previously accepted.
+- Backend bytes sent past the end of a response were silently discarded and
+  the connection returned to the keep-alive pool, breaking the A16
+  byte-alignment contract (the next exchange could consume the stale tail).
+  The connection is now dropped instead of pooled, the bytes are never
+  forwarded to the client, and the anomaly is logged (audit finding on the
+  interim-response change; also reachable before it via `response_carry`).
+- `100 Continue` is only generated when the request actually expects a body
+  (a bodiless request with `Expect: 100-continue` gets no interim).
+- Upstream failures are now diagnosable: invalid response heads, refused
+  protocol switches (101) and interim floods log a WARN with listener,
+  backend and peer (no secrets).
+
 ## [v0.4.4] — 2026-10-15
 
 ### Added

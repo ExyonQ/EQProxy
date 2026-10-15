@@ -84,6 +84,100 @@ async fn start_http_backend() -> SocketAddr {
     addr
 }
 
+/// Backend that answers each request with the next scripted raw response.
+/// Reads every request in full (head + `Content-Length` body) to stay
+/// message-aligned for keep-alive and pool reuse, and pops the script per
+/// request across all connections (the tests are strictly sequential).
+///
+/// `chunked_writes` sends one chunk per message head with a pause in
+/// between (stale bytes then arrive *after* a buggy proxy would pool the
+/// connection); `false` writes each response atomically so over-sent bytes
+/// land in the same read as the head.
+async fn start_scripted_backend(script: Vec<Vec<u8>>, chunked_writes: bool) -> SocketAddr {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind scripted");
+    let addr = listener.local_addr().expect("addr scripted");
+    let script = Arc::new(Mutex::new(VecDeque::from(script)));
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let script = Arc::clone(&script);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let mut total = 0usize;
+                    let head_end = loop {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                    let body_needed = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while total < head_end + body_needed {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                    }
+                    let response = {
+                        let mut queue = script.lock().expect("script lock");
+                        queue.pop_front().unwrap_or_default()
+                    };
+                    if chunked_writes {
+                        // One chunk per message head (a pause between
+                        // chunks keeps a stale final response un-read at
+                        // the moment a buggy proxy would pool the
+                        // connection: the desync then shows up as a
+                        // cross-exchange mix-up).
+                        for chunk in split_at_heads(&response) {
+                            if socket.write_all(chunk).await.is_err() {
+                                return;
+                            }
+                            tokio::time::sleep(Duration::from_millis(30)).await;
+                        }
+                    } else if socket.write_all(&response).await.is_err() {
+                        return;
+                    }
+                    if head.contains("close") {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Splits a scripted response into chunks at each `\r\n\r\n` head end.
+fn split_at_heads(response: &[u8]) -> Vec<&[u8]> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    for (pos, window) in response.windows(4).enumerate() {
+        if window == b"\r\n\r\n" {
+            let end = pos + 4;
+            chunks.push(&response[start..end]);
+            start = end;
+        }
+    }
+    if start < response.len() {
+        chunks.push(&response[start..]);
+    }
+    chunks
+}
+
 /// Backend that accepts and never answers (for response-head timeout).
 async fn start_silent_backend() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind silent");
@@ -153,6 +247,47 @@ async fn read_one_response(client: &mut TcpStream) -> String {
             return String::from_utf8_lossy(&acc).into_owned();
         }
     }
+}
+
+/// Reads one complete message head (through `\r\n\r\n`), returning the
+/// exact head bytes and anything read past the terminator.
+async fn read_head_exact(client: &mut TcpStream) -> (String, Vec<u8>) {
+    let mut acc = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+            .await
+            .expect("head in time")
+            .expect("read head");
+        assert!(n > 0, "EOF before a complete head: {acc:?}");
+        acc.extend_from_slice(&buf[..n]);
+        if let Some(pos) = acc.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&acc[..pos + 4]).into_owned();
+            let rest = acc[pos + 4..].to_vec();
+            return (head, rest);
+        }
+    }
+}
+
+/// Reads `len` body bytes, consuming `carry` first (short TCP reads).
+/// Returns the body plus anything read past it: at a message boundary the
+/// extra must be empty (a non-empty extra means bytes leaked downstream).
+async fn read_body_bytes(
+    client: &mut TcpStream,
+    mut carry: Vec<u8>,
+    len: usize,
+) -> (String, Vec<u8>) {
+    let mut buf = [0u8; 256];
+    while carry.len() < len {
+        let n = tokio::time::timeout(WAIT, client.read(&mut buf))
+            .await
+            .expect("body in time")
+            .expect("read body");
+        assert!(n > 0, "EOF before the response body was complete");
+        carry.extend_from_slice(&buf[..n]);
+    }
+    let extra = carry.split_off(len);
+    (String::from_utf8_lossy(&carry).into_owned(), extra)
 }
 
 async fn send_and_read(addr: SocketAddr, request: &[u8]) -> String {
@@ -515,6 +650,295 @@ async fn http1_response_without_framing_is_eof_delimited() {
 
     let response = send_and_read(proxy_addr, b"GET /x HTTP/1.1\r\nHost: t\r\n\r\n").await;
     assert!(response.contains("until-eof"), "response: {response}");
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn expect_100_continue_releases_client_and_streams_body() {
+    let backend = start_http_backend().await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    let body = "hello";
+    let head = format!(
+        "POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: {}\r\nExpect: 100-continue\r\n\r\n",
+        body.len()
+    );
+    client.write_all(head.as_bytes()).await.expect("write head");
+
+    // The real interim response releases the client: without it the client
+    // waits forever and the body never flows (deadlock by timeout).
+    let (interim, _) = read_head_exact(&mut client).await;
+    assert_eq!(
+        interim, "HTTP/1.1 100 Continue\r\n\r\n",
+        "the client must receive the interim response before sending the body"
+    );
+
+    client.write_all(body.as_bytes()).await.expect("write body");
+    let (final_head, carry) = read_head_exact(&mut client).await;
+    assert!(
+        final_head.starts_with("HTTP/1.1 200 OK"),
+        "final response: {final_head:?}"
+    );
+    let (echoed, extra) = read_body_bytes(&mut client, carry, body.len()).await;
+    assert_eq!(
+        echoed, body,
+        "the body must reach the backend byte for byte"
+    );
+    assert!(extra.is_empty(), "nothing past the body: {extra:?}");
+
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(metrics.snapshot().http_requests_proxied, 1);
+    assert_eq!(metrics.snapshot().http_requests_rejected, 0);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interim_1xx_is_forwarded_and_never_desyncs_keepalive() {
+    let backend = start_scripted_backend(
+        vec![
+            // Interim then final: the interim must never be mistaken for
+            // the final response, or the 200 stays queued for the next
+            // exchange.
+            b"HTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                .to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbye".to_vec(),
+        ],
+        true,
+    )
+    .await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    let get = b"GET /x HTTP/1.1\r\nHost: t\r\n\r\n";
+
+    // Exchange 1: interim forwarded first, then the real final response.
+    client.write_all(get).await.expect("write 1");
+    let (interim, _) = read_head_exact(&mut client).await;
+    assert_eq!(
+        interim,
+        "HTTP/1.1 103 Early Hints\r\nLink: </s.css>\r\n\r\n"
+    );
+    let (final_head, carry) = read_head_exact(&mut client).await;
+    assert!(
+        final_head.starts_with("HTTP/1.1 200 OK"),
+        "final head: {final_head:?}"
+    );
+    let (body, extra) = read_body_bytes(&mut client, carry, 2).await;
+    assert_eq!(body, "ok");
+    assert!(extra.is_empty(), "nothing past the body: {extra:?}");
+
+    // Exchange 2 on the SAME client connection: it must get its own
+    // response — not the stale one left over from the interim handling.
+    client.write_all(get).await.expect("write 2");
+    let (second_head, carry) = read_head_exact(&mut client).await;
+    assert!(
+        second_head.starts_with("HTTP/1.1 200 OK"),
+        "second head: {second_head:?}"
+    );
+    let (body, extra) = read_body_bytes(&mut client, carry, 3).await;
+    assert_eq!(
+        body, "bye",
+        "the second exchange must never receive the first response (desync)"
+    );
+    assert!(extra.is_empty(), "nothing past the body: {extra:?}");
+
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(metrics.snapshot().http_requests_proxied, 2);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backend_redundant_100_is_consumed_exactly_once() {
+    // The backend answers with its own `100 Continue` before the final
+    // response. Since the proxy already released the client with its own
+    // interim, the backend's must be consumed, never duplicated downstream.
+    let backend = start_scripted_backend(
+        vec![
+            b"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nxyz"
+                .to_vec(),
+        ],
+        true,
+    )
+    .await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    let head = "POST /x HTTP/1.1\r\nHost: t\r\nContent-Length: 3\r\nExpect: 100-continue\r\n\r\n";
+    client.write_all(head.as_bytes()).await.expect("write head");
+
+    let (interim, _) = read_head_exact(&mut client).await;
+    assert_eq!(interim, "HTTP/1.1 100 Continue\r\n\r\n");
+    client.write_all(b"xyz").await.expect("write body");
+
+    // Exactly one interim: the next head must be the final response.
+    let (final_head, carry) = read_head_exact(&mut client).await;
+    assert!(
+        final_head.starts_with("HTTP/1.1 200 OK"),
+        "the backend's redundant 100 must be consumed, not forwarded: {final_head:?}"
+    );
+    let (body, extra) = read_body_bytes(&mut client, carry, 3).await;
+    assert_eq!(body, "xyz");
+    assert!(extra.is_empty(), "nothing past the body: {extra:?}");
+
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(metrics.snapshot().http_requests_proxied, 1);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unsupported_expectation_is_rejected_with_417() {
+    let backend = start_http_backend().await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let response = send_and_read(
+        proxy_addr,
+        b"GET /x HTTP/1.1\r\nHost: t\r\nExpect: the-unexpected\r\n\r\n",
+    )
+    .await;
+    assert!(
+        response.starts_with("HTTP/1.1 417"),
+        "unsupported expectations must be refused explicitly: {response}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(metrics.snapshot().http_requests_rejected, 1);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn oversent_backend_bytes_are_never_forwarded_or_pooled() {
+    // The backend sends bytes past the end of the declared body ("XX"
+    // after `Content-Length: 2`). They must never reach the client, and
+    // the connection must be dropped instead of pooled (A16 contract: a
+    // pooled connection is byte-aligned at a message boundary). If it were
+    // pooled, the second exchange could consume the stale "XX" and desync.
+    let backend = start_scripted_backend(
+        vec![
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokXX".to_vec(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nbye".to_vec(),
+        ],
+        false,
+    )
+    .await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    let get = b"GET /x HTTP/1.1\r\nHost: t\r\n\r\n";
+
+    client.write_all(get).await.expect("write 1");
+    let (head, carry) = read_head_exact(&mut client).await;
+    assert!(head.starts_with("HTTP/1.1 200 OK"), "head: {head:?}");
+    let (body, extra) = read_body_bytes(&mut client, carry, 2).await;
+    assert_eq!(body, "ok");
+    assert!(
+        extra.is_empty(),
+        "bytes past the body must never be forwarded to the client: {extra:?}"
+    );
+
+    // The second exchange must get a clean, freshly-dialed connection and
+    // its own response byte for byte.
+    client.write_all(get).await.expect("write 2");
+    let (head2, carry2) = read_head_exact(&mut client).await;
+    assert!(head2.starts_with("HTTP/1.1 200 OK"), "head 2: {head2:?}");
+    let (body2, extra2) = read_body_bytes(&mut client, carry2, 3).await;
+    assert_eq!(body2, "bye");
+    assert!(extra2.is_empty(), "nothing past body 2: {extra2:?}");
+
+    drop(client);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let snap = metrics.snapshot();
+    assert_eq!(
+        snap.backend_connections_opened, 2,
+        "the polluted connection must be dropped and a new one dialed (never reused)"
+    );
+    assert_eq!(
+        snap.backend_connections_reused, 0,
+        "a connection holding bytes past the message must never return to the pool"
+    );
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
