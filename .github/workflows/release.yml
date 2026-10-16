@@ -1,0 +1,167 @@
+name: Release
+
+# Pushing a `v*` tag runs the exact stages of scripts/release.sh on the
+# runners that can execute them: every artifact is E2E-verified (real CLI
+# journeys and live proxied traffic) BEFORE any checksum, release asset
+# or registry push exists. A failing verification fails the workflow and
+# nothing is published.
+#
+# A manual run (workflow_dispatch) exercises the whole pipeline as a dry
+# run: release creation and registry push are gated on `ref_type == tag`,
+# so a branch run can never publish anything.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  guard:
+    name: Tag matches scripts/release.sh
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check version pin
+        if: github.ref_type == 'tag'
+        run: |
+          VER=$(sed -n 's/^VER="\([^"]*\)"/\1/p' scripts/release.sh)
+          echo "release.sh VER=$VER, tag=$GITHUB_REF_NAME"
+          test "v$VER" = "$GITHUB_REF_NAME" \
+            || { echo "tag $GITHUB_REF_NAME does not match scripts/release.sh VER=$VER"; exit 1; }
+
+  darwin:
+    name: Binaries darwin (build + E2E verify)
+    needs: guard
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust targets
+        run: rustup toolchain install stable --profile minimal && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Build + verify darwin binaries
+        run: ./scripts/release.sh darwin
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-darwin
+          path: dist/eqproxy-darwin-*
+          if-no-files-found: error
+
+  linux:
+    name: Binaries linux (build + E2E verify) + SBOM
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --workspace
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build + verify linux binaries
+        run: ./scripts/release.sh linux
+
+      - name: Install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+
+      - name: Regenerate SBOM
+        run: ./scripts/release.sh sbom
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist-linux
+          path: dist/eqproxy-linux-*
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbom
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+
+  release:
+    name: GitHub release (binaries + SHA256SUMS + SBOM)
+    needs: [darwin, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: collect
+
+      - name: Assemble dist/ and write SHA256SUMS (only after both builds verified)
+        run: |
+          mkdir -p dist sbom
+          find collect -type f \( -name 'eqproxy-darwin-*' -o -name 'eqproxy-linux-*' \) -exec cp {} dist/ \;
+          find collect -type f -name '*.cdx.json' -exec cp {} sbom/ \;
+          ./scripts/release.sh sums
+
+      - name: Create GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json \
+            --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md
+
+  image:
+    name: Multi-arch image (build + verify + push)
+    needs: [darwin, linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: docker/setup-qemu-action@v4
+
+      - uses: docker/setup-buildx-action@v4
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build single-arch image to verify
+        run: |
+          docker buildx build --file docker/Dockerfile --platform linux/amd64 \
+            --tag eqproxy-release-verify:ci --load .
+
+      - name: Verify image artifact (version + config gate + live traffic)
+        run: ./scripts/release.sh verify-image eqproxy-release-verify:ci
+
+      - name: Build and push multi-arch image
+        if: github.ref_type == 'tag'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker buildx build --file docker/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --tag "ghcr.io/exyonq/eqproxy:$VERSION" \
+            --tag ghcr.io/exyonq/eqproxy:latest \
+            --push .
+
+      - name: Build multi-arch image (dry run, no push)
+        if: github.ref_type != 'tag'
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker buildx build --file docker/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --tag "ghcr.io/exyonq/eqproxy:$VERSION" \
+            --tag ghcr.io/exyonq/eqproxy:latest \
+            .
