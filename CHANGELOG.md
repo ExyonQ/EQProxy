@@ -128,7 +128,7 @@ First distributable release: containers and binaries, English-only docs.
 
 - This release is **not declared production ready** (Phase 9 gate pending):
   no hot config reload, no rollback, HTTP/1.1 + TCP only, no HTTP/2/3.
-  See ROADMAP.md for the verified scope per phase.
+  The verified scope per phase is tracked in the maintainer's plan.
 
 ## [v0.3.0] — 2026-10-13
 

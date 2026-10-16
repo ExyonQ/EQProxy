@@ -13,8 +13,7 @@ keep-alive pool (A16), the diagnostic CLI (`explain`/`diff`/`plan`, offline
 `apply`/`rollback`, `doctor`), framing fuzz corpus + live fuzz, and first
 benchmarks vs 3.4.6 (all comparable after the pool; see
 [docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)).
-See [SPEC.md](SPEC.md) for the specified behaviour and [ROADMAP.md](ROADMAP.md)
-for the plan.
+See [SPEC.md](SPEC.md) for the specified behaviour.
 
 Docs language: from v0.3.0, documentation is published in English only.
 

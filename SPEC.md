@@ -55,7 +55,8 @@ Rules:
 6. Extensions with explicit permissions and limits (WASM, §10).
 7. Integrated observability (metrics, structured logs, tracing).
 8. Recovery and rollback.
-9. Reproducible tests (brief section 11 → [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) and ROADMAP).
+9. Reproducible tests (brief section 11 → [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md)
+   and the project plan).
 10. Documentation oriented to real tasks.
 11. **HTTP/3 (QUIC) to clients: mandatory requirement** (user decision,
     2026-10-12), implemented in Phase 5 and labelled experimental until it
@@ -262,8 +263,8 @@ reporting procedure.
 
 ## 12. Testing and verification
 
-Full strategy in [ROADMAP.md](ROADMAP.md) §Invariants and
-[BENCHMARK_PLAN.md](BENCHMARK_PLAN.md): unit, integration with real sockets,
+Full strategy in [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) and the project
+invariants: unit, integration with real sockets,
 end-to-end, property-based, fuzzing (own parsers, config, rules), differential
 tests against the reference proxy where semantics must match, protocol
 conformance, sustained load, fault injection, certificate renewal, config

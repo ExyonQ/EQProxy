@@ -152,7 +152,7 @@ fn config_command(command: ConfigCommand) -> u8 {
 
 /// Explicit failure for unimplemented functionality: never fakes success.
 fn not_implemented(feature: &str, phase: &str) -> u8 {
-    eprintln!("error: \"{feature}\" is not implemented yet (planned for {phase}; see ROADMAP.md)");
+    eprintln!("error: \"{feature}\" is not implemented yet (planned for {phase})");
     2
 }
 

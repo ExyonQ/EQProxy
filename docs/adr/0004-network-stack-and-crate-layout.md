@@ -4,7 +4,7 @@ Language: **English**.
 
 - State: **Accepted for Phases 0–2** (mandatory review when Phase 5 opens)
 - Date: 2026-10-12
-- Related: [SPEC.md](../../SPEC.md) §Architecture, [ROADMAP.md](../../ROADMAP.md)
+- Related: [SPEC.md](../../SPEC.md) §Architecture
 
 ## Context
 

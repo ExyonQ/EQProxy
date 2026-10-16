@@ -65,7 +65,6 @@ docker run --rm ghcr.io/exyonq/eqproxy:0.4.5 --version
 |---|---|
 | [SPEC.md](SPEC.md) | Specification: goals, priorities, architecture, state taxonomy |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | Threat model and non-protections statement |
-| [ROADMAP.md](ROADMAP.md) | Phases 0–9 with verifiable exit criteria |
 | [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) | Honest benchmark plan and operator-task study |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 
