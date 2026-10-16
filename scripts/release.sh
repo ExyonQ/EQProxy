@@ -129,9 +129,29 @@ a=socket.socket(); a.bind(('127.0.0.1',0)); p1=a.getsockname()[1]; a.close()
 b=socket.socket(); b.bind(('127.0.0.1',0)); p2=b.getsockname()[1]; b.close()
 print(p1,p2)")"
     log "E2E $bin: live proxied traffic on 127.0.0.1:$port"
-    mkdir -p /tmp/e2e-www && echo "hello-release-e2e" > /tmp/e2e-www/index.html
-    python3 -m http.server "$backend_port" --directory /tmp/e2e-www \
-        >/tmp/e2e-backend.log 2>&1 &
+    # Raw-socket test backend. NOT python3 -m http.server: since CPython 3.13
+    # (DualStackServer removed) the CLI resolves socket.getfqdn() between
+    # bind() and listen(), and that reverse DNS blocks for minutes on runners
+    # with a slow PTR resolver (CI darwin job 2026-10-16: socket bound,
+    # listen() never reached, banner never printed). No name resolution here.
+    python3 -c "
+import socket
+body = b'hello-release-e2e\n'
+resp = (b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode()
+        + b'\r\nConnection: close\r\n\r\n' + body)
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('127.0.0.1', $backend_port))
+s.listen(16)
+print('listening', flush=True)
+while True:
+    c, _ = s.accept()
+    try:
+        c.recv(65536)
+        c.sendall(resp)
+    finally:
+        c.close()
+" >/tmp/e2e-backend.log 2>&1 &
     local backend_pid=$!
     wait_for_port "$backend_port" "backend"
     cat > /tmp/e2e-proxy.toml <<EOF
