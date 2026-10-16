@@ -31,11 +31,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf};
+use tokio::io::{
+    AsyncBufRead, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader, ReadBuf,
+};
 
 use eqproxy_core::Metrics;
 
-use crate::proxy::{OutboundError, READ_BUF, ResolvedListener, checkout_or_connect};
+use crate::proxy::{
+    ForwardedMode, OutboundError, READ_BUF, ResolvedListener, RetryContext, checkout_or_connect,
+};
 
 /// Maximum message-head size (final line included) (T03).
 pub const MAX_HEAD_BYTES: usize = 16 * 1024;
@@ -751,11 +755,151 @@ async fn write_error<W: AsyncWrite + Unpin>(writer: &mut W, status: u16, reason:
     let _ = tokio::time::timeout(Duration::from_secs(5), writer.shutdown()).await;
 }
 
+/// Short reason phrase for a locally generated status (C9).
+fn phrase(status: u16) -> &'static str {
+    match status {
+        403 => "forbidden",
+        404 => "not found",
+        429 => "too many requests",
+        500 => "internal server error",
+        502 => "bad gateway",
+        503 => "service unavailable",
+        504 => "gateway timeout",
+        _ => "error",
+    }
+}
+
+/// The "no server available" class (C9 minimal): optional custom response
+/// with the configured body (counted in `local_responses_served`), else the
+/// built-in minimal 503.
+async fn write_no_server<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    cfg: &ResolvedListener,
+    metrics: &Metrics,
+    status: u16,
+    reason: &str,
+) {
+    if let Some(local) = &cfg.local_response {
+        metrics
+            .local_responses_served
+            .fetch_add(1, Ordering::Relaxed);
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nconnection: close\r\ncontent-type: {}\r\ncontent-length: {}\r\n\r\n{}",
+            local.status,
+            phrase(local.status),
+            local.content_type,
+            local.body.len(),
+            local.body
+        );
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            writer.write_all(response.as_bytes()),
+        )
+        .await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), writer.shutdown()).await;
+        return;
+    }
+    write_error(writer, status, reason).await;
+}
+
+/// Has the peer already closed this connection? One non-blocking poll:
+/// `Pending` (no data, no EOF) = alive; empty `Ready` = EOF; error or
+/// pending bytes = unusable. Used before pooling (A16): a connection the
+/// backend already closed must be dropped, never handed to the next
+/// exchange (which would fail with 502 on its first write).
+async fn peer_gone<R: AsyncBufRead + Unpin>(read: &mut R) -> bool {
+    std::future::poll_fn(|cx| match Pin::new(&mut *read).poll_fill_buf(cx) {
+        Poll::Ready(Ok(_)) => Poll::Ready(true),
+        Poll::Ready(Err(_)) => Poll::Ready(true),
+        Poll::Pending => Poll::Ready(false),
+    })
+    .await
+}
+
+/// Idempotent methods per RFC 9110 §9.2.2 (GET, HEAD, PUT, DELETE,
+/// OPTIONS, TRACE): replay safety for B-H7 retries.
+#[must_use]
+pub fn method_is_idempotent(method: &str) -> bool {
+    matches!(
+        method,
+        "GET" | "HEAD" | "PUT" | "DELETE" | "OPTIONS" | "TRACE"
+    )
+}
+
+/// Applies `X-Forwarded-For`/`X-Real-IP` per listener policy (B-N4) to the
+/// forwarded copy of the head — the client's bytes are never mutated.
+///
+/// - `Append`: `X-Forwarded-For` grows with the client address (header
+///   created when absent); `X-Real-IP` only when absent.
+/// - `Replace`: both headers reflect the real client address only.
+fn apply_forwarded(head: &[u8], peer: SocketAddr, mode: ForwardedMode) -> Vec<u8> {
+    if matches!(mode, ForwardedMode::Off) {
+        return head.to_vec();
+    }
+    let client_ip = peer.ip().to_string();
+
+    // Split into CRLF lines (the only accepted line end).
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut rest = head;
+    while let Some(pos) = rest.windows(2).position(|w| w == b"\r\n") {
+        lines.push(&rest[..pos]);
+        rest = &rest[pos + 2..];
+    }
+    lines.push(rest);
+
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(lines.len() + 2);
+    let mut xff_done = false;
+    for line in lines {
+        let name_end = line.iter().position(|&b| b == b':').unwrap_or(line.len());
+        let name = line[..name_end].to_ascii_lowercase();
+        match name.as_slice() {
+            b"x-forwarded-for" => match mode {
+                ForwardedMode::Replace => {} // dropped; rewritten below
+                ForwardedMode::Append => {
+                    if !xff_done {
+                        xff_done = true;
+                        let value = trim_ows(&line[name_end + 1..]);
+                        let mut merged = b"x-forwarded-for: ".to_vec();
+                        if value.is_empty() {
+                            merged.extend_from_slice(client_ip.as_bytes());
+                        } else {
+                            merged.extend_from_slice(value);
+                            merged.extend_from_slice(b", ");
+                            merged.extend_from_slice(client_ip.as_bytes());
+                        }
+                        out.push(merged);
+                    }
+                }
+                ForwardedMode::Off => {}
+            },
+            b"x-real-ip" if matches!(mode, ForwardedMode::Replace) => {} // dropped
+            _ => out.push(line.to_vec()),
+        }
+    }
+    if !xff_done {
+        out.push(format!("x-forwarded-for: {client_ip}").into_bytes());
+    }
+    if matches!(mode, ForwardedMode::Replace) {
+        out.push(format!("x-real-ip: {client_ip}").into_bytes());
+    }
+
+    let mut joined = Vec::with_capacity(head.len() + 64);
+    for (i, line) in out.iter().enumerate() {
+        if i > 0 {
+            joined.extend_from_slice(CRLF);
+        }
+        joined.extend_from_slice(line);
+    }
+    joined
+}
+
 /// Serves a full HTTP/1.1 client connection (keep-alive included).
 ///
 /// Takes the client stream halves (plain TCP or already-accepted TLS) and the
 /// peer addresses for PROXY protocol (A9). With no servers available the
-/// exchange gets 503; when the chosen server fails, 502 (SPEC §7.4).
+/// exchange gets 503 (customizable via `local_response`, C9); when the chosen
+/// server fails, 502 (SPEC §7.4). Connect-phase failures retry per the
+/// backend retry policy (B-H7: idempotent unless explicit opt-in).
 pub async fn serve_http<CR, CW>(
     client_read: CR,
     client_write: CW,
@@ -807,11 +951,23 @@ pub async fn serve_http<CR, CW>(
         };
 
         // --- Backend: reuse from the pool (A16) or dial again ---
-        let conn = match checkout_or_connect(cfg, peer, local, &metrics).await {
+        // Retry safety (B-H7): only idempotent requests are replayed
+        // unless the backend opts in explicitly.
+        let ctx = if method_is_idempotent(&request.method) {
+            RetryContext::idempotent()
+        } else {
+            RetryContext::non_idempotent()
+        };
+        let conn = match checkout_or_connect(cfg, peer, local, &metrics, ctx).await {
             Ok(conn) => conn,
             Err(OutboundError::NoServer) => {
-                // All servers down/drained (B11): explicit 503.
-                write_error(&mut client_write, 503, "service unavailable").await;
+                // All servers down/drained (B11): explicit 503 (C9 custom).
+                write_no_server(&mut client_write, cfg, &metrics, 503, "service unavailable").await;
+                return;
+            }
+            Err(OutboundError::QueueFull) | Err(OutboundError::QueueTimeout) => {
+                // B-H7: bounded queue rejected explicitly (never silent).
+                write_no_server(&mut client_write, cfg, &metrics, 503, "service unavailable").await;
                 return;
             }
             Err(OutboundError::Connect) => {
@@ -828,7 +984,9 @@ pub async fn serve_http<CR, CW>(
         };
 
         // --- Head + request body forwarding ---
-        if write_with_timeout(&mut backend_write, &head_bytes, cfg.idle_timeout)
+        // Forwarded headers (B-N4): rewritten on the forwarded copy only.
+        let forwarded_head = apply_forwarded(&head_bytes, peer, cfg.forwarded_headers);
+        if write_with_timeout(&mut backend_write, &forwarded_head, cfg.idle_timeout)
             .await
             .is_err()
             || write_with_timeout(&mut backend_write, HEAD_END, cfg.idle_timeout)
@@ -1040,13 +1198,24 @@ pub async fn serve_http<CR, CW>(
         metrics
             .http_requests_proxied
             .fetch_add(1, Ordering::Relaxed);
+        // Passive detection (B-N10): with `passive = true`, real-traffic
+        // verdicts feed the fall/rise machine — 5xx = failure (the
+        // "500 → DOWN" acceptance criterion), anything else = success.
+        if cfg.backend.health_check.as_ref().is_some_and(|h| h.passive) {
+            if response.status >= 500 {
+                cfg.backend.balancer.report_fail(conn.addr);
+            } else {
+                cfg.backend.balancer.report_ok(conn.addr);
+            }
+        }
         // Reuse-safety contract (A16): a pooled connection must end the
         // exchange byte-aligned at a message boundary. Bytes the backend
         // sent past the body land in the carry; silently discarding them
         // and pooling would hand the next exchange a connection whose
         // stream disagrees with ours (and hide the over-send).
         let clean_boundary = from_backend.pos == from_backend.prefix.len();
-        if !response.wants_close && clean_boundary {
+        let backend_alive = !peer_gone(&mut backend_read).await;
+        if !response.wants_close && clean_boundary && backend_alive {
             // Clean exchange and server on keep-alive: the connection returns
             // to the pool message-aligned (A16). Every error path
             // returns early without it: after a framing failure, cut,

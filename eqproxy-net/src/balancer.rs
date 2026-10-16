@@ -79,12 +79,19 @@ impl Balancer {
     /// (or all with `weight = 0`).
     #[must_use]
     pub fn pick(&self) -> Option<SocketAddr> {
+        self.pick_except(&[])
+    }
+
+    /// Like [`pick`](Self::pick) but skipping `exclude`: a connect-phase
+    /// retry picks another server than the one that just failed (B-H7).
+    #[must_use]
+    pub fn pick_except(&self, exclude: &[SocketAddr]) -> Option<SocketAddr> {
         let mut state = self.state();
         let mut total: i64 = 0;
         let mut best: Option<usize> = None;
         let mut best_weight: i64 = 0;
         for (idx, server) in state.iter_mut().enumerate() {
-            if !server.up || server.weight == 0 {
+            if !server.up || server.weight == 0 || exclude.contains(&self.addrs[idx]) {
                 continue;
             }
             let weight = i64::from(server.weight);
@@ -201,6 +208,28 @@ mod tests {
             assert_eq!(balancer.pick().map(|a| a.port()), Some(2));
         }
         assert_eq!(balancer.up_count(), 2, "weight=0 stays operational");
+    }
+
+    #[test]
+    fn pick_except_skips_excluded_servers() {
+        let a: SocketAddr = "127.0.0.1:9000".parse().expect("addr");
+        let b: SocketAddr = "127.0.0.1:9001".parse().expect("addr");
+        let balancer = Balancer::new(
+            vec![
+                ResolvedServer { addr: a, weight: 1 },
+                ResolvedServer { addr: b, weight: 1 },
+            ],
+            3,
+            2,
+        );
+        assert_eq!(balancer.pick_except(&[a]), Some(b), "a is excluded");
+        assert_eq!(balancer.pick_except(&[a]), Some(b), "still b");
+        assert_eq!(
+            balancer.pick_except(&[a, b]),
+            None,
+            "with every server excluded there is no candidate"
+        );
+        assert!(balancer.pick_except(&[]).is_some(), "no exclusion works");
     }
 
     #[test]

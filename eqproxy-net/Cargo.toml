@@ -7,7 +7,7 @@ authors.workspace = true
 description = "EQProxy dataplane: listeners, connections and bounded TCP proxy"
 
 [dependencies]
-eqproxy-core = { path = "../eqproxy-core", version = "0.4.1" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.5.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 rustls = "0.23"

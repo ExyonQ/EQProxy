@@ -158,3 +158,24 @@ exploratory conclusions, not market metrics).
   Regressions are never hidden and an unfavourable scenario is never withdrawn.
 - While there is no data, the only valid sentence about performance is:
   **"Not measured"**.
+
+## 9. Soak 24h — presupuestos publicados (gate v0.5)
+
+Harness reproducible: [`scripts/soak.py`](scripts/soak.py). Ejecuta el
+**binario real** contra backends HTTP reales, con carga sostenida y
+RSS/CPU muestreados cada 30 s (`/proc`), y emite un veredicto contra
+los presupuestos (sin medidas no hay PASS: `rss_measured` es obligatorio).
+
+| Presupuesto | Valor | Verificación |
+|---|---|---|
+| RSS en régimen (media tras 5 min de calentamiento) | ≤ 64 MiB | `summary.json` → `budgets.steady_rss_mib` |
+| RSS pico | ≤ 128 MiB | `budgets.peak_rss_mib` |
+| Tasa de error | 0 % (cero errores, cero no-200) | `budgets.error_rate_pct` |
+| Apagado limpio (SIGINT) | exit 0 | `budgets.clean_shutdown` |
+| RSS medido | obligatorio | `budgets.rss_measured` |
+
+Ejecución de referencia: netcup-bench (8 vCPU, 16 GiB, Ubuntu 24.04),
+200 rps sostenidos, 64 conexiones keep-alive, config con cola acotada
+(`maxqueue = 256`), reintentos (`retries = 1`) y health check
+activo + pasivo (`passive = true`). Evidencia cruda: `results/` de la
+ejecución (`rss.csv`, `summary.json`, `summary.txt`, `eqproxy.log`).

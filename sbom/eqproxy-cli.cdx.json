@@ -2,9 +2,9 @@
   "bomFormat": "CycloneDX",
   "specVersion": "1.3",
   "version": 1,
-  "serialNumber": "urn:uuid:d6ca6da6-b124-4d61-8868-27dc26788b5d",
+  "serialNumber": "urn:uuid:774e0fb2-ccd3-45b0-901c-28e9ccca3a8e",
   "metadata": {
-    "timestamp": "2026-10-15T19:40:59.473665000Z",
+    "timestamp": "2026-10-16T19:19:13.720251000Z",
     "tools": [
       {
         "vendor": "CycloneDX",
@@ -19,10 +19,10 @@
     ],
     "component": {
       "type": "application",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.4.5",
+      "bom-ref": "path+file://eqproxy-cli#0.5.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-cli",
-      "version": "0.4.5",
+      "version": "0.5.0",
       "description": "EQProxy CLI: run, config validate and operations commands",
       "scope": "required",
       "licenses": [
@@ -30,14 +30,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-cli@0.4.5?download_url=file://.",
+      "purl": "pkg:cargo/eqproxy-cli@0.5.0?download_url=file://.",
       "components": [
         {
           "type": "application",
-          "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.4.5 bin-target-0",
+          "bom-ref": "path+file://eqproxy-cli#0.5.0 bin-target-0",
           "name": "eqproxy",
-          "version": "0.4.5",
-          "purl": "pkg:cargo/eqproxy-cli@0.4.5?download_url=file://.#src/main.rs"
+          "version": "0.5.0",
+          "purl": "pkg:cargo/eqproxy-cli@0.5.0?download_url=file://.#src/main.rs"
         }
       ]
     },
@@ -51,10 +51,10 @@
   "components": [
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.5",
+      "bom-ref": "path+file://eqproxy-config#0.5.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-config",
-      "version": "0.4.5",
+      "version": "0.5.0",
       "description": "EQProxy configuration: typed TOML schema, semantic validation and actionable errors",
       "scope": "required",
       "licenses": [
@@ -62,14 +62,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-config@0.4.5?download_url=file://../eqproxy-config"
+      "purl": "pkg:cargo/eqproxy-config@0.5.0?download_url=file://../eqproxy-config"
     },
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
+      "bom-ref": "path+file://eqproxy-core#0.5.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-core",
-      "version": "0.4.5",
+      "version": "0.5.0",
       "description": "Shared EQProxy types: metrics and graceful shutdown",
       "scope": "required",
       "licenses": [
@@ -77,14 +77,14 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-core@0.4.5?download_url=file://../eqproxy-core"
+      "purl": "pkg:cargo/eqproxy-core@0.5.0?download_url=file://../eqproxy-core"
     },
     {
       "type": "library",
-      "bom-ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.5",
+      "bom-ref": "path+file://eqproxy-net#0.5.0",
       "author": "The EQProxy Authors",
       "name": "eqproxy-net",
-      "version": "0.4.5",
+      "version": "0.5.0",
       "description": "EQProxy dataplane: listeners, connections and bounded TCP proxy",
       "scope": "required",
       "licenses": [
@@ -92,7 +92,38 @@
           "expression": "MIT OR Apache-2.0"
         }
       ],
-      "purl": "pkg:cargo/eqproxy-net@0.4.5?download_url=file://../eqproxy-net"
+      "purl": "pkg:cargo/eqproxy-net@0.5.0?download_url=file://../eqproxy-net"
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#aho-corasick@1.1.5",
+      "author": "Andrew Gallant <jamslam@gmail.com>",
+      "name": "aho-corasick",
+      "version": "1.1.5",
+      "description": "Fast multiple substring searching.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "Unlicense OR MIT"
+        }
+      ],
+      "purl": "pkg:cargo/aho-corasick@1.1.5",
+      "externalReferences": [
+        {
+          "type": "website",
+          "url": "https://github.com/BurntSushi/aho-corasick"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/BurntSushi/aho-corasick"
+        }
+      ]
     },
     {
       "type": "library",
@@ -1158,6 +1189,111 @@
     },
     {
       "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#regex-automata@0.4.18",
+      "author": "The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>",
+      "name": "regex-automata",
+      "version": "0.4.18",
+      "description": "Automata construction and matching using regular expressions.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/regex-automata@0.4.18",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/regex-automata"
+        },
+        {
+          "type": "website",
+          "url": "https://github.com/rust-lang/regex/tree/master/regex-automata"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/regex"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#regex-syntax@0.8.11",
+      "author": "The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>",
+      "name": "regex-syntax",
+      "version": "0.8.11",
+      "description": "A regular expression parser.",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/regex-syntax@0.8.11",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/regex-syntax"
+        },
+        {
+          "type": "website",
+          "url": "https://github.com/rust-lang/regex/tree/master/regex-syntax"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/regex"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#regex@1.13.1",
+      "author": "The Rust Project Developers, Andrew Gallant <jamslam@gmail.com>",
+      "name": "regex",
+      "version": "1.13.1",
+      "description": "An implementation of regular expressions for Rust. This implementation uses finite automata and guarantees linear time matching on all inputs. ",
+      "scope": "required",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+        }
+      ],
+      "licenses": [
+        {
+          "expression": "MIT OR Apache-2.0"
+        }
+      ],
+      "purl": "pkg:cargo/regex@1.13.1",
+      "externalReferences": [
+        {
+          "type": "documentation",
+          "url": "https://docs.rs/regex"
+        },
+        {
+          "type": "website",
+          "url": "https://github.com/rust-lang/regex"
+        },
+        {
+          "type": "vcs",
+          "url": "https://github.com/rust-lang/regex"
+        }
+      ]
+    },
+    {
+      "type": "library",
       "bom-ref": "registry+https://github.com/rust-lang/crates.io-index#ring@0.17.14",
       "name": "ring",
       "version": "0.17.14",
@@ -2104,40 +2240,48 @@
   ],
   "dependencies": [
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-cli#0.4.5",
+      "ref": "path+file://eqproxy-cli#0.5.0",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#clap@4.6.7",
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.5",
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.5",
+        "path+file://eqproxy-config#0.5.0",
+        "path+file://eqproxy-core#0.5.0",
+        "path+file://eqproxy-net#0.5.0",
         "registry+https://github.com/rust-lang/crates.io-index#rlimit@0.10.2",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3"
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-config#0.4.5",
+      "ref": "path+file://eqproxy-config#0.5.0",
       "dependsOn": [
+        "path+file://eqproxy-core#0.5.0",
         "registry+https://github.com/rust-lang/crates.io-index#serde@1.0.229",
         "registry+https://github.com/rust-lang/crates.io-index#serde_path_to_error@0.1.20",
         "registry+https://github.com/rust-lang/crates.io-index#toml@0.8.23"
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
+      "ref": "path+file://eqproxy-core#0.5.0",
       "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#regex@1.13.1",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3"
       ]
     },
     {
-      "ref": "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-net#0.4.5",
+      "ref": "path+file://eqproxy-net#0.5.0",
       "dependsOn": [
-        "path+file:///Volumes/Lexar/Cursor/EQProxy/eqproxy-core#0.4.5",
+        "path+file://eqproxy-core#0.5.0",
         "registry+https://github.com/rust-lang/crates.io-index#rustls@0.23.46",
         "registry+https://github.com/rust-lang/crates.io-index#rustls-pki-types@1.15.1",
         "registry+https://github.com/rust-lang/crates.io-index#thiserror@2.0.21",
         "registry+https://github.com/rust-lang/crates.io-index#tokio@1.53.3",
         "registry+https://github.com/rust-lang/crates.io-index#tokio-rustls@0.26.6",
         "registry+https://github.com/rust-lang/crates.io-index#webpki-roots@1.0.9"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#aho-corasick@1.1.5",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3"
       ]
     },
     {
@@ -2316,6 +2460,26 @@
       "ref": "registry+https://github.com/rust-lang/crates.io-index#quote@1.0.47",
       "dependsOn": [
         "registry+https://github.com/rust-lang/crates.io-index#proc-macro2@1.0.107"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#regex-automata@0.4.18",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#aho-corasick@1.1.5",
+        "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3",
+        "registry+https://github.com/rust-lang/crates.io-index#regex-syntax@0.8.11"
+      ]
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#regex-syntax@0.8.11"
+    },
+    {
+      "ref": "registry+https://github.com/rust-lang/crates.io-index#regex@1.13.1",
+      "dependsOn": [
+        "registry+https://github.com/rust-lang/crates.io-index#aho-corasick@1.1.5",
+        "registry+https://github.com/rust-lang/crates.io-index#memchr@2.8.3",
+        "registry+https://github.com/rust-lang/crates.io-index#regex-automata@0.4.18",
+        "registry+https://github.com/rust-lang/crates.io-index#regex-syntax@0.8.11"
       ]
     },
     {

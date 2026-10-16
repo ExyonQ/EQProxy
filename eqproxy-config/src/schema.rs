@@ -21,6 +21,15 @@ pub const MAX_CONFIG_BYTES: usize = 1_048_576;
 /// `[listener.*]` + `[backend.*]` sections.
 pub const MAX_SECTIONS: usize = 1024;
 
+/// Resource budget: maximum size of a `local_response.body`.
+pub const MAX_LOCAL_RESPONSE_BYTES: usize = 8192;
+
+/// Resource budget: maximum `maxqueue` per backend (B-H7).
+pub const MAX_QUEUE: u32 = 10_000;
+
+/// Maximum `retries` per backend (B-H7).
+pub const MAX_RETRIES: u32 = 5;
+
 fn default_maxconn() -> u32 {
     1024
 }
@@ -67,6 +76,26 @@ fn default_fall() -> u32 {
 
 fn default_rise() -> u32 {
     2
+}
+
+fn default_expect_status() -> String {
+    "200-299".to_owned()
+}
+
+fn default_http_path() -> String {
+    "/".to_owned()
+}
+
+fn default_queue_timeout() -> Duration {
+    Duration::from_secs(5)
+}
+
+fn default_no_server_status() -> u16 {
+    503
+}
+
+fn default_content_type() -> String {
+    "text/plain; charset=utf-8".to_owned()
 }
 
 /// Maximum weight per server (HAProxy `weight` range, cfg 3.4 "server").
@@ -129,6 +158,9 @@ pub struct TlsServerConfig {
     /// Minimum TLS version (default 1.2).
     #[serde(default)]
     pub min_version: TlsVersion,
+    /// Client CA PEM: present = mTLS (A15) — client certificates are
+    /// required and verified against this bundle.
+    pub client_ca: Option<String>,
 }
 
 /// TLS to the backend (A12): verification on by default.
@@ -178,6 +210,85 @@ pub struct HealthCheckConfig {
     /// Consecutive successes to mark a server up.
     #[serde(default = "default_rise")]
     pub rise: u32,
+    /// Check type (`"type"` key): `"tcp"` (connect only, default) or
+    /// `"http"` (B-H6: request + `expect` matching).
+    #[serde(rename = "type", default)]
+    pub kind: HealthCheckKind,
+    /// HTTP check: request path (default `/`).
+    #[serde(default = "default_http_path")]
+    pub http_path: String,
+    /// HTTP check: request method (default `"GET"`; GET or HEAD only).
+    #[serde(default)]
+    pub http_method: HealthCheckMethod,
+    /// HTTP check: expected status codes/ranges (default `"200-299"`).
+    #[serde(default = "default_expect_status")]
+    pub expect_status: String,
+    /// HTTP check: regex that must match somewhere in the response body
+    /// (optional; the body is read up to 64 KiB).
+    pub expect_rstring: Option<String>,
+    /// HTTP check: Host header (default: the server address).
+    pub http_host: Option<String>,
+    /// Passive detection (B-N10): live-traffic connect failures also feed
+    /// the `fall`/`rise` machine (default `false` = active checks only).
+    #[serde(default)]
+    pub passive: bool,
+}
+
+/// Health check type (`"type"` key of `[backend.*.health_check]`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthCheckKind {
+    /// TCP connect only (B11; default).
+    #[default]
+    Tcp,
+    /// HTTP request with `expect status`/`expect rstring` (B-H6).
+    Http,
+}
+
+/// HTTP health-check request method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthCheckMethod {
+    #[default]
+    Get,
+    Head,
+}
+
+/// `X-Forwarded-For` / `X-Real-IP` handling (B-N4 first step).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ForwardedHeaders {
+    /// No forwarded headers (default; explicit opt-in).
+    #[default]
+    Off,
+    /// Append the client address to `X-Forwarded-For`.
+    Append,
+    /// Replace `X-Forwarded-For`/`X-Real-IP` with the client address.
+    Replace,
+}
+
+/// Custom local response when no server is available (C9 minimal).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LocalResponseConfig {
+    /// Status code (400-599).
+    #[serde(default = "default_no_server_status")]
+    pub status: u16,
+    /// Content-Type of the body (default `text/plain; charset=utf-8`).
+    #[serde(default = "default_content_type")]
+    pub content_type: String,
+    /// Response body (bounded: [`MAX_LOCAL_RESPONSE_BYTES`]).
+    pub body: String,
+}
+
+/// Metrics options (D1): cardinality stays bounded; detailed per-server
+/// counters are opt-in (CE4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// Per-server counters (bounded by [`MAX_SECTIONS`]).
+    #[serde(default)]
+    pub detailed: bool,
 }
 
 /// Full EQProxy configuration.
@@ -195,6 +306,9 @@ pub struct Config {
     /// Drain window on shutdown: live connections may finish.
     #[serde(default = "default_shutdown_grace", with = "duration")]
     pub shutdown_grace: Duration,
+    /// Metrics options (D1/D5): detailed counters are opt-in (CE4).
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 }
 
 /// A frontend: where to listen and which backend to send to.
@@ -226,6 +340,19 @@ pub struct ListenerConfig {
     /// TLS termination at this listener (A11). Absent = plain TCP.
     #[serde(default)]
     pub tls: Option<TlsServerConfig>,
+    /// Receive PROXY protocol v1 from trusted proxies (B-H9/B-E10).
+    #[serde(default)]
+    pub proxy_receive: bool,
+    /// Trusted PROXY origins (IP or CIDR; required non-empty with
+    /// `proxy_receive = true`).
+    #[serde(default)]
+    pub proxy_allow: Vec<String>,
+    /// `X-Forwarded-For`/`X-Real-IP` handling (`http` only; B-N4).
+    #[serde(default)]
+    pub forwarded_headers: ForwardedHeaders,
+    /// Custom response when no server is available (C9 minimal).
+    #[serde(default)]
+    pub local_response: Option<LocalResponseConfig>,
 }
 
 /// A backend: one or more origin servers with balancing (Phase 2b).
@@ -251,6 +378,18 @@ pub struct BackendConfig {
     /// TLS to the servers (A12). Absent = plain TCP.
     #[serde(default)]
     pub tls: Option<TlsClientConfig>,
+    /// Bounded queue while no server is available (B-H7; 0 = reject now).
+    #[serde(default)]
+    pub maxqueue: u32,
+    /// Maximum wait in the queue (used when `maxqueue > 0`).
+    #[serde(default = "default_queue_timeout", with = "duration")]
+    pub timeout_queue: Duration,
+    /// Connect-phase retries on dial failure (0 = disabled; B-H7).
+    #[serde(default)]
+    pub retries: u32,
+    /// Allow retrying non-idempotent requests (default `false`).
+    #[serde(default)]
+    pub retry_non_idempotent: bool,
 }
 
 impl BackendConfig {

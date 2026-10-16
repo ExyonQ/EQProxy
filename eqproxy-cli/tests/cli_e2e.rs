@@ -195,7 +195,17 @@ fn explain_simulates_routing_with_no_side_effects() {
     let config = temp_config(
         "explain",
         &format!(
-            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[backend.api]\nservers = [{{ addr = \"{backend}\", weight = 3 }}]\n"
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             local_response = {{ status = 503, content_type = \"text/plain\", body = \"back soon\" }}\n\
+             [backend.api]\n\
+             servers = [{{ addr = \"{backend}\", weight = 3 }}]\n\
+             maxqueue = 8\n\
+             timeout_queue = \"500ms\"\n\
+             retries = 1\n"
         ),
     );
     let output = bin()
@@ -220,6 +230,14 @@ fn explain_simulates_routing_with_no_side_effects() {
         "backend \"api\"",
         &format!("server {backend} weight=3 state=UP(initial)"),
         &format!("decision: server {backend}"),
+        // `config explain` says what each timeout does when it fires
+        // (Q4/H5) and the bounded queue/retry policy of the backend.
+        "timeout_on_fire: connect=502 after ",
+        "client_header=408(first exchange)/close after ",
+        "server_header=504 after ",
+        "queue: maxqueue=8 timeout=500ms (full->503; expired->503)",
+        "retries: max=1 scope=idempotent-only (connect-phase only; failed server excluded)",
+        "local_response: status=503 content_type=\"text/plain\" body_bytes=9 (no-server class)",
     ] {
         assert!(
             stdout.contains(expected),
@@ -1290,6 +1308,183 @@ fn doctor_reports_missing_config_actionably() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
     assert!(stderr.contains("could not read"), "stderr: {stderr}");
+}
+
+// --- hot config reload via SIGHUP (S-CFG-01) ---
+
+/// Static-response backend: every request gets `200 OK` with `body`, so
+/// the response body reveals **which** backend served it.
+fn start_static_backend(body: &'static str) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind static");
+    let addr = listener.local_addr().expect("addr static");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            total += n;
+                            if buf[..total].windows(4).any(|w| w == b"\r\n\r\n")
+                                || total == buf.len()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    addr
+}
+
+/// GET through the proxy and return the response body.
+fn http_body(addr: &str) -> String {
+    let mut client = TcpStream::connect(addr).expect("connect proxy");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+        .expect("write GET");
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let mut response = Vec::new();
+    let _ = client.read_to_end(&mut response);
+    let text = String::from_utf8_lossy(&response);
+    text.split("\r\n\r\n")
+        .nth(1)
+        .unwrap_or_else(|| panic!("no body in response: {text}"))
+        .to_owned()
+}
+
+/// Sends a real signal to the child (`"-HUP"`, `"-INT"`, …).
+fn send_signal(child: &std::process::Child, signal: &str) {
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args([signal, &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success(), "kill {signal} must be accepted");
+}
+
+/// Reads stderr lines until one contains `needle` (panic on EOF/timeout).
+fn wait_for_stderr(stderr: &mut BufReader<std::process::ChildStderr>, needle: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr before {needle:?}");
+        if line.contains(needle) {
+            return line;
+        }
+    }
+    panic!("timeout waiting for {needle:?} in stderr");
+}
+
+/// Full operator journey (S-CFG-01): edit the file + `kill -HUP` while
+/// serving. New connections follow the new config, established ones drain
+/// with theirs, an invalid candidate is rejected without touching the
+/// running config, and the final report shows both counters (PP-03).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn sighup_reloads_the_config_under_traffic() {
+    let one = start_static_backend("one");
+    let two = start_static_backend("two");
+    let config = temp_config(
+        "sighup",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{one}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (sighup)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+
+    // The listen address is ephemeral: wait for the announcement.
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+    assert_eq!(http_body(&proxy_addr), "one", "initial routing");
+
+    // Journey 1: valid candidate → applied, new connections follow it.
+    std::fs::write(
+        &config,
+        format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{two}\"\n"
+        ),
+    )
+    .expect("write v2");
+    send_signal(&child, "-HUP");
+    let applied = wait_for_stderr(&mut stderr, "INFO config reload applied");
+    assert!(
+        applied.contains("listeners kept=1 added=0 removed=0"),
+        "swap summary: {applied}"
+    );
+    assert_eq!(
+        http_body(&proxy_addr),
+        "two",
+        "new connections must follow the applied config"
+    );
+
+    // Journey 2: invalid candidate → rejected, running config keeps serving.
+    std::fs::write(&config, "schema_version = 1\n[listener.web\n").expect("write broken");
+    send_signal(&child, "-HUP");
+    let rejected = wait_for_stderr(&mut stderr, "ERROR config reload rejected");
+    assert!(
+        !rejected.trim().is_empty(),
+        "the rejection must be actionable"
+    );
+    assert_eq!(
+        http_body(&proxy_addr),
+        "two",
+        "the running config must keep serving"
+    );
+
+    // Clean shutdown; the final report keeps the counters (no reset).
+    wait_for_sigint_shutdown(&mut child, &config);
+    let mut rest = String::new();
+    let _ = stderr.read_to_string(&mut rest);
+    // Format updated for PP-04/05: the metrics line now also reports the
+    // measured swap latency (`last_swap_us`), so the exact-format assertion
+    // includes the new field.
+    assert!(
+        rest.contains("cfg[reloads=1 reload_failures=1 last_swap_us="),
+        "final METRICS must show the reload counters and the swap latency: {rest}"
+    );
 }
 
 #[cfg_attr(

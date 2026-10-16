@@ -9,15 +9,22 @@
 # Outputs (gitignored): dist/eqproxy-{darwin,linux}-{amd64,arm64},
 # dist/SHA256SUMS.txt, sbom/*.cdx.json.
 #
-# Registry push and GitHub release are intentionally NOT executed here:
-# they need the operator's credentials. On success this script prints
-# the exact commands to run.
+# A local run never pushes to the registry nor creates the GitHub
+# release (operator credentials); on success it prints the exact
+# commands. Pushing a `v*` tag runs the same stages in CI
+# (.github/workflows/release.yml), which publishes both with GITHUB_TOKEN.
 #
-# Usage: ./scripts/release.sh
+# Usage: ./scripts/release.sh [all|darwin|linux|sbom|sums|verify-image <ref>]
+#   all (default): darwin + linux + sbom + sums, the full local release.
+#   darwin/linux:  build + E2E-verify that platform's binaries into dist/.
+#   sbom:          regenerate sbom/*.cdx.json from the workspace.
+#   sums:          write dist/SHA256SUMS.txt (requires all four binaries).
+#   verify-image:  E2E-verify a built container image (version, config
+#                  gate and live proxied traffic through the container).
 # Env:   RUST_IMAGE (default rust:1.97-bookworm) for the Linux builds.
 set -euo pipefail
 
-VER="0.4.5"
+VER="0.5.0"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DIST="$ROOT/dist"
 RUST_IMAGE="${RUST_IMAGE:-rust:1.97-bookworm}"
@@ -139,12 +146,15 @@ EOF
     log "E2E $bin: live traffic OK"
 }
 
-# Live traffic for a Linux dist binary inside containers (backend nginx,
-# static IPs: dynamic DNS is Phase 4, B16, so hostnames stay rejected).
-verify_live_linux() {
-    local platform="$1" bin_host="$2" verdict="$3"
-    local net="eqrel-${platform##*/}"
-    log "E2E $bin_host: live proxied traffic ($platform)"
+# Live proxied traffic through a container on a static-IP docker network
+# (backend nginx: dynamic DNS is Phase 4, B16, so hostnames stay rejected).
+# $1 = verdict label, $2 = proxy image, remaining args go to `docker run`
+# before the image (mounted binary + entrypoint, or nothing for the real
+# release image).
+verify_live_container() {
+    local verdict="$1" proxy_image="$2"; shift 2
+    local net="eqrel-net"
+    log "E2E $proxy_image: live proxied traffic ($verdict)"
     docker network create --subnet 172.22.0.0/24 "$net" >/dev/null
     docker run -d --network "$net" --ip 172.22.0.10 --name eqrel-back \
         nginx:alpine >/dev/null
@@ -159,17 +169,135 @@ backend = "api"
 server = "172.22.0.10:80"
 EOF
     docker run -d --network "$net" --ip 172.22.0.20 --name eqrel-prox \
-        -p 18082:18082 \
-        -v "$bin_host:/eqproxy:ro" -v /tmp/e2e-proxy.toml:/c.toml:ro \
-        --platform "$platform" --entrypoint /eqproxy \
-        debian:bookworm-slim run --config /c.toml >/dev/null
+        -p 18082:18082 "$@" \
+        -v /tmp/e2e-proxy.toml:/c.toml:ro \
+        "$proxy_image" run --config /c.toml >/dev/null
     sleep 4
     local code
     code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/)"
     docker rm -f eqrel-prox eqrel-back >/dev/null
     docker network rm "$net" >/dev/null
-    [ "$code" = "200" ] || fail "$bin_host live traffic HTTP $code"
-    log "E2E $bin_host: live traffic OK ($verdict)"
+    [ "$code" = "200" ] || fail "$proxy_image live traffic HTTP $code ($verdict)"
+    log "E2E $proxy_image: live traffic OK ($verdict)"
+}
+
+# Live traffic for a Linux dist binary inside containers.
+verify_live_linux() {
+    local platform="$1" bin_host="$2" verdict="$3"
+    verify_live_container "$platform, $bin_host" debian:bookworm-slim \
+        --platform "$platform" -v "$bin_host:/eqproxy:ro" --entrypoint /eqproxy
+}
+
+# Image artifact verification: the release image must report the pinned
+# version, accept the good config and proxy live traffic as a container.
+verify_image() {
+    local image="$1"
+    log "E2E $image: --version"
+    docker run --rm "$image" --version | grep -q "eqproxy $VER" \
+        || fail "$image reports wrong version"
+    log "E2E $image: validate accepts good config"
+    printf '%s' "$GOOD_CONFIG" | docker run --rm -i "$image" \
+        config validate --config /dev/stdin \
+        | grep -q "config OK: 1 listener(s), 1 backend(s)" \
+        || fail "$image validate happy path"
+    verify_live_container "image artifact" "$image"
+}
+
+# --- stages: one source of truth for local runs and the Release workflow ---
+
+stage_darwin() {
+    log "building darwin binaries (native toolchain)"
+    local target
+    for target in aarch64-apple-darwin x86_64-apple-darwin; do
+        (cd "$ROOT" && cargo build --release --locked -p eqproxy-cli \
+            --target "$target") || fail "build $target"
+    done
+    cp "$ROOT/target/aarch64-apple-darwin/release/eqproxy" "$DIST/eqproxy-darwin-arm64"
+    cp "$ROOT/target/x86_64-apple-darwin/release/eqproxy" "$DIST/eqproxy-darwin-amd64"
+
+    log "verifying darwin-arm64 (native)"
+    verify_cli native "$DIST/eqproxy-darwin-arm64"
+    verify_live_native "$DIST/eqproxy-darwin-arm64"
+
+    log "verifying darwin-amd64 (Rosetta)"
+    if arch -x86_64 true 2>/dev/null; then
+        verify_cli native "$DIST/eqproxy-darwin-amd64"
+        verify_live_native "$DIST/eqproxy-darwin-amd64"
+    else
+        fail "Rosetta missing: darwin-amd64 NOT EXECUTED is not acceptable for release"
+    fi
+}
+
+stage_linux() {
+    local arch bin
+    log "building linux binaries (locked, in $RUST_IMAGE per arch)"
+    for arch in amd64 arm64; do
+        docker buildx build --platform "linux/$arch" --file "$ROOT/docker/Dockerfile" \
+            --target export --output "type=local,dest=$DIST/linux-$arch-tmp" "$ROOT" \
+            || fail "linux/$arch image build"
+        mv "$DIST/linux-$arch-tmp/eqproxy" "$DIST/eqproxy-linux-$arch"
+        rm -rf "$DIST/linux-$arch-tmp"
+    done
+
+    for arch in arm64 amd64; do
+        bin="$DIST/eqproxy-linux-$arch"
+        log "verifying linux-$arch (container)"
+        docker run --rm --platform "linux/$arch" \
+            -v "$DIST:/d:ro" -v /tmp:/tmp \
+            --entrypoint /bin/bash debian:bookworm-slim -c "
+                set -e
+                /d/eqproxy-linux-$arch --version | grep -q 'eqproxy $VER'
+                printf '%s' '$GOOD_CONFIG' | /d/eqproxy-linux-$arch config validate --config /dev/stdin | grep -q 'config OK'
+            " || fail "$bin container CLI verification"
+        verify_live_linux "linux/$arch" "$bin" "HTTP 200"
+    done
+}
+
+stage_sbom() {
+    log "regenerating SBOM (JSON, one file per crate into sbom/)"
+    (cd "$ROOT" && cargo cyclonedx --all --format json) || fail "SBOM regeneration"
+    local crate
+    for crate in eqproxy-core eqproxy-config eqproxy-net eqproxy-cli; do
+        mv "$ROOT/$crate/$crate.cdx.json" "$ROOT/sbom/$crate.cdx.json"
+    done
+    # Machine layout must never ship: strip the absolute build path from the
+    # `path+file://` bom-refs (audit 2026-10-16: /Volumes/... in published
+    # SBOMs). Portable sed (-i.bak works on BSD and GNU), then drop the backups.
+    sed -i.bak -E 's|path[+]file://[^"#]*/(eqproxy-[^"/#]+)|path+file://\1|g' \
+        "$ROOT"/sbom/*.cdx.json || fail "SBOM path sanitization"
+    rm -f "$ROOT"/sbom/*.cdx.json.bak
+    if grep -q -F 'path+file:///' "$ROOT"/sbom/*.cdx.json; then
+        fail "SBOM still contains absolute paths after sanitization"
+    fi
+}
+
+write_sums() {
+    local bin
+    for bin in eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+               eqproxy-linux-amd64 eqproxy-linux-arm64; do
+        [ -f "$DIST/$bin" ] || fail "missing $bin in $DIST (run the build stages first)"
+    done
+    log "writing SHA256SUMS (only after every artifact passed)"
+    (cd "$DIST" && if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+            eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt
+    else
+        shasum -a 256 eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+            eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt
+    fi)
+    cat "$DIST/SHA256SUMS.txt"
+}
+
+print_next_steps() {
+    printf '%s\n' \
+        "" \
+        "Next (operator, needs credentials — NOT run by this script):" \
+        "  docker buildx build --file docker/Dockerfile \\" \
+        "    --platform linux/amd64,linux/arm64 \\" \
+        "    --tag ghcr.io/exyonq/eqproxy:$VER --tag ghcr.io/exyonq/eqproxy:latest --push ." \
+        "  git tag v$VER && git push origin v$VER" \
+        "  gh release create v$VER dist/* sbom/*.cdx.json --title v$VER --notes-file CHANGELOG.md" \
+        "(pushing the v$VER tag runs the same stages in CI and publishes both)"
 }
 
 mkdir -p "$DIST"
@@ -178,65 +306,32 @@ log "checking version pins"
 grep -q "version = \"$VER\"" "$ROOT/Cargo.toml" \
     || fail "workspace version is not $VER"
 
-log "building darwin binaries (native toolchain)"
-for target in aarch64-apple-darwin x86_64-apple-darwin; do
-    (cd "$ROOT" && cargo build --release --locked -p eqproxy-cli \
-        --target "$target") || fail "build $target"
-done
-cp "$ROOT/target/aarch64-apple-darwin/release/eqproxy" "$DIST/eqproxy-darwin-arm64"
-cp "$ROOT/target/x86_64-apple-darwin/release/eqproxy" "$DIST/eqproxy-darwin-amd64"
-
-log "building linux binaries (locked, in $RUST_IMAGE per arch)"
-for arch in amd64 arm64; do
-    docker buildx build --platform "linux/$arch" --file "$ROOT/docker/Dockerfile" \
-        --target export --output "type=local,dest=$DIST/linux-$arch-tmp" "$ROOT" \
-        || fail "linux/$arch image build"
-    mv "$DIST/linux-$arch-tmp/eqproxy" "$DIST/eqproxy-linux-$arch"
-    rm -rf "$DIST/linux-$arch-tmp"
-done
-
-log "verifying darwin-arm64 (native)"
-verify_cli native "$DIST/eqproxy-darwin-arm64"
-verify_live_native "$DIST/eqproxy-darwin-arm64"
-
-log "verifying darwin-amd64 (Rosetta)"
-if arch -x86_64 true 2>/dev/null; then
-    verify_cli native "$DIST/eqproxy-darwin-amd64"
-    verify_live_native "$DIST/eqproxy-darwin-amd64"
-else
-    fail "Rosetta missing: darwin-amd64 NOT EXECUTED is not acceptable for release"
-fi
-
-for arch in arm64 amd64; do
-    bin="$DIST/eqproxy-linux-$arch"
-    log "verifying linux-$arch (container)"
-    docker run --rm --platform "linux/$arch" \
-        -v "$DIST:/d:ro" -v /tmp:/tmp \
-        --entrypoint /bin/bash debian:bookworm-slim -c "
-            set -e
-            /d/eqproxy-linux-$arch --version | grep -q 'eqproxy $VER'
-            printf '%s' '$GOOD_CONFIG' | /d/eqproxy-linux-$arch config validate --config /dev/stdin | grep -q 'config OK'
-        " || fail "$bin container CLI verification"
-    verify_live_linux "linux/$arch" "$bin" "HTTP 200"
-done
-
-log "regenerating SBOM (JSON, one file per crate into sbom/)"
-(cd "$ROOT" && cargo cyclonedx --all --format json) || fail "SBOM regeneration"
-for crate in eqproxy-core eqproxy-config eqproxy-net eqproxy-cli; do
-    mv "$ROOT/$crate/$crate.cdx.json" "$ROOT/sbom/$crate.cdx.json"
-done
-
-log "writing SHA256SUMS (only after every artifact passed)"
-(cd "$DIST" && shasum -a 256 eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
-    eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt)
-cat "$DIST/SHA256SUMS.txt"
-
-log "release artifacts ready in $DIST"
-printf '%s\n' \
-    "" \
-    "Next (operator, needs credentials — NOT run by this script):" \
-    "  docker buildx build --file docker/Dockerfile \\" \
-    "    --platform linux/amd64,linux/arm64 \\" \
-    "    --tag ghcr.io/exyonq/eqproxy:$VER --tag ghcr.io/exyonq/eqproxy:latest --push ." \
-    "  git tag v$VER && git push origin v$VER" \
-    "  gh release create v$VER dist/* sbom/*.cdx.json --title v$VER --notes-file CHANGELOG.md"
+case "${1:-all}" in
+    darwin)
+        stage_darwin
+        ;;
+    linux)
+        stage_linux
+        ;;
+    sbom)
+        stage_sbom
+        ;;
+    sums)
+        write_sums
+        ;;
+    verify-image)
+        [ -n "${2:-}" ] || fail "usage: release.sh verify-image <image-ref>"
+        verify_image "$2"
+        ;;
+    all)
+        stage_darwin
+        stage_linux
+        stage_sbom
+        write_sums
+        log "release artifacts ready in $DIST"
+        print_next_steps
+        ;;
+    *)
+        fail "unknown stage '$1' (darwin|linux|sbom|sums|verify-image <ref>|all)"
+        ;;
+esac

@@ -1,4 +1,4 @@
-# Example EQProxy configuration (Phase 2b).
+# Example EQProxy configuration (v0.5).
 #
 # Validation errors: file, line, field, cause and a fix example.
 
@@ -24,6 +24,23 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 #key = "certs/privkey.pem"     # PEM private key (PKCS#8/PKCS#1/SEC1)
 #alpn = ["http/1.1"]           # offered ALPN (A14); empty = no ALPN
 #min_version = "1.2"           # "1.2" (default) or "1.3"
+#client_ca = "certs/client-ca.pem"  # mTLS (A15): client certs must chain to this CA
+
+# PROXY protocol v1 reception (B-H9/B-E10): strict front door.
+# Only allowlisted origins are accepted and every connection must carry
+# a valid PROXY v1 line; anything else is closed without forwarding.
+#proxy_receive = true
+#proxy_allow = ["10.0.0.0/8", "192.0.2.10"]   # IPs or CIDRs
+
+# Forwarded headers (B-N4, http mode): "off" (default), "append"
+# (keep the chain and grow it) or "replace" (drop spoofed hops).
+#forwarded_headers = "append"
+
+# Custom answer for the "no server available" class (C9).
+#[listener.web.local_response]
+#status = 503
+#content_type = "text/plain"
+#body = "back soon"
 
 [backend.api]
 # One server (compat 0.1.0) …
@@ -36,12 +53,26 @@ server = "127.0.0.1:9000"
 #balance = "roundrobin"        # Phase 2b: weighted round-robin only
 #proxy_protocol = "v1"         # send PROXY protocol v1 to the servers (A9)
 
-# Active TCP health check (B11). Absent = all servers operational.
+#maxqueue = 256            # bounded wait queue when no server is up (B-H7)
+#timeout_queue = "500ms"    # max wait in the queue; expired → explicit 503
+#retries = 1               # extra dials on connect failure (0..=5; B-H7)
+#retry_non_idempotent = true  # opt-in: allow redials for POST & co (off)
+
+# Active health check (B11/B-H6). Absent = all servers operational.
 #[backend.api.health_check]
+#type = "tcp"      # "tcp" (default) or "http"
 #interval = "2s"   # between check cycles
-#timeout = "1s"    # per connection attempt
+#timeout = "1s"    # per attempt (connect + request + response)
 #fall = 3          # consecutive failures → server down
 #rise = 2          # consecutive successes → server up
+#passive = true    # B-N10: live traffic (5xx / connect failures) also
+#                  # feeds fall/rise (only safe with an active checker)
+# HTTP checks (type = "http") — one real exchange per probe:
+#http_path = "/healthz"
+#http_method = "GET"        # or "HEAD"
+#http_host = "api.internal" # Host header of the probe
+#expect_status = "200-299"  # status codes/ranges accepted
+#expect_rstring = "^ok"     # regex matched against the body
 
 # TLS to the servers (A12). Absent = plain TCP.
 #[backend.api.tls]

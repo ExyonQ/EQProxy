@@ -76,7 +76,7 @@ async fn start_marker_echo(id: u8) -> SocketAddr {
 
 /// TLS echo backend (A12 as origin server).
 async fn start_tls_echo() -> SocketAddr {
-    let server = tls::server_config(CERT, KEY, &[], TlsVersion::V1_2).expect("server tls");
+    let server = tls::server_config(CERT, KEY, None, &[], TlsVersion::V1_2).expect("server tls");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
     let addr = listener.local_addr().expect("addr echo");
     tokio::spawn(async move {
@@ -177,7 +177,7 @@ async fn tls_roundtrip(stream: &mut tokio_rustls::client::TlsStream<TcpStream>, 
 async fn tls_termination_e2e() {
     let backend = start_echo().await;
     let metrics = Arc::new(Metrics::default());
-    let server = tls::server_config(CERT, KEY, &["http/1.1".to_owned()], TlsVersion::V1_2)
+    let server = tls::server_config(CERT, KEY, None, &["http/1.1".to_owned()], TlsVersion::V1_2)
         .expect("server tls");
     let cfg = base_listener("web", Arc::new(ResolvedBackend::single("api", backend)))
         .with_server_tls(server);
@@ -215,7 +215,7 @@ async fn tls_termination_e2e() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alpn_negotiation() {
     let backend = start_marker_echo(b'X').await;
-    let server = tls::server_config(CERT, KEY, &["http/1.1".to_owned()], TlsVersion::V1_2)
+    let server = tls::server_config(CERT, KEY, None, &["http/1.1".to_owned()], TlsVersion::V1_2)
         .expect("server tls");
     let cfg = base_listener("web", Arc::new(ResolvedBackend::single("api", backend)))
         .with_server_tls(server);
@@ -424,10 +424,10 @@ async fn healthchecks_e2e() {
         2,
         2,
     )
-    .with_health_check(HealthCheck {
-        interval: Duration::from_millis(80),
-        timeout: Duration::from_millis(80),
-    });
+    .with_health_check(HealthCheck::tcp(
+        Duration::from_millis(80),
+        Duration::from_millis(80),
+    ));
     let cfg = base_listener("web", Arc::new(backend));
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
@@ -547,10 +547,10 @@ async fn all_servers_down_returns_503_in_http_mode() {
         1,
         1,
     )
-    .with_health_check(HealthCheck {
-        interval: Duration::from_millis(50),
-        timeout: Duration::from_millis(50),
-    });
+    .with_health_check(HealthCheck::tcp(
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+    ));
     let mut cfg = base_listener("web", Arc::new(backend));
     cfg.mode = ProxyMode::Http;
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
@@ -597,10 +597,10 @@ async fn all_servers_down_closes_connection_in_tcp_mode() {
         1,
         1,
     )
-    .with_health_check(HealthCheck {
-        interval: Duration::from_millis(50),
-        timeout: Duration::from_millis(50),
-    });
+    .with_health_check(HealthCheck::tcp(
+        Duration::from_millis(50),
+        Duration::from_millis(50),
+    ));
     let cfg = base_listener("web", Arc::new(backend));
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
@@ -664,7 +664,7 @@ async fn drained_server_is_skipped() {
 async fn client_garbage_handshake_is_counted_as_tls_failure() {
     let backend = start_marker_echo(b'X').await;
     let metrics = Arc::new(Metrics::default());
-    let server = tls::server_config(CERT, KEY, &[], TlsVersion::V1_2).expect("server tls");
+    let server = tls::server_config(CERT, KEY, None, &[], TlsVersion::V1_2).expect("server tls");
     let cfg = base_listener("web", Arc::new(ResolvedBackend::single("api", backend)))
         .with_server_tls(server);
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;

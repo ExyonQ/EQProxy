@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use clap::{Parser, Subcommand};
 
@@ -217,6 +218,31 @@ fn validate(path: &Path) -> u8 {
         path.display()
     );
     0
+}
+
+/// The SIGHUP gate (S-CFG-01): the same checks as startup, without side
+/// effects. A rejected candidate never reaches the dataplane and the
+/// running config keeps serving. Errors come back as text for the
+/// "config reload rejected" line.
+fn reload_gate(path: &Path) -> Result<Vec<ResolvedListener>, String> {
+    let (config, result) = load_and_check(path).map_err(|err| err.to_string())?;
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if !result.is_valid() {
+        return Err(result
+            .errors
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    let listeners = resolve(&config, base_dir(path))
+        .map_err(|msg| format!("inconsistent configuration after validation: {msg}"))?;
+    if listeners.is_empty() {
+        return Err("the configuration defines no listeners; nothing to serve".to_owned());
+    }
+    Ok(listeners)
 }
 
 /// Compares two configurations for the pre-apply safety workflow (Phase 3).
@@ -1290,6 +1316,64 @@ fn explain_report(
         proxy_protocol,
         health,
     );
+    // Phase timeouts and their observable outcome when they fire (Q4/H5:
+    // no surprises — `explain` documents what each timeout does BEFORE it
+    // can fire, including the response the client receives).
+    let _ = writeln!(
+        out,
+        "timeouts: connect={:?} idle={:?} client_header={:?} server_header={:?}",
+        listener.connect_timeout,
+        listener.idle_timeout,
+        listener.client_header_timeout,
+        listener.server_header_timeout
+    );
+    let fire = match listener.mode {
+        ProxyMode::Tcp => format!(
+            "connect=close after {:?}; idle=close after {:?} (tcp: no response channel)",
+            listener.connect_timeout, listener.idle_timeout
+        ),
+        ProxyMode::Http => format!(
+            "connect=502 after {:?}; client_header=408(first exchange)/close after {:?}; server_header=504 after {:?}; idle=close after {:?}",
+            listener.connect_timeout,
+            listener.client_header_timeout,
+            listener.server_header_timeout,
+            listener.idle_timeout
+        ),
+    };
+    let _ = writeln!(out, "timeout_on_fire: {fire}");
+    let queue = backend.queue.as_ref().map_or_else(
+        || "none (no server up -> 503 immediately)".to_owned(),
+        |q| {
+            format!(
+                "maxqueue={} timeout={:?} (full->503; expired->503)",
+                q.settings.maxqueue, q.settings.timeout
+            )
+        },
+    );
+    let _ = writeln!(out, "queue: {queue}");
+    let retries = if backend.retries.max == 0 {
+        "none (one dial per exchange)".to_owned()
+    } else {
+        format!(
+            "max={} scope={} (connect-phase only; failed server excluded)",
+            backend.retries.max,
+            if backend.retries.non_idempotent {
+                "all methods"
+            } else {
+                "idempotent-only"
+            }
+        )
+    };
+    let _ = writeln!(out, "retries: {retries}");
+    if let Some(local) = &listener.local_response {
+        let _ = writeln!(
+            out,
+            "local_response: status={} content_type=\"{}\" body_bytes={} (no-server class)",
+            local.status,
+            local.content_type,
+            local.body.len()
+        );
+    }
     for server in &backend.servers {
         let state = if sim.is_up(server.addr) {
             "UP(initial)"
@@ -1354,11 +1438,49 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                 eqproxy_config::schema::ProxyProtocolMode::V1 => ProxyProtocolMode::V1,
             });
         if let Some(hc) = &backend.health_check {
-            resolved = resolved.with_health_check(HealthCheck {
-                interval: hc.interval,
-                timeout: hc.timeout,
+            let mut check = HealthCheck::tcp(hc.interval, hc.timeout).with_passive(hc.passive);
+            if hc.kind == eqproxy_config::schema::HealthCheckKind::Http {
+                let expect_status =
+                    eqproxy_core::expectation::StatusExpectation::parse(&hc.expect_status)
+                        .map_err(|why| {
+                            format!("backend.{name}.health_check.expect_status: {why}")
+                        })?;
+                let expect_rstring = hc
+                    .expect_rstring
+                    .as_deref()
+                    .map(eqproxy_core::expectation::RegexMatcher::parse)
+                    .transpose()
+                    .map_err(|why| format!("backend.{name}.health_check.expect_rstring: {why}"))?;
+                check = check.with_http(eqproxy_net::health::HttpCheck {
+                    method: match hc.http_method {
+                        eqproxy_config::schema::HealthCheckMethod::Get => {
+                            eqproxy_net::health::HttpCheckMethod::Get
+                        }
+                        eqproxy_config::schema::HealthCheckMethod::Head => {
+                            eqproxy_net::health::HttpCheckMethod::Head
+                        }
+                    },
+                    path: hc.http_path.clone(),
+                    host: hc.http_host.clone(),
+                    expect_status,
+                    expect_rstring,
+                });
+            }
+            resolved = resolved.with_health_check(check);
+        }
+        // Bounded wait queue (B-H7): `maxqueue = 0` = reject immediately.
+        if backend.maxqueue > 0 {
+            resolved = resolved.with_queue(eqproxy_net::proxy::QueueSettings {
+                maxqueue: backend.maxqueue,
+                timeout: backend.timeout_queue,
             });
         }
+        // Connect-phase retries (B-H7): idempotent only unless the
+        // explicit `retry_non_idempotent` opt-in.
+        resolved = resolved.with_retries(eqproxy_net::proxy::RetryPolicy {
+            max: backend.retries,
+            non_idempotent: backend.retry_non_idempotent,
+        });
         if let Some(client_tls) = &backend.tls {
             let ca = client_tls
                 .ca_file
@@ -1408,6 +1530,32 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                 listener.server_header_timeout,
             )
             .with_backend(Arc::clone(backend));
+            // PROXY v1 reception (B-H9/B-E10): strict front door with
+            // allowlisted origins only.
+            if listener.proxy_receive {
+                let allowlist =
+                    eqproxy_core::expectation::IpAllowlist::parse(&listener.proxy_allow)
+                        .map_err(|why| format!("listener.{name}.proxy_allow: {why}"))?;
+                resolved = resolved.with_proxy_receive(allowlist);
+            }
+            resolved = resolved.with_forwarded_headers(match listener.forwarded_headers {
+                eqproxy_config::schema::ForwardedHeaders::Off => {
+                    eqproxy_net::proxy::ForwardedMode::Off
+                }
+                eqproxy_config::schema::ForwardedHeaders::Append => {
+                    eqproxy_net::proxy::ForwardedMode::Append
+                }
+                eqproxy_config::schema::ForwardedHeaders::Replace => {
+                    eqproxy_net::proxy::ForwardedMode::Replace
+                }
+            });
+            if let Some(local) = &listener.local_response {
+                resolved = resolved.with_local_response(eqproxy_net::proxy::LocalResponse {
+                    status: local.status,
+                    content_type: local.content_type.clone(),
+                    body: local.body.clone(),
+                });
+            }
             if let Some(server_tls) = &listener.tls {
                 let cert = read_pem(
                     base_dir,
@@ -1419,9 +1567,16 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     &format!("listener.{name}.tls.key"),
                     &server_tls.key,
                 )?;
+                // mTLS (A15): optional client CA = mutual TLS enforced.
+                let client_ca = server_tls
+                    .client_ca
+                    .as_deref()
+                    .map(|ca| read_pem(base_dir, &format!("listener.{name}.tls.client_ca"), ca))
+                    .transpose()?;
                 let acceptor = tls::server_config(
                     &cert,
                     &key,
+                    client_ca.as_deref(),
                     &server_tls.alpn,
                     tls_version(server_tls.min_version),
                 )
@@ -1527,7 +1682,45 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         }
     });
 
-    let serve_result = bound.serve(signal, config.shutdown_grace).await;
+    // SIGHUP → hot config reload (S-CFG-01, unix): re-read the file, run
+    // the startup gate and send the resolved listeners to the dataplane.
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(4);
+    #[cfg(unix)]
+    {
+        let hup_path = path.clone();
+        let hup_metrics = Arc::clone(&metrics);
+        tokio::spawn(async move {
+            let mut hup =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(hup) => hup,
+                    Err(err) => {
+                        eprintln!("ERROR SIGHUP handler unavailable: {err}");
+                        return;
+                    }
+                };
+            while hup.recv().await.is_some() {
+                match reload_gate(&hup_path) {
+                    Ok(listeners) => {
+                        if reload_tx.send(listeners).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(msg) => {
+                        hup_metrics
+                            .config_reload_failures
+                            .fetch_add(1, Ordering::Relaxed);
+                        eprintln!("ERROR config reload rejected: {msg}");
+                    }
+                }
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    let _ = reload_tx;
+
+    let serve_result = bound
+        .serve_with_reloads(signal, config.shutdown_grace, reload_rx)
+        .await;
     let _ = reporter.await;
     eprintln!("METRICS {} (final)", metrics.snapshot());
     match serve_result {
@@ -1571,6 +1764,7 @@ mod tests {
             listener: BTreeMap::new(),
             backend,
             shutdown_grace: Duration::from_secs(10),
+            metrics: eqproxy_config::schema::MetricsConfig::default(),
         };
         let backend = Arc::new(ResolvedBackend::new(
             "api",
@@ -1686,6 +1880,40 @@ mod tests {
             "backend \"api\": balance=roundrobin servers=2",
             "server 127.0.0.1:9000 weight=3 state=UP(initial)",
             "decision: server 127.0.0.1:9000",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_report_details_what_each_timeout_fires() {
+        use eqproxy_net::proxy::{LocalResponse, QueueSettings, RetryPolicy, WaitQueue};
+
+        let (config, mut listener) = two_server_listener();
+        let backend = Arc::get_mut(&mut listener.backend).expect("unique backend");
+        backend.queue = Some(WaitQueue::new(QueueSettings {
+            maxqueue: 8,
+            timeout: Duration::from_millis(500),
+        }));
+        backend.retries = RetryPolicy {
+            max: 1,
+            non_idempotent: false,
+        };
+        let listener = listener.with_local_response(LocalResponse {
+            status: 503,
+            content_type: "text/plain".to_owned(),
+            body: "back soon".to_owned(),
+        });
+        let report = explain_report(&config, &listener, "GET", "example.com", "/a");
+        for expected in [
+            "timeouts: connect=5s idle=60s client_header=5s server_header=30s",
+            "timeout_on_fire: connect=502 after 5s; client_header=408(first exchange)/close after 5s; server_header=504 after 30s; idle=close after 60s",
+            "queue: maxqueue=8 timeout=500ms (full->503; expired->503)",
+            "retries: max=1 scope=idempotent-only (connect-phase only; failed server excluded)",
+            "local_response: status=503 content_type=\"text/plain\" body_bytes=9 (no-server class)",
         ] {
             assert!(
                 report.contains(expected),

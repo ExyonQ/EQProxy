@@ -44,6 +44,26 @@ pub struct Metrics {
     /// message end broke the A16 boundary contract. Operators can alert
     /// on this counter (no labels: bounded cardinality).
     pub backend_connections_discarded: AtomicU64,
+    /// Successful hot config swaps (S-CFG-01).
+    pub config_reloads: AtomicU64,
+    /// Hot reloads rejected (gate failure or bind conflict); the running
+    /// config keeps serving.
+    pub config_reload_failures: AtomicU64,
+    /// Duration of the last hot config swap in microseconds (PP-04/05:
+    /// the swap latency is measured, never assumed).
+    pub config_reload_duration_us: AtomicU64,
+    /// Explicit rejections because the bounded backend queue was full (B-H7).
+    pub queue_full: AtomicU64,
+    /// Requests that expired in the bounded queue (B-H7).
+    pub queue_timeout: AtomicU64,
+    /// Connect-phase redials on dial failure (B-H7).
+    pub retry_attempts: AtomicU64,
+    /// Connections rejected: peer is not in the PROXY v1 allowlist (B-H9).
+    pub proxy_protocol_denied: AtomicU64,
+    /// Malformed or timed-out PROXY v1 headers (B-H9).
+    pub proxy_protocol_invalid: AtomicU64,
+    /// Custom local responses served (C9).
+    pub local_responses_served: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -65,6 +85,15 @@ pub struct MetricsSnapshot {
     pub backend_connections_reused: u64,
     pub backend_connections_opened: u64,
     pub backend_connections_discarded: u64,
+    pub config_reloads: u64,
+    pub config_reload_failures: u64,
+    pub config_reload_duration_us: u64,
+    pub queue_full: u64,
+    pub queue_timeout: u64,
+    pub retry_attempts: u64,
+    pub proxy_protocol_denied: u64,
+    pub proxy_protocol_invalid: u64,
+    pub local_responses_served: u64,
 }
 
 impl Metrics {
@@ -89,6 +118,15 @@ impl Metrics {
             backend_connections_discarded: self
                 .backend_connections_discarded
                 .load(Ordering::Relaxed),
+            config_reloads: self.config_reloads.load(Ordering::Relaxed),
+            config_reload_failures: self.config_reload_failures.load(Ordering::Relaxed),
+            config_reload_duration_us: self.config_reload_duration_us.load(Ordering::Relaxed),
+            queue_full: self.queue_full.load(Ordering::Relaxed),
+            queue_timeout: self.queue_timeout.load(Ordering::Relaxed),
+            retry_attempts: self.retry_attempts.load(Ordering::Relaxed),
+            proxy_protocol_denied: self.proxy_protocol_denied.load(Ordering::Relaxed),
+            proxy_protocol_invalid: self.proxy_protocol_invalid.load(Ordering::Relaxed),
+            local_responses_served: self.local_responses_served.load(Ordering::Relaxed),
         }
     }
 
@@ -118,35 +156,52 @@ impl Metrics {
 }
 
 impl fmt::Display for MetricsSnapshot {
+    /// Rendered by failure origin (Q4/H5/CE5: no black box): `client`,
+    /// `proxy`, `network` and `backend` groups plus phases and bytes.
+    /// Every group is a fixed set of counters (CE4: bounded cardinality).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "connections[accepted={} active={} completed={} rejected={} connect_failures={} idle_timeouts={}] bytes[c2b={} b2c={}]",
+            "client[accepted={} active={} completed={} rejected_maxconn={} protocol_errors={}]",
             self.connections_accepted,
             self.connections_active,
             self.connections_completed,
             self.connections_rejected,
+            self.http_requests_rejected
+        )?;
+        write!(
+            f,
+            " proxy[no_server={} queue_full={} queue_timeout={} retries={} local_responses={}]",
+            self.no_available_server,
+            self.queue_full,
+            self.queue_timeout,
+            self.retry_attempts,
+            self.local_responses_served
+        )?;
+        write!(
+            f,
+            " network[idle_timeouts={} bytes_c2b={} bytes_b2c={}]",
+            self.idle_timeouts, self.bytes_client_to_backend, self.bytes_backend_to_client
+        )?;
+        write!(
+            f,
+            " backend[connect_failures={} tls_failures={} discarded={} reused={} opened={} proxied={}]",
             self.connect_failures,
-            self.idle_timeouts,
-            self.bytes_client_to_backend,
-            self.bytes_backend_to_client,
-        )?;
-        write!(
-            f,
-            " http[proxied={} rejected={} header_timeouts={}]",
-            self.http_requests_proxied, self.http_requests_rejected, self.header_timeouts
-        )?;
-        write!(
-            f,
-            " tls[handshake_failures={}] no_server={}",
-            self.tls_handshake_failures, self.no_available_server
-        )?;
-        write!(
-            f,
-            " pool[reused={} opened={} discarded={}]",
+            self.tls_handshake_failures,
+            self.backend_connections_discarded,
             self.backend_connections_reused,
             self.backend_connections_opened,
-            self.backend_connections_discarded
+            self.http_requests_proxied
+        )?;
+        write!(
+            f,
+            " phases[header_timeouts={}] proxy_proto[denied={} invalid={}] cfg[reloads={} reload_failures={} last_swap_us={}]",
+            self.header_timeouts,
+            self.proxy_protocol_denied,
+            self.proxy_protocol_invalid,
+            self.config_reloads,
+            self.config_reload_failures,
+            self.config_reload_duration_us
         )
     }
 }
@@ -181,14 +236,22 @@ mod tests {
         metrics
             .backend_connections_discarded
             .fetch_add(1, Ordering::Relaxed);
+        metrics.config_reloads.fetch_add(2, Ordering::Relaxed);
+        metrics
+            .config_reload_failures
+            .fetch_add(1, Ordering::Relaxed);
         let snap = metrics.snapshot();
         assert_eq!(snap.connections_active, 1);
         assert_eq!(snap.bytes_client_to_backend, 42);
         assert_eq!(snap.backend_connections_discarded, 1);
+        assert_eq!(snap.config_reloads, 2);
+        assert_eq!(snap.config_reload_failures, 1);
         let shown = snap.to_string();
         assert!(shown.contains("active=1"), "display: {shown}");
         assert!(shown.contains("c2b=42"), "display: {shown}");
         assert!(shown.contains("discarded=1"), "display: {shown}");
+        assert!(shown.contains("reloads=2"), "display: {shown}");
+        assert!(shown.contains("reload_failures=1"), "display: {shown}");
     }
 
     #[test]

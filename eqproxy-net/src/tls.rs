@@ -123,15 +123,35 @@ pub fn parse_key(pem: &[u8]) -> Result<PrivateKeyDer<'static>, TlsError> {
 pub fn server_config(
     cert_chain_pem: &[u8],
     key_pem: &[u8],
+    client_ca_pem: Option<&[u8]>,
     alpn: &[String],
     min: TlsVersion,
 ) -> Result<ServerTls, TlsError> {
     let certs = parse_certs(cert_chain_pem)?;
     let key = parse_key(key_pem)?;
-    let mut config = rustls::ServerConfig::builder_with_protocol_versions(protocol_versions(min))
-        .with_no_client_auth()
-        .with_single_cert(certs, key)
-        .map_err(|e| TlsError::Config(format!("key and certificate do not match: {e}")))?;
+    let builder = rustls::ServerConfig::builder_with_protocol_versions(protocol_versions(min));
+    let mut config = if let Some(client_ca_pem) = client_ca_pem {
+        // mTLS (A15): clients must present a certificate issued by this CA.
+        let ca_certs = parse_certs(client_ca_pem)?;
+        let mut roots = RootCertStore::empty();
+        for cert in ca_certs {
+            roots
+                .add(cert)
+                .map_err(|e| TlsError::Ca(format!("client CA certificate: {e}")))?;
+        }
+        let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(roots))
+            .build()
+            .map_err(|e| TlsError::Ca(format!("client CA verifier: {e}")))?;
+        builder
+            .with_client_cert_verifier(verifier)
+            .with_single_cert(certs, key)
+            .map_err(|e| TlsError::Config(format!("key and certificate do not match: {e}")))?
+    } else {
+        builder
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .map_err(|e| TlsError::Config(format!("key and certificate do not match: {e}")))?
+    };
     config.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
     let config = Arc::new(config);
     Ok(ServerTls {
@@ -254,7 +274,7 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn server_config_accepts_valid_pem_and_alpn() {
-        let server = server_config(CERT, KEY, &["http/1.1".to_owned()], TlsVersion::V1_2)
+        let server = server_config(CERT, KEY, None, &["http/1.1".to_owned()], TlsVersion::V1_2)
             .expect("valid test cert/key");
         assert_eq!(server.alpn(), vec![b"http/1.1".to_vec()]);
     }
@@ -262,13 +282,19 @@ mod tests {
     #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]
     fn server_config_rejects_garbage_with_actionable_error() {
-        let err = server_config(b"no es PEM", KEY, &[], TlsVersion::V1_2)
+        let err = server_config(b"no es PEM", KEY, None, &[], TlsVersion::V1_2)
             .expect_err("must reject garbage");
         assert!(matches!(err, TlsError::Cert(_)), "error: {err}");
 
-        let err = server_config(CERT, b"no es PEM", &[], TlsVersion::V1_2)
+        let err = server_config(CERT, b"no es PEM", None, &[], TlsVersion::V1_2)
             .expect_err("must reject garbage key");
         assert!(matches!(err, TlsError::Key(_)), "error: {err}");
+
+        // mTLS (A15): a garbage client CA must be rejected with an
+        // actionable error, never silently ignored.
+        let err = server_config(CERT, KEY, Some(b"no es PEM"), &[], TlsVersion::V1_2)
+            .expect_err("must reject garbage client CA");
+        assert!(matches!(err, TlsError::Cert(_)), "error: {err}");
     }
 
     #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]

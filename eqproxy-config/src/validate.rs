@@ -4,9 +4,14 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
+use eqproxy_core::expectation::{IpBlock, RegexMatcher, StatusExpectation};
+
 use crate::error::{ConfigError, Location};
 use crate::find_line;
-use crate::schema::{Config, MAX_SECTIONS, MAX_SERVER_WEIGHT, SCHEMA_VERSION};
+use crate::schema::{
+    Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_LOCAL_RESPONSE_BYTES, MAX_QUEUE,
+    MAX_RETRIES, MAX_SECTIONS, MAX_SERVER_WEIGHT, SCHEMA_VERSION,
+};
 
 /// Result of validating a full configuration.
 #[derive(Debug, Default)]
@@ -155,6 +160,79 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             );
         }
 
+        if listener.proxy_receive {
+            if listener.proxy_allow.is_empty() {
+                err(
+                    field("proxy_allow"),
+                    "proxy_receive = true requires at least one trusted origin".to_owned(),
+                    "proxy_allow = [\"10.0.0.0/8\"] (IP or CIDR list)".to_owned(),
+                    &section,
+                );
+            }
+            for entry in &listener.proxy_allow {
+                if let Err(cause) = IpBlock::parse(entry) {
+                    err(
+                        field("proxy_allow"),
+                        cause,
+                        "proxy_allow = [\"10.0.0.0/8\", \"192.0.2.1\"]".to_owned(),
+                        &section,
+                    );
+                }
+            }
+        }
+
+        if listener.forwarded_headers != ForwardedHeaders::Off
+            && listener.mode != ListenerMode::Http
+        {
+            err(
+                field("forwarded_headers"),
+                "forwarded_headers is only meaningful in mode = \"http\"".to_owned(),
+                "mode = \"http\" or forwarded_headers = \"off\"".to_owned(),
+                &section,
+            );
+        }
+
+        if let Some(local) = &listener.local_response {
+            if !(400..=599).contains(&local.status) {
+                err(
+                    field("local_response.status"),
+                    format!(
+                        "local_response.status = {} out of range (rule: local responses are 400-599)",
+                        local.status
+                    ),
+                    "status = 503".to_owned(),
+                    &section,
+                );
+            }
+            if local.body.len() > MAX_LOCAL_RESPONSE_BYTES {
+                err(
+                    field("local_response.body"),
+                    format!(
+                        "local_response.body is {} bytes (rule: maximum {MAX_LOCAL_RESPONSE_BYTES})",
+                        local.body.len()
+                    ),
+                    "shorten the body (8 KiB budget)".to_owned(),
+                    &section,
+                );
+            }
+            if local.content_type.trim().is_empty() {
+                err(
+                    field("local_response.content_type"),
+                    "local_response.content_type must not be empty".to_owned(),
+                    "content_type = \"text/plain; charset=utf-8\"".to_owned(),
+                    &section,
+                );
+            }
+            if listener.mode != ListenerMode::Http {
+                err(
+                    field("local_response"),
+                    "local_response is only meaningful in mode = \"http\"".to_owned(),
+                    "mode = \"http\" or remove local_response".to_owned(),
+                    &section,
+                );
+            }
+        }
+
         if let Ok(addr) = listener.listen.parse::<SocketAddr>() {
             if !addr.ip().is_loopback() && listener.tls.is_none() {
                 result.warnings.push(format!(
@@ -268,6 +346,74 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
+
+            if hc.kind == HealthCheckKind::Http {
+                if let Err(cause) = StatusExpectation::parse(&hc.expect_status) {
+                    err(
+                        field("health_check.expect_status"),
+                        cause,
+                        "expect_status = \"200-299\"".to_owned(),
+                        &section,
+                    );
+                }
+                if let Some(rstring) = &hc.expect_rstring
+                    && let Err(cause) = RegexMatcher::parse(rstring)
+                {
+                    err(
+                        field("health_check.expect_rstring"),
+                        cause,
+                        "expect_rstring = \"^ok$\"".to_owned(),
+                        &section,
+                    );
+                }
+                if !hc.http_path.starts_with('/') {
+                    err(
+                        field("health_check.http_path"),
+                        format!(
+                            "http_path = \"{}\" must start with '/' (rule: origin-form path)",
+                            hc.http_path
+                        ),
+                        "http_path = \"/healthz\"".to_owned(),
+                        &section,
+                    );
+                }
+            }
+        }
+
+        if backend.maxqueue > MAX_QUEUE {
+            err(
+                field("maxqueue"),
+                format!(
+                    "maxqueue = {} exceeds the budget (rule: 0..={MAX_QUEUE})",
+                    backend.maxqueue
+                ),
+                "maxqueue = 64".to_owned(),
+                &section,
+            );
+        }
+        if backend.maxqueue > 0 && backend.timeout_queue.is_zero() {
+            err(
+                field("timeout_queue"),
+                "timeout_queue must be greater than 0 when maxqueue > 0".to_owned(),
+                "timeout_queue = \"5s\"".to_owned(),
+                &section,
+            );
+        }
+        if backend.retries > MAX_RETRIES {
+            err(
+                field("retries"),
+                format!(
+                    "retries = {} exceeds the maximum (rule: 0..={MAX_RETRIES})",
+                    backend.retries
+                ),
+                "retries = 2".to_owned(),
+                &section,
+            );
+        }
+        if backend.retry_non_idempotent && backend.retries == 0 {
+            result.warnings.push(format!(
+                "backend \"{name}\" sets retry_non_idempotent but retries = 0: it has no effect"
+            ));
         }
 
         if let Some(tls) = &backend.tls {
@@ -345,6 +491,7 @@ mod tests {
             listener: BTreeMap::new(),
             backend: BTreeMap::new(),
             shutdown_grace: Duration::from_secs(10),
+            metrics: crate::schema::MetricsConfig::default(),
         };
         for i in 0..backends {
             config.backend.insert(
@@ -368,6 +515,10 @@ mod tests {
                     client_header_timeout: Duration::from_secs(5),
                     server_header_timeout: Duration::from_secs(30),
                     tls: None,
+                    proxy_receive: false,
+                    proxy_allow: Vec::new(),
+                    forwarded_headers: ForwardedHeaders::default(),
+                    local_response: None,
                 },
             );
         }
@@ -376,6 +527,148 @@ mod tests {
 
     fn check_config(config: &Config) -> CheckResult {
         check(config, "", Path::new("eqproxy.toml"))
+    }
+
+    #[test]
+    fn http_check_errors_name_field_and_rule() {
+        let result = check_source(
+            r#"
+            schema_version = 1
+            [backend.api]
+            server = "127.0.0.1:9000"
+            [backend.api.health_check]
+            type = "http"
+            expect_status = "300-200"
+            expect_rstring = "("
+            http_path = "healthz"
+            "#,
+        );
+        let fields: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| e.field.clone())
+            .collect();
+        for expected in [
+            "backend.api.health_check.expect_status",
+            "backend.api.health_check.expect_rstring",
+            "backend.api.health_check.http_path",
+        ] {
+            assert!(
+                fields.iter().any(|f| f == expected),
+                "missing error for {expected}: {fields:?}"
+            );
+        }
+        for e in &result.errors {
+            assert!(
+                e.cause.contains("rule:"),
+                "cause must name the rule: {}",
+                e.cause
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_receive_forwarded_and_local_response_rules() {
+        let result = check_source(
+            r#"
+            schema_version = 1
+            [listener.web]
+            listen = "127.0.0.1:8080"
+            mode = "tcp"
+            backend = "api"
+            proxy_receive = true
+            forwarded_headers = "append"
+            [listener.web.local_response]
+            status = 999
+            body = "x"
+            content_type = ""
+            [backend.api]
+            server = "127.0.0.1:9000"
+            "#,
+        );
+        let fields: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| e.field.clone())
+            .collect();
+        for expected in [
+            "listener.web.proxy_allow",
+            "listener.web.forwarded_headers",
+            "listener.web.local_response.status",
+            "listener.web.local_response.content_type",
+            "listener.web.local_response",
+        ] {
+            assert!(
+                fields.iter().any(|f| f == expected),
+                "missing error for {expected}: {fields:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn queue_and_retries_rules() {
+        let result = check_source(
+            r#"
+            schema_version = 1
+            [backend.api]
+            server = "127.0.0.1:9000"
+            maxqueue = 100000
+            timeout_queue = "0s"
+            retries = 9
+            "#,
+        );
+        let fields: Vec<_> = result
+            .errors
+            .iter()
+            .filter_map(|e| e.field.clone())
+            .collect();
+        for expected in [
+            "backend.api.maxqueue",
+            "backend.api.timeout_queue",
+            "backend.api.retries",
+        ] {
+            assert!(
+                fields.iter().any(|f| f == expected),
+                "missing error for {expected}: {fields:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn v05_full_config_is_valid() {
+        let result = check_source(
+            r#"
+            schema_version = 1
+            [metrics]
+            detailed = true
+            [listener.web]
+            listen = "127.0.0.1:8080"
+            mode = "http"
+            backend = "api"
+            proxy_receive = true
+            proxy_allow = ["10.0.0.0/8", "192.0.2.1"]
+            forwarded_headers = "append"
+            [listener.web.local_response]
+            status = 503
+            body = "gone"
+            [listener.web.tls]
+            cert = "c.pem"
+            key = "k.pem"
+            client_ca = "ca.pem"
+            [backend.api]
+            servers = [{ addr = "127.0.0.1:9000", weight = 1 }]
+            maxqueue = 64
+            timeout_queue = "2s"
+            retries = 2
+            [backend.api.health_check]
+            type = "http"
+            http_path = "/healthz"
+            expect_status = "200-299,301"
+            expect_rstring = "ok"
+            passive = true
+            "#,
+        );
+        assert!(result.is_valid(), "unexpected errors: {:?}", result.errors);
     }
 
     #[test]

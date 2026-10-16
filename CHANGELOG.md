@@ -5,6 +5,100 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+Nothing yet. Next: v0.6 «Reglas, enrutado y tráfico».
+
+## [v0.5.0] — 2026-10-16
+
+«Operabilidad y confianza» (completa Phase 3). The two blocks that sat
+under `Unreleased` (planned as 0.4.6 — hot reload and release
+automation) fold into this release.
+
+### Added
+
+- HTTP health checks with `expect` matching (B-H6/B-N11/B-I19/B-E5):
+  `type = "http"` with `http_path`, `http_method`, `http_host`,
+  `expect_status` (ranges like `"200-299"`) and `expect_rstring`
+  (regex over the body). One real exchange per probe with a hard
+  timeout; E2E-verified (a backend answering 500 is marked DOWN and
+  traffic moves to the healthy server).
+- Passive failure detection (B-N10): with `passive = true` on the health
+  check, live-traffic verdicts feed the same fall/rise machine —
+  connect-phase failures and HTTP 5xx responses count as failures, other
+  completed exchanges as success. Passive marks only apply when an
+  active checker exists that can bring the server back (safe restart).
+- Safe connect-phase retries and bounded backend queues (B-H7/B-E7):
+  `retries` (extra dials, max 5) with the documented replay rule
+  (idempotent methods only unless `retry_non_idempotent = true` opts in;
+  the failed server is excluded from redials), and `maxqueue` +
+  `timeout_queue` (never more than `maxqueue` waiters, never unbounded
+  waits). A full queue is rejected immediately with 503 and an expired
+  waiter with 503 — never a silent hang. Counters: `queue_full`,
+  `queue_timeout`, `retry_attempts`.
+- Incoming PROXY protocol v1 with an origin allowlist (B-H9/B-E10):
+  `proxy_receive = true` + `proxy_allow = ["10.0.0.0/8", …]` turns the
+  listener into a strict front door — non-allowlisted origins and
+  malformed or timed-out headers are closed without a byte forwarded
+  (`proxy_protocol_denied`, `proxy_protocol_invalid`). The claimed
+  client address becomes the peer for logs, forwarded headers and
+  outgoing PROXY.
+- mTLS (A15): `client_ca` under `[listener.*.tls]` requires client
+  certificates issued by that CA (verified E2E: no cert and foreign
+  certs are rejected, the right cert round-trips).
+- Forwarded headers (B-N4, first step): `forwarded_headers =
+  "off" | "append" | "replace"` handles `X-Forwarded-For` /
+  `X-Real-IP` on the forwarded copy of the head — `append` keeps the
+  chain and grows it, `replace` drops spoofed hops. Off by default.
+- Custom local responses (C9 minimal): `local_response` (status,
+  content_type, body) serves the "no server available" class with the
+  configured body; counted in `local_responses_served`.
+- Hot certificates (D7): a reload now applies new TLS material on kept
+  sockets (verified E2E: after rotation the old root fails and the new
+  one works on the same socket), and the swap latency is measured and
+  published (`cfg[… last_swap_us=N]`, PP-04/05 — measured, never
+  assumed).
+- `config explain` documents what each timeout does when it fires
+  (Q4/H5/CE5): `timeout_on_fire` maps every phase to its client-visible
+  outcome (408/502/504/close), plus the queue, retry and local-response
+  policy of the backend.
+- Soak harness (`scripts/soak.py`) with published budgets (BENCHMARK_PLAN
+  §9): the real binary under sustained load with RSS/CPU sampled from
+  `/proc`, and an honest verdict (no measurement, no PASS).
+
+### Changed
+
+- Keep-alive pool hardening (A16): before pooling, the connection is
+  probed for EOF — a backend that closed (even without announcing
+  `Connection: close`) is dropped instead of handed to the next
+  exchange, which used to fail with 502 on its first write.
+- Metrics snapshot rendering groups counters by failure origin
+  (client/proxy/network/backend/phases; Q4/H5/CE5) with bounded
+  cardinality (CE4: fixed counter set, no labels).
+
+### Added (folded from the planned 0.4.6)
+
+- Hot config reload (S-CFG-01): `kill -HUP` re-reads the config file and
+  applies it to the running proxy. The candidate goes through the same
+  gate as startup (parse + validate + resolve); a rejected one logs
+  `config reload rejected` with the cause and the running config keeps
+  serving (fail-closed). Accepted swaps match listeners by name: same
+  name + address keeps the socket (no rejection window for new
+  connections), missing addresses are bound before anything mutates
+  (all-or-nothing), removed listeners stop, and established connections
+  drain with the config they were accepted with. Counters never reset
+  (PP-03) and the new `cfg[reloads=N reload_failures=N]` metrics group
+  makes reloads alertable.
+
+- Release automation (`.github/workflows/release.yml`): pushing a `v*`
+  tag runs the exact `scripts/release.sh` stages on the runners that can
+  execute them (macos-15 for darwin, ubuntu + containers for linux),
+  E2E-verifies every artifact (real CLI journeys and live proxied
+  traffic) before anything is published, then creates the GitHub release
+  (binaries + SHA256SUMS + SBOM) and builds, verifies and pushes the
+  multi-arch image to ghcr. `release.sh` gained stages (`darwin`, `linux`,
+  `sbom`, `sums`, `verify-image`) so local runs and CI share one verified
+  pipeline; the image artifact itself is verified (version, config gate
+  and live proxied traffic through the container).
+
 ## [v0.4.5] — 2026-10-15
 
 ### Fixed

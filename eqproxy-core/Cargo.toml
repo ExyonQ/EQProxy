@@ -8,6 +8,7 @@ description = "Shared EQProxy types: metrics and graceful shutdown"
 
 [dependencies]
 tokio = { workspace = true }
+regex = "1"
 
 [lints]
 workspace = true
