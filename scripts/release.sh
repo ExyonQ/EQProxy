@@ -106,6 +106,15 @@ wait_for_port() {
         fi
         sleep 0.2
     done
+    # Logs on timeout, as promised: a silent 60s wait in CI is undiagnosable.
+    {
+        echo "--- diagnostics: $label on 127.0.0.1:$port ---"
+        python3 --version 2>&1
+        echo "connect_ex (0 ok / 61 refused / 60 timeout): $(python3 -c "import socket; s=socket.socket(); s.settimeout(2); print(s.connect_ex(('127.0.0.1',$port)))" 2>&1)"
+        lsof -nP -iTCP:$port 2>&1 || true
+        echo "--- /tmp/e2e-backend.log ---"
+        cat /tmp/e2e-backend.log 2>&1 || true
+    } >&2
     fail "$label never listened on 127.0.0.1:$port"
 }
 

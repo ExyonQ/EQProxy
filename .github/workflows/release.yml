@@ -43,6 +43,11 @@ jobs:
       - name: Install Rust targets
         run: rustup toolchain install stable --profile minimal && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      - name: Allow loopback services (macOS firewall drops unsigned listeners)
+        run: |
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+          sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
+
       - name: Build + verify darwin binaries
         run: ./scripts/release.sh darwin
 
