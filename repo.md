@@ -20,7 +20,8 @@ measured swap latency, backend keep-alive pool (A16), the diagnostic CLI
 benchmarks vs 3.4.6 (all comparable after the pool; see
 [docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)) and the
 24h soak harness with published budgets (BENCHMARK_PLAN §9; the soak gate
-itself is running on netcup-bench, results pending).
+passed on netcup-bench on 2026-10-18: 17.28M requests, 0 errors, steady
+RSS 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown).
 See [SPEC.md](SPEC.md) for the specified behaviour.
 
 Docs language: from v0.3.0, documentation is published in English only.

@@ -29,9 +29,10 @@ diagnostics, configuration, administration, extensibility and security.
 > reference).
 >
 > **Scope honesty:** v0.5.0 is not declared production ready (Phase 9 gate
-> pending): TCP + HTTP/1.1 only; the 24h soak gate is **running** on
-> netcup-bench (started 2026-10-16, budgets in
-> [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) §9, results pending).
+> pending): TCP + HTTP/1.1 only; the 24h soak gate **passed** on
+> netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
+> 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown; budgets in
+> [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) §9).
 
 > **Docs language:** documentation is published in English only.
 
