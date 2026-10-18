@@ -1,10 +1,14 @@
 name: Release
 
-# Pushing a `v*` tag runs the exact stages of scripts/release.sh on the
-# runners that can execute them: every artifact is E2E-verified (real CLI
-# journeys and live proxied traffic) BEFORE any checksum, release asset
-# or registry push exists. A failing verification fails the workflow and
-# nothing is published.
+# Pushing a `v*` tag runs the full release pipeline in this file: every
+# artifact is E2E-verified (real CLI journeys and live proxied traffic)
+# BEFORE any checksum, release asset or registry push exists. A failing
+# verification fails the workflow and nothing is published.
+#
+# The pipeline is self-contained here (owner decision 2026-10-19: the
+# scripts/ folder is maintainer-local and never published; this file
+# absorbed scripts/release.sh). The version pin is the workspace version
+# in Cargo.toml — on a tag run the tag must match it exactly.
 #
 # A manual run (workflow_dispatch) exercises the whole pipeline as a dry
 # run: release creation and registry push are gated on `ref_type == tag`,
@@ -20,7 +24,7 @@ env:
 
 jobs:
   guard:
-    name: Tag matches scripts/release.sh
+    name: Tag matches the workspace version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -28,10 +32,10 @@ jobs:
       - name: Check version pin
         if: github.ref_type == 'tag'
         run: |
-          VER=$(sed -n 's/^VER="\([^"]*\)"/\1/p' scripts/release.sh)
-          echo "release.sh VER=$VER, tag=$GITHUB_REF_NAME"
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "tag=$GITHUB_REF_NAME workspace version=$VER"
           test "v$VER" = "$GITHUB_REF_NAME" \
-            || { echo "tag $GITHUB_REF_NAME does not match scripts/release.sh VER=$VER"; exit 1; }
+            || { echo "tag $GITHUB_REF_NAME does not match the workspace version $VER in Cargo.toml"; exit 1; }
 
   darwin:
     name: Binaries darwin (build + E2E verify)
@@ -48,8 +52,160 @@ jobs:
           sudo /usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
           sudo /usr/libexec/ApplicationFirewall/socketfilterfw --setglobalstate off
 
-      - name: Build + verify darwin binaries
-        run: ./scripts/release.sh darwin
+      - name: Build darwin binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p eqproxy-cli --target "$target"
+          done
+          cp target/aarch64-apple-darwin/release/eqproxy dist/eqproxy-darwin-arm64
+          cp target/x86_64-apple-darwin/release/eqproxy dist/eqproxy-darwin-amd64
+
+      # Per-binary E2E verification (real behavior, observable results):
+      # validate, explain, diff, apply/rollback, doctor and live proxied
+      # traffic — never a smoke test.
+      - name: E2E-verify darwin binaries
+        run: |
+          set -euo pipefail
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          GOOD_CONFIG='schema_version = 1
+          [listener.web]
+          listen = "127.0.0.1:0"
+          backend = "api"
+          [backend.api]
+          server = "127.0.0.1:9"
+          '
+          fail() { printf 'release FAILED: %s\n' "$*" >&2; exit 1; }
+          log() { printf '==> %s\n' "$*"; }
+          verify_cli() {
+            local bin="$1"
+            log "E2E $bin: --version"
+            "$bin" --version | grep -q "eqproxy $VER" || fail "$bin reports wrong version"
+            log "E2E $bin: validate accepts good config"
+            printf '%s' "$GOOD_CONFIG" | "$bin" config validate --config /dev/stdin \
+              | grep -q "config OK: 1 listener(s), 1 backend(s)" \
+              || fail "$bin validate happy path"
+            log "E2E $bin: validate rejects missing file with exit 1"
+            if "$bin" config validate --config /nonexistent-e2e.toml 2>/tmp/e2e-err.txt; then
+              fail "$bin accepted a missing file"
+            fi
+            grep -q "could not read the file" /tmp/e2e-err.txt \
+              || fail "$bin missing-file error not actionable"
+            log "E2E $bin: explain simulates without side effects"
+            printf '%s' "$GOOD_CONFIG" | "$bin" config explain --config /dev/stdin \
+              | grep -q "simulation: true (no requests issued, no state changed)" \
+              || fail "$bin explain report"
+            log "E2E $bin: diff finds no differences on identical input"
+            printf '%s' "$GOOD_CONFIG" > /tmp/e2e-left.toml
+            cp /tmp/e2e-left.toml /tmp/e2e-right.toml
+            "$bin" config diff /tmp/e2e-left.toml /tmp/e2e-right.toml 2>/dev/null \
+              | grep -q "no differences" || fail "$bin diff identical"
+            log "E2E $bin: apply stores offline and rollback walks back"
+            export EQPROXY_STATE_DIR
+            EQPROXY_STATE_DIR="$(mktemp -d /tmp/e2e-state-XXXXXX)"
+            printf '%s' "$GOOD_CONFIG" > /tmp/e2e-cand.toml
+            "$bin" config apply --config /tmp/e2e-cand.toml > /tmp/e2e-apply.txt \
+              || fail "$bin apply first failed"
+            grep -q "no previous configuration" /tmp/e2e-apply.txt \
+              || fail "$bin apply first"
+            "$bin" config apply --config /tmp/e2e-cand.toml > /tmp/e2e-apply.txt \
+              || fail "$bin apply idempotent failed"
+            grep -q "already applied" /tmp/e2e-apply.txt \
+              || fail "$bin apply idempotent"
+            log "E2E $bin: doctor passes pre-flight on a free port"
+            "$bin" doctor --config /tmp/e2e-cand.toml > /tmp/e2e-doctor.txt \
+              || fail "$bin doctor failed"
+            grep -q "doctor: PASS" /tmp/e2e-doctor.txt \
+              || fail "$bin doctor verdict"
+            grep -q "ok: bind" /tmp/e2e-doctor.txt \
+              || fail "$bin doctor bind probe"
+            if "$bin" config rollback 2>/tmp/e2e-err.txt; then
+              fail "$bin rollback with empty history succeeded"
+            fi
+            grep -q "no previous configuration" /tmp/e2e-err.txt \
+              || fail "$bin rollback empty not explicit"
+            rm -rf "$EQPROXY_STATE_DIR"
+            unset EQPROXY_STATE_DIR
+          }
+          wait_for_port() {
+            local port="$1" label="$2" i
+            for i in $(seq 1 50); do
+              if python3 -c "import socket,sys; socket.create_connection(('127.0.0.1',$port),timeout=1).close()" 2>/dev/null; then
+                return 0
+              fi
+              sleep 0.2
+            done
+            # Logs on timeout, as promised: a silent 60s wait in CI is undiagnosable.
+            {
+              echo "--- diagnostics: $label on 127.0.0.1:$port ---"
+              python3 --version 2>&1
+              echo "connect_ex (0 ok / 61 refused / 60 timeout): $(python3 -c "import socket; s=socket.socket(); s.settimeout(2); print(s.connect_ex(('127.0.0.1',$port)))" 2>&1)"
+              lsof -nP -iTCP:$port 2>&1 || true
+              echo "--- /tmp/e2e-backend.log ---"
+              cat /tmp/e2e-backend.log 2>&1 || true
+            } >&2
+            fail "$label never listened on 127.0.0.1:$port"
+          }
+          verify_live_native() {
+            local bin="$1"
+            local port backend_port
+            read -r port backend_port <<< "$(python3 -c "import socket
+          a=socket.socket(); a.bind(('127.0.0.1',0)); p1=a.getsockname()[1]; a.close()
+          b=socket.socket(); b.bind(('127.0.0.1',0)); p2=b.getsockname()[1]; b.close()
+          print(p1,p2)")"
+            log "E2E $bin: live proxied traffic on 127.0.0.1:$port"
+            # Raw-socket test backend. NOT python3 -m http.server: since
+            # CPython 3.13 the CLI resolves socket.getfqdn() between bind()
+            # and listen(), and that reverse DNS blocks for minutes on
+            # runners with a slow PTR resolver. No name resolution here.
+            python3 -c "
+          import socket
+          body = b'hello-release-e2e\n'
+          resp = (b'HTTP/1.1 200 OK\r\nContent-Length: ' + str(len(body)).encode()
+                  + b'\r\nConnection: close\r\n\r\n' + body)
+          s = socket.socket()
+          s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+          s.bind(('127.0.0.1', $backend_port))
+          s.listen(16)
+          print('listening', flush=True)
+          while True:
+              c, _ = s.accept()
+              try:
+                  c.recv(65536)
+                  c.sendall(resp)
+              finally:
+                  c.close()
+          " >/tmp/e2e-backend.log 2>&1 &
+            local backend_pid=$!
+            wait_for_port "$backend_port" "backend"
+            cat > /tmp/e2e-proxy.toml <<EOF
+          schema_version = 1
+          [listener.web]
+          listen = "127.0.0.1:$port"
+          mode = "http"
+          backend = "api"
+          [backend.api]
+          server = "127.0.0.1:$backend_port"
+          EOF
+            "$bin" run --config /tmp/e2e-proxy.toml >/tmp/e2e-proxy.log 2>&1 &
+            local proxy_pid=$!
+            wait_for_port "$port" "proxy $bin"
+            local body
+            body="$(curl -s "http://127.0.0.1:$port/")" \
+              || fail "$bin live traffic: curl failed"
+            kill "$proxy_pid" "$backend_pid" 2>/dev/null || true
+            [ "$body" = "hello-release-e2e" ] \
+              || fail "$bin live traffic mismatch: $body"
+            log "E2E $bin: live traffic OK"
+          }
+          verify_cli dist/eqproxy-darwin-arm64
+          verify_live_native dist/eqproxy-darwin-arm64
+          log "verifying darwin-amd64 (Rosetta)"
+          arch -x86_64 true 2>/dev/null \
+            || fail "Rosetta missing: darwin-amd64 NOT EXECUTED is not acceptable for release"
+          verify_cli dist/eqproxy-darwin-amd64
+          verify_live_native dist/eqproxy-darwin-amd64
 
       - uses: actions/upload-artifact@v7
         with:
@@ -74,14 +230,98 @@ jobs:
 
       - uses: docker/setup-buildx-action@v4
 
-      - name: Build + verify linux binaries
-        run: ./scripts/release.sh linux
+      - name: Build linux binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            docker buildx build --platform "linux/$arch" --file docker/Dockerfile \
+              --target export --output "type=local,dest=dist/linux-$arch-tmp" .
+            mv "dist/linux-$arch-tmp/eqproxy" "dist/eqproxy-linux-$arch"
+            rm -rf "dist/linux-$arch-tmp"
+          done
+
+      - name: E2E-verify linux binaries
+        run: |
+          set -euo pipefail
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          GOOD_CONFIG='schema_version = 1
+          [listener.web]
+          listen = "127.0.0.1:0"
+          backend = "api"
+          [backend.api]
+          server = "127.0.0.1:9"
+          '
+          fail() { printf 'release FAILED: %s\n' "$*" >&2; exit 1; }
+          log() { printf '==> %s\n' "$*"; }
+          # Live proxied traffic through a container on a static-IP docker
+          # network (backend nginx: dynamic DNS is Phase 4, B16, so
+          # hostnames stay rejected).
+          verify_live_container() {
+            local verdict="$1" proxy_image="$2"; shift 2
+            local net="eqrel-net"
+            log "E2E $proxy_image: live proxied traffic ($verdict)"
+            docker network create --subnet 172.22.0.0/24 "$net" >/dev/null
+            docker run -d --network "$net" --ip 172.22.0.10 --name eqrel-back \
+              nginx:alpine >/dev/null
+            sleep 2
+            cat > /tmp/e2e-proxy.toml <<'EOF'
+          schema_version = 1
+          [listener.web]
+          listen = "0.0.0.0:18082"
+          mode = "http"
+          backend = "api"
+          [backend.api]
+          server = "172.22.0.10:80"
+          EOF
+            docker run -d --network "$net" --ip 172.22.0.20 --name eqrel-prox \
+              -p 18082:18082 "$@" \
+              -v /tmp/e2e-proxy.toml:/c.toml:ro \
+              "$proxy_image" run --config /c.toml >/dev/null
+            sleep 4
+            local code
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/)"
+            docker rm -f eqrel-prox eqrel-back >/dev/null
+            docker network rm "$net" >/dev/null
+            [ "$code" = "200" ] || fail "$proxy_image live traffic HTTP $code ($verdict)"
+            log "E2E $proxy_image: live traffic OK ($verdict)"
+          }
+          for arch in arm64 amd64; do
+            bin="dist/eqproxy-linux-$arch"
+            log "verifying linux-$arch (container)"
+            docker run --rm --platform "linux/$arch" \
+              -v "$PWD/dist:/d:ro" -v /tmp:/tmp \
+              --entrypoint /bin/bash debian:bookworm-slim -c "
+                set -e
+                /d/eqproxy-linux-$arch --version | grep -q 'eqproxy $VER'
+                printf '%s' '$GOOD_CONFIG' | /d/eqproxy-linux-$arch config validate --config /dev/stdin | grep -q 'config OK'
+              " || fail "$bin container CLI verification"
+            verify_live_container "linux/$arch, $bin" debian:bookworm-slim \
+              --platform "linux/$arch" -v "$PWD/dist:/d:ro" --entrypoint /d/eqproxy-linux-$arch
+          done
 
       - name: Install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
 
       - name: Regenerate SBOM
-        run: ./scripts/release.sh sbom
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          cargo cyclonedx --all --format json
+          for crate in eqproxy-core eqproxy-config eqproxy-net eqproxy-cli; do
+            mv "$crate/$crate.cdx.json" "sbom/$crate.cdx.json"
+          done
+          # Machine layout must never ship: strip the absolute build path
+          # from the `path+file://` bom-refs (audit 2026-10-16: /Volumes/...
+          # in published SBOMs). Portable sed (-i.bak works on BSD and GNU),
+          # then drop the backups.
+          sed -i.bak -E 's|path[+]file://[^"#]*/(eqproxy-[^"/#]+)|path+file://\1|g' \
+            sbom/*.cdx.json
+          rm -f sbom/*.cdx.json.bak
+          if grep -q -F 'path+file:///' sbom/*.cdx.json; then
+            echo "SBOM still contains absolute paths after sanitization"
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@v7
         with:
@@ -110,18 +350,33 @@ jobs:
 
       - name: Assemble dist/ and write SHA256SUMS (only after both builds verified)
         run: |
+          set -euo pipefail
           mkdir -p dist sbom
           find collect -type f \( -name 'eqproxy-darwin-*' -o -name 'eqproxy-linux-*' \) -exec cp {} dist/ \;
           find collect -type f -name '*.cdx.json' -exec cp {} sbom/ \;
-          ./scripts/release.sh sums
+          for bin in eqproxy-darwin-amd64 eqproxy-darwin-arm64 eqproxy-linux-amd64 eqproxy-linux-arm64; do
+            test -f "dist/$bin" || { echo "missing $bin in dist/ (builds did not produce it)"; exit 1; }
+          done
+          echo "==> writing SHA256SUMS (only after every artifact passed)"
+          (cd dist && if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+              eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt
+          else
+            shasum -a 256 eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+              eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt
+          fi)
+          cat dist/SHA256SUMS.txt
 
       - name: Create GitHub release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Prerelease tags (a `-` suffix) publish as GitHub prereleases.
+          EXTRA=""
+          case "$GITHUB_REF_NAME" in *-*) EXTRA="--prerelease" ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json \
-            --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md
+            --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md $EXTRA
 
   image:
     name: Multi-arch image (build + verify + push)
@@ -149,17 +404,69 @@ jobs:
             --tag eqproxy-release-verify:ci --load .
 
       - name: Verify image artifact (version + config gate + live traffic)
-        run: ./scripts/release.sh verify-image eqproxy-release-verify:ci
+        run: |
+          set -euo pipefail
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          GOOD_CONFIG='schema_version = 1
+          [listener.web]
+          listen = "127.0.0.1:0"
+          backend = "api"
+          [backend.api]
+          server = "127.0.0.1:9"
+          '
+          fail() { printf 'release FAILED: %s\n' "$*" >&2; exit 1; }
+          log() { printf '==> %s\n' "$*"; }
+          verify_live_container() {
+            local verdict="$1" proxy_image="$2"; shift 2
+            local net="eqrel-net"
+            log "E2E $proxy_image: live proxied traffic ($verdict)"
+            docker network create --subnet 172.22.0.0/24 "$net" >/dev/null
+            docker run -d --network "$net" --ip 172.22.0.10 --name eqrel-back \
+              nginx:alpine >/dev/null
+            sleep 2
+            cat > /tmp/e2e-proxy.toml <<'EOF'
+          schema_version = 1
+          [listener.web]
+          listen = "0.0.0.0:18082"
+          mode = "http"
+          backend = "api"
+          [backend.api]
+          server = "172.22.0.10:80"
+          EOF
+            docker run -d --network "$net" --ip 172.22.0.20 --name eqrel-prox \
+              -p 18082:18082 "$@" \
+              -v /tmp/e2e-proxy.toml:/c.toml:ro \
+              "$proxy_image" run --config /c.toml >/dev/null
+            sleep 4
+            local code
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18082/)"
+            docker rm -f eqrel-prox eqrel-back >/dev/null
+            docker network rm "$net" >/dev/null
+            [ "$code" = "200" ] || fail "$proxy_image live traffic HTTP $code ($verdict)"
+            log "E2E $proxy_image: live traffic OK ($verdict)"
+          }
+          image=eqproxy-release-verify:ci
+          log "E2E $image: --version"
+          docker run --rm "$image" --version | grep -q "eqproxy $VER" \
+            || fail "$image reports wrong version"
+          log "E2E $image: validate accepts good config"
+          printf '%s' "$GOOD_CONFIG" | docker run --rm -i "$image" \
+            config validate --config /dev/stdin \
+            | grep -q "config OK: 1 listener(s), 1 backend(s)" \
+            || fail "$image validate happy path"
+          verify_live_container "image artifact" "$image"
 
       - name: Build and push multi-arch image
         if: github.ref_type == 'tag'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          # `:latest` only tracks final releases: a prerelease tag (with a
+          # `-` suffix) never re-points it.
+          TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
+          case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
           docker buildx build --file docker/Dockerfile \
             --platform linux/amd64,linux/arm64 \
-            --tag "ghcr.io/exyonq/eqproxy:$VERSION" \
-            --tag ghcr.io/exyonq/eqproxy:latest \
-            --push .
+            $TAGS --push .
 
       # Mirror the exact verified manifest (same digests) to Docker Hub.
       # Secrets DOCKERHUB_USERNAME/DOCKERHUB_TOKEN come from the maintainer's
@@ -175,17 +482,16 @@ jobs:
         if: github.ref_type == 'tag'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          docker buildx imagetools create \
-            --tag "exyonq/eqproxy:$VERSION" \
-            --tag exyonq/eqproxy:latest \
-            "ghcr.io/exyonq/eqproxy:$VERSION"
+          TAGS="--tag exyonq/eqproxy:$VERSION"
+          case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag exyonq/eqproxy:latest" ;; esac
+          docker buildx imagetools create $TAGS "ghcr.io/exyonq/eqproxy:$VERSION"
 
       - name: Build multi-arch image (dry run, no push)
         if: github.ref_type != 'tag'
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
+          TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
+          case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
           docker buildx build --file docker/Dockerfile \
             --platform linux/amd64,linux/arm64 \
-            --tag "ghcr.io/exyonq/eqproxy:$VERSION" \
-            --tag ghcr.io/exyonq/eqproxy:latest \
-            .
+            $TAGS .

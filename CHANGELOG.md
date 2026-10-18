@@ -3,9 +3,49 @@
 Language: **English**. Format follows "Keep a Changelog" (Added / Changed /
 Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
-## [Unreleased]
+## [v0.6.0-alpha] — 2026-10-19
 
-Nothing yet. Next: v0.6 «Reglas, enrutado y tráfico».
+First slice of v0.6 «Reglas, enrutado y tráfico»: typed routing rules.
+Published as a **prerelease** (v0.6 stays open: differential tests and
+the remaining version gates are pending). The `:latest` image tags keep
+pointing at v0.5.0 until a final release.
+
+### Added
+
+- Typed routing rules per listener (B-H3/B-H4, first slice):
+  `[[listener.*.rules]]` evaluates ordered, first-match-wins conditions
+  per request — `host`/`host_prefix`/`host_regex` (case-insensitive,
+  compared port-free), `path`/`path_prefix`/`path_regex` (literal,
+  case-sensitive, no normalization: `/v1` also matches `/v10`),
+  `methods` (case-sensitive tokens), `headers` (exact byte-for-byte /
+  unanchored regex / presence, all ANDed) and `ip` (effective source in
+  one of the CIDR blocks) — and routes the match to `use_backend`; the
+  listener's `backend` remains the fallback when no rule matches. The
+  semantics are defined once in `eqproxy-core::rules` and pinned by
+  property tests and fuzzing (Q8: defined once, never silently changed).
+- Actionable rule validation (Q1/CE1): a bad rule is rejected naming its
+  field, the cause and a concrete valid example
+  (`listener.web.rules[0].host_regex`); at most one host and one path
+  variant per rule, and at least one condition is required (the
+  catch-all case is the listener's default backend, not a rule).
+- `config explain` traces routing per rule (H4): every rule with why it
+  matched or not (`rule[0] "api": no match (host: expected …)`), then
+  `route_decision` naming the chosen backend — never a bare backend
+  without the path to it.
+
+### Changed
+
+- HTTP listeners route each request through the listener's rule list
+  before falling back to the default backend (TCP mode is unaffected).
+- Repository layout (owner decision 2026-10-19): `scripts/` (release and
+  benchmark harnesses) is maintainer-local and no longer published; the
+  release pipeline is self-contained in `.github/workflows/release.yml`
+  (it absorbed `scripts/release.sh`), so CI builds and verifies every
+  artifact without the folder.
+
+Verified against the built binary (E2E: multi-backend routing, rule
+order, fallback and negative cases) with a property-test corpus and a
+live fuzz target for the evaluator (26,834 executions, 0 crashes).
 
 ## [v0.5.0] — 2026-10-18
 

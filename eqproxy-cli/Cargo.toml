@@ -14,9 +14,9 @@ path = "src/main.rs"
 clap = { workspace = true }
 rlimit = { workspace = true }
 tokio = { workspace = true }
-eqproxy-core = { path = "../eqproxy-core", version = "0.5.0" }
-eqproxy-config = { path = "../eqproxy-config", version = "0.5.0" }
-eqproxy-net = { path = "../eqproxy-net", version = "0.5.0" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.6.0-alpha" }
+eqproxy-config = { path = "../eqproxy-config", version = "0.6.0-alpha" }
+eqproxy-net = { path = "../eqproxy-net", version = "0.6.0-alpha" }
 
 [lints]
 workspace = true
