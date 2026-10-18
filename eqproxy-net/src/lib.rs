@@ -20,6 +20,6 @@ pub use health::HealthCheck;
 pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, MAX_IDLE_PER_SERVER, Pool};
 pub use proxy::{
     BoundProxy, OutboundError, ProxyError, ProxyMode, READ_BUF, ResolvedBackend, ResolvedListener,
-    SwapSummary, bind, connect_backend,
+    ResolvedRoute, SwapSummary, bind, connect_backend,
 };
 pub use proxy_proto::ProxyProtocolMode;

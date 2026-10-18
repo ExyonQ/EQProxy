@@ -1,0 +1,1 @@
+regex;;;;;\.json$;^api-[0-9]+\.;GET;x-trace~^req-;;;10.0.0.0/8;x-trace;req-42;GET;api-7.example.com;/data.json

@@ -1,0 +1,1 @@
+api;api.example.com;;;;/v1/;GET,POST;;;;;;x-tenant;acme;GET;api.example.com;/v1/users

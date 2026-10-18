@@ -6,8 +6,10 @@
 
 pub mod expectation;
 pub mod metrics;
+pub mod rules;
 pub mod shutdown;
 
 pub use expectation::{IpAllowlist, IpBlock, StatusExpectation};
 pub use metrics::{Metrics, MetricsSnapshot};
+pub use rules::{HeaderSpec, RequestFacts, Rule, RuleError, RuleSpec};
 pub use shutdown::{Shutdown, ShutdownHandle};

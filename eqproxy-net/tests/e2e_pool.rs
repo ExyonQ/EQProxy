@@ -28,6 +28,10 @@ enum OriginMode {
     GarbageOnce,
     /// Always `200 OK` with `Connection: close`.
     CloseAlways,
+    /// Clean `200 OK` without a close header, but the socket closes shortly
+    /// after — what a real backend does when the *request* carried
+    /// `Connection: close` (forwarded verbatim by the proxy).
+    CloseAfterFlush,
 }
 
 struct CountingOrigin {
@@ -70,6 +74,9 @@ async fn start_origin(mode: OriginMode) -> CountingOrigin {
                         OriginMode::Clean => b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
                         OriginMode::GarbageOnce if n == 0 => b"GARBAGE-NOT-HTTP\r\n\r\n",
                         OriginMode::GarbageOnce => b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
+                        OriginMode::CloseAfterFlush => {
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+                        }
                         OriginMode::CloseAlways => {
                             b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         }
@@ -78,6 +85,13 @@ async fn start_origin(mode: OriginMode) -> CountingOrigin {
                         return;
                     }
                     if mode == OriginMode::CloseAlways {
+                        return;
+                    }
+                    if mode == OriginMode::CloseAfterFlush {
+                        // Delayed close: the proxy's post-exchange read sees
+                        // no FIN yet, so only an explicit no-reuse decision
+                        // keeps this connection out of the pool.
+                        tokio::time::sleep(Duration::from_millis(250)).await;
                         return;
                     }
                     let _ = head_end;
@@ -245,6 +259,55 @@ async fn server_close_is_not_reused() {
 
     assert_eq!(origin.accepts.load(Ordering::SeqCst), 2);
     let snap = metrics.snapshot();
+    assert_eq!(snap.backend_connections_reused, 0);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("shutdown")
+        .expect("serve");
+}
+
+/// A request that carries `Connection: close` is forwarded to the backend
+/// verbatim, so the backend closes even when its response says nothing
+/// about it. Pooling that connection would hand the next exchange a dead
+/// socket (observed as a spurious 502): reuse requires *both* sides to
+/// keep-alive.
+#[cfg_attr(
+    miri,
+    ignore = "requires TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn close_request_is_never_pooled() {
+    let origin = start_origin(OriginMode::CloseAfterFlush).await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = listener_cfg("127.0.0.1:0".parse().expect("addr"), origin.addr);
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    // Two `Connection: close` requests, one exchange each. Both must be
+    // answered in full; the second must dial fresh instead of reusing the
+    // first's (dying) connection.
+    for _ in 0..2 {
+        let mut client = connect(proxy_addr).await;
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write");
+        let mut response = Vec::new();
+        tokio::time::timeout(WAIT, client.read_to_end(&mut response))
+            .await
+            .expect("response on time")
+            .expect("read");
+        assert_eq!(
+            String::from_utf8_lossy(&response),
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+            "a close-request exchange must be answered, never 502"
+        );
+    }
+
+    assert_eq!(origin.accepts.load(Ordering::SeqCst), 2);
+    let snap = metrics.snapshot();
+    assert_eq!(snap.backend_connections_opened, 2);
     assert_eq!(snap.backend_connections_reused, 0);
 
     handle.trigger();

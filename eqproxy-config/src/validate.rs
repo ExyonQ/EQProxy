@@ -5,12 +5,13 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use eqproxy_core::expectation::{IpBlock, RegexMatcher, StatusExpectation};
+use eqproxy_core::rules::Rule;
 
 use crate::error::{ConfigError, Location};
 use crate::find_line;
 use crate::schema::{
     Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_LOCAL_RESPONSE_BYTES, MAX_QUEUE,
-    MAX_RETRIES, MAX_SECTIONS, MAX_SERVER_WEIGHT, SCHEMA_VERSION,
+    MAX_RETRIES, MAX_RULES, MAX_SECTIONS, MAX_SERVER_WEIGHT, SCHEMA_VERSION,
 };
 
 /// Result of validating a full configuration.
@@ -230,6 +231,59 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     "mode = \"http\" or remove local_response".to_owned(),
                     &section,
                 );
+            }
+        }
+
+        // Routing rules (v0.6, B-H3/B-H4): http only, bounded count, sound
+        // references and a compilable matcher (the gate shares the runtime
+        // grammar via `Rule::compile`).
+        if !listener.rules.is_empty() {
+            if listener.mode != ListenerMode::Http {
+                err(
+                    field("rules"),
+                    "routing rules are only meaningful in mode = \"http\"".to_owned(),
+                    format!("mode = \"http\" or remove [[listener.{name}.rules]]"),
+                    &section,
+                );
+            }
+            if listener.rules.len() > MAX_RULES {
+                err(
+                    field("rules"),
+                    format!(
+                        "too many rules: {} (maximum {MAX_RULES} per listener)",
+                        listener.rules.len()
+                    ),
+                    format!("reduce to {MAX_RULES} [[listener.{name}.rules]] tables"),
+                    &section,
+                );
+            }
+            for (i, rule) in listener.rules.iter().enumerate() {
+                let rule_field = |suffix: &str| {
+                    if suffix.is_empty() {
+                        field(&format!("rules[{i}]"))
+                    } else {
+                        field(&format!("rules[{i}].{suffix}"))
+                    }
+                };
+                if !config.backend.contains_key(&rule.use_backend) {
+                    err(
+                        rule_field("use_backend"),
+                        format!("backend \"{}\" does not exist", rule.use_backend),
+                        format!(
+                            "use_backend = \"{}\" requires a [backend.{}] section",
+                            rule.use_backend, rule.use_backend
+                        ),
+                        &section,
+                    );
+                }
+                if let Err(cause) = Rule::compile(&rule.to_spec(i)) {
+                    let example = if cause.example.is_empty() {
+                        format!("rule \"{}\"", rule.name.clone().unwrap_or_default())
+                    } else {
+                        cause.example
+                    };
+                    err(rule_field(&cause.field), cause.cause, example, &section);
+                }
             }
         }
 
@@ -519,6 +573,7 @@ mod tests {
                     proxy_allow: Vec::new(),
                     forwarded_headers: ForwardedHeaders::default(),
                     local_response: None,
+                    rules: Vec::new(),
                 },
             );
         }

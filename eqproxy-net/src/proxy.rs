@@ -152,6 +152,15 @@ impl ResolvedBackend {
     }
 }
 
+/// One compiled routing rule with its destination backend (v0.6, B-H4).
+#[derive(Debug, Clone)]
+pub struct ResolvedRoute {
+    /// Compiled match conditions (ordered evaluation, first match wins).
+    pub rule: eqproxy_core::rules::Rule,
+    /// Backend that receives the matching requests.
+    pub backend: Arc<ResolvedBackend>,
+}
+
 /// Resolved listener (already-validated config: parsed addresses, sound refs).
 ///
 /// `#[non_exhaustive]`: adding fields is not a breaking change for
@@ -162,8 +171,11 @@ pub struct ResolvedListener {
     pub name: String,
     pub listen: SocketAddr,
     pub backend_name: String,
-    /// Destination backend (servers + balancing + TLS + PROXY).
+    /// Default backend (servers + balancing + TLS + PROXY): the fallback
+    /// when no rule matches (and the only backend in `tcp` mode).
     pub backend: Arc<ResolvedBackend>,
+    /// Ordered routing rules (`http` only, B-H3/B-H4): first match wins.
+    pub routes: Vec<ResolvedRoute>,
     pub mode: ProxyMode,
     pub maxconn: u32,
     pub connect_timeout: Duration,
@@ -208,6 +220,7 @@ impl ResolvedListener {
             name: name.into(),
             listen,
             backend: Arc::new(ResolvedBackend::single(backend_name.clone(), server)),
+            routes: Vec::new(),
             backend_name,
             mode,
             maxconn,
@@ -228,6 +241,32 @@ impl ResolvedListener {
         self.backend_name = backend.name.clone();
         self.backend = backend;
         self
+    }
+
+    /// Installs the ordered routing rules (`http` only, B-H3/B-H4).
+    #[must_use]
+    pub fn with_routes(mut self, routes: Vec<ResolvedRoute>) -> Self {
+        self.routes = routes;
+        self
+    }
+
+    /// Backend for one request: first matching rule wins, the default
+    /// backend is the fallback (per-request: keep-alive connections may
+    /// route each exchange to a different backend).
+    #[must_use]
+    pub fn select_backend(
+        &self,
+        facts: &eqproxy_core::rules::RequestFacts<'_>,
+    ) -> &Arc<ResolvedBackend> {
+        self.routes
+            .iter()
+            .find(|route| route.rule.matches(facts))
+            .map_or(&self.backend, |route| &route.backend)
+    }
+
+    /// Every distinct backend this listener can route to (default + rules).
+    pub fn all_backends(&self) -> impl Iterator<Item = &Arc<ResolvedBackend>> {
+        std::iter::once(&self.backend).chain(self.routes.iter().map(|route| &route.backend))
     }
 
     /// Enables TLS termination on the listener (A11).
@@ -617,17 +656,20 @@ impl BoundProxy {
         let mut seen: Vec<Arc<Balancer>> = Vec::new();
         for entry in &self.entries {
             let cfg = current_cfg(&entry.cfg);
-            let backend = &cfg.backend;
-            let Some(check) = backend.health_check.clone() else {
-                continue;
-            };
-            let balancer = Arc::clone(&backend.balancer);
-            if seen.iter().any(|s| Arc::ptr_eq(s, &balancer)) {
-                continue;
+            // Every backend the listener can route to (default + rule
+            // targets): a rule-referenced backend keeps its checks.
+            for backend in cfg.all_backends() {
+                let Some(check) = backend.health_check.clone() else {
+                    continue;
+                };
+                let balancer = Arc::clone(&backend.balancer);
+                if seen.iter().any(|s| Arc::ptr_eq(s, &balancer)) {
+                    continue;
+                }
+                seen.push(Arc::clone(&balancer));
+                self.health_tasks
+                    .spawn(health::run(balancer, check, shutdown.clone()));
             }
-            seen.push(Arc::clone(&balancer));
-            self.health_tasks
-                .spawn(health::run(balancer, check, shutdown.clone()));
         }
     }
 
@@ -779,10 +821,9 @@ impl Drop for ConnectionGuard {
 /// tried. Counting `no_available_server` is the caller's job (once per
 /// rejected exchange, never per queue poll).
 fn select_server(
-    cfg: &ResolvedListener,
+    backend: &ResolvedBackend,
     exclude: &[SocketAddr],
 ) -> Result<SocketAddr, OutboundError> {
-    let backend = &cfg.backend;
     if exclude.is_empty() {
         backend.balancer.pick()
     } else {
@@ -797,8 +838,7 @@ fn select_server(
 /// backend sets `passive = true` AND an active checker exists that can bring
 /// the server back (its `rise` transition clears the mark) — without a
 /// checker a passive DOWN would be permanent.
-fn report_passive(cfg: &ResolvedListener, addr: SocketAddr) {
-    let backend = &cfg.backend;
+fn report_passive(backend: &ResolvedBackend, addr: SocketAddr) {
     if backend
         .health_check
         .as_ref()
@@ -821,13 +861,13 @@ fn report_passive(cfg: &ResolvedListener, addr: SocketAddr) {
 /// round-robin turn of another server and silently starve it.
 async fn dial_with_retries(
     cfg: &ResolvedListener,
+    backend: &ResolvedBackend,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
     ctx: RetryContext,
     use_pool: bool,
 ) -> Result<BackendConn, OutboundError> {
-    let backend = &cfg.backend;
     let max_attempts = if backend.retries.allows(ctx.idempotent) {
         backend.retries.max
     } else {
@@ -836,7 +876,7 @@ async fn dial_with_retries(
     let mut tried: Vec<SocketAddr> = Vec::new();
     loop {
         // --- Server selection (B11 active state; B-H7 exclusion) ---
-        let addr = match select_server(cfg, &tried) {
+        let addr = match select_server(backend, &tried) {
             Ok(addr) => addr,
             Err(OutboundError::NoServer) if !tried.is_empty() => {
                 // Every candidate already failed this exchange: the class is
@@ -857,7 +897,7 @@ async fn dial_with_retries(
                 let result = tokio::time::timeout_at(deadline, async {
                     loop {
                         tokio::time::sleep(Duration::from_millis(50)).await;
-                        if let Ok(addr) = select_server(cfg, &[]) {
+                        if let Ok(addr) = select_server(backend, &[]) {
                             return addr;
                         }
                     }
@@ -891,7 +931,7 @@ async fn dial_with_retries(
         }
 
         // --- Dial the chosen server ---
-        match connect_backend_to(cfg, addr, peer, local, metrics).await {
+        match connect_backend_to(cfg, backend, addr, peer, local, metrics).await {
             Ok((read, write)) => {
                 metrics
                     .backend_connections_opened
@@ -906,7 +946,7 @@ async fn dial_with_retries(
             Err(OutboundError::Connect) => {
                 tried.push(addr);
                 // Passive mark (when safe to restart) + exclusion.
-                report_passive(cfg, addr);
+                report_passive(backend, addr);
                 if tried.len() as u32 > max_attempts {
                     // Retry budget spent: final error.
                     return Err(OutboundError::Connect);
@@ -926,9 +966,11 @@ pub async fn connect_backend(
     metrics: &Metrics,
 ) -> Result<(BoxRead, BoxWrite), OutboundError> {
     // TCP has no replay-safety knowledge: conservative non-idempotent,
-    // and no pooling (streams have no message boundaries).
+    // and no pooling (streams have no message boundaries). TCP has no
+    // routing rules: always the default backend.
     let conn = dial_with_retries(
         cfg,
+        &cfg.backend,
         peer,
         local,
         metrics,
@@ -958,6 +1000,7 @@ pub struct BackendConn {
 /// `ctx` decides retry safety (idempotent unless explicit opt-in).
 pub async fn checkout_or_connect(
     cfg: &ResolvedListener,
+    backend: &ResolvedBackend,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
@@ -965,7 +1008,7 @@ pub async fn checkout_or_connect(
 ) -> Result<BackendConn, OutboundError> {
     // Pool checkout runs on the very pick that would be dialed (inside
     // `dial_with_retries`): one request, one pick, one connection (B-H7).
-    dial_with_retries(cfg, peer, local, metrics, ctx, true).await
+    dial_with_retries(cfg, backend, peer, local, metrics, ctx, true).await
 }
 
 /// Variant of [`connect_backend`] against an already-chosen server (the pool
@@ -975,13 +1018,12 @@ pub async fn checkout_or_connect(
 /// connections already carry it from their first use.
 async fn connect_backend_to(
     cfg: &ResolvedListener,
+    backend: &ResolvedBackend,
     addr: SocketAddr,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
 ) -> Result<(BoxRead, BoxWrite), OutboundError> {
-    let backend = &cfg.backend;
-
     let socket = match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {

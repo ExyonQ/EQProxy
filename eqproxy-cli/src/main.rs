@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use eqproxy_config::error::ConfigError;
 use eqproxy_config::schema::Config;
 use eqproxy_config::validate::{self, CheckResult};
-use eqproxy_core::{Metrics, shutdown};
+use eqproxy_core::{Metrics, RequestFacts, shutdown};
 use eqproxy_net::health::HealthCheck;
 use eqproxy_net::tls::{self, TlsVersion};
 use eqproxy_net::{
@@ -84,6 +84,13 @@ enum ConfigCommand {
         /// Simulated request path
         #[arg(long, default_value = "/")]
         path: String,
+        /// Simulated client IP for `ip` rule conditions
+        #[arg(long, default_value = "127.0.0.1")]
+        client_ip: String,
+        /// Simulated request header for `headers` rule conditions
+        /// (repeatable, "name=value")
+        #[arg(long = "header", value_name = "NAME=VALUE")]
+        headers: Vec<String>,
     },
     /// Compares two configurations (Phase 3): exit 0 with the report on
     /// stdout (verdict line first); exit 1 when either side fails to load
@@ -142,7 +149,17 @@ fn config_command(command: ConfigCommand) -> u8 {
             method,
             host,
             path,
-        } => explain(&config, listener.as_deref(), &method, &host, &path),
+            client_ip,
+            headers,
+        } => explain(
+            &config,
+            listener.as_deref(),
+            &method,
+            &host,
+            &path,
+            &client_ip,
+            &headers,
+        ),
         ConfigCommand::Diff { left, right } => diff(&left, &right),
         ConfigCommand::Plan { config } => plan(&config),
         ConfigCommand::Apply { config } => apply(&config),
@@ -510,7 +527,34 @@ fn health_summary(hc: Option<&eqproxy_config::schema::HealthCheckConfig>) -> Str
 /// `--listener` when several exist), then reports the listener, the backend
 /// with its servers, and the first weighted round-robin pick computed on a
 /// throwaway balancer. No sockets are opened and no shared state is touched.
-fn explain(path: &Path, want: Option<&str>, method: &str, host: &str, req_path: &str) -> u8 {
+fn explain(
+    path: &Path,
+    want: Option<&str>,
+    method: &str,
+    host: &str,
+    req_path: &str,
+    client_ip: &str,
+    raw_headers: &[String],
+) -> u8 {
+    let client_ip: std::net::IpAddr = match client_ip.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            eprintln!(
+                "error: --client-ip \"{client_ip}\" is not a valid IP address; example: --client-ip 10.1.2.3"
+            );
+            return 1;
+        }
+    };
+    let mut headers = Vec::with_capacity(raw_headers.len());
+    for raw in raw_headers {
+        let Some((name, value)) = raw.split_once('=') else {
+            eprintln!(
+                "error: --header \"{raw}\" is not name=value; example: --header x-tenant=acme"
+            );
+            return 1;
+        };
+        headers.push((name.to_owned(), value.to_owned()));
+    }
     let (config, result) = match load_and_check(path) {
         Ok(loaded) => loaded,
         Err(err) => {
@@ -543,7 +587,9 @@ fn explain(path: &Path, want: Option<&str>, method: &str, host: &str, req_path: 
     };
     println!(
         "{}",
-        explain_report(&config, listener, method, host, req_path)
+        explain_report(
+            &config, listener, method, host, req_path, &headers, client_ip
+        )
     );
     0
 }
@@ -1258,22 +1304,14 @@ fn explain_report(
     method: &str,
     host: &str,
     req_path: &str,
+    headers: &[(String, String)],
+    client_ip: std::net::IpAddr,
 ) -> String {
     use std::fmt::Write as _;
-    let backend = &listener.backend;
     let mode = match listener.mode {
         ProxyMode::Tcp => "tcp",
         ProxyMode::Http => "http",
     };
-    let (fall, rise) = config
-        .backend
-        .get(&listener.backend_name)
-        .and_then(|b| b.health_check.as_ref())
-        .map(|hc| (hc.fall, hc.rise))
-        .unwrap_or((3, 2));
-    // Throwaway balancer: the simulated pick advances no shared state.
-    let sim = eqproxy_net::Balancer::new(backend.servers.clone(), fall, rise);
-    let pick = sim.pick();
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -1293,6 +1331,55 @@ fn explain_report(
             "no"
         },
     );
+    // Routing (B-H3/B-H4, H4): every rule and why it matched or not, then
+    // the decision — never a bare backend without the path to it.
+    let facts = RequestFacts {
+        method,
+        host,
+        path: req_path,
+        headers,
+        peer: client_ip,
+    };
+    if !listener.routes.is_empty() {
+        let _ = writeln!(out, "rules: {} (first match wins)", listener.routes.len());
+    }
+    let mut chosen: Option<&ResolvedBackend> = None;
+    for (i, route) in listener.routes.iter().enumerate() {
+        let label = format!("rule[{i}] \"{}\"", route.rule.name);
+        match route.rule.explain(&facts) {
+            Ok(()) => {
+                let _ = writeln!(
+                    out,
+                    "{label}: match -> use_backend \"{}\"",
+                    route.backend.name
+                );
+                if chosen.is_none() {
+                    chosen = Some(&route.backend);
+                }
+            }
+            Err(reason) => {
+                let _ = writeln!(out, "{label}: no match ({reason})");
+            }
+        }
+    }
+    let backend: &ResolvedBackend = chosen.unwrap_or(&listener.backend);
+    let _ = writeln!(
+        out,
+        "route_decision: {}",
+        chosen.map_or_else(
+            || format!("no rule matched -> default backend \"{}\"", backend.name),
+            |_| format!("first matching rule -> backend \"{}\"", backend.name)
+        )
+    );
+    let (fall, rise) = config
+        .backend
+        .get(&backend.name)
+        .and_then(|b| b.health_check.as_ref())
+        .map(|hc| (hc.fall, hc.rise))
+        .unwrap_or((3, 2));
+    // Throwaway balancer: the simulated pick advances no shared state.
+    let sim = eqproxy_net::Balancer::new(backend.servers.clone(), fall, rise);
+    let pick = sim.pick();
     let proxy_protocol = match backend.proxy_protocol {
         ProxyProtocolMode::None => "none",
         ProxyProtocolMode::V1 => "v1",
@@ -1530,6 +1617,26 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                 listener.server_header_timeout,
             )
             .with_backend(Arc::clone(backend));
+            // Routing rules (B-H3/B-H4): compiled once here (the gate and
+            // the runtime share the matcher grammar), order preserved.
+            let mut routes = Vec::with_capacity(listener.rules.len());
+            for (i, rule) in listener.rules.iter().enumerate() {
+                let compiled =
+                    eqproxy_core::rules::Rule::compile(&rule.to_spec(i)).map_err(|why| {
+                        format!("listener.{name}.rules[{i}].{}: {}", why.field, why.cause)
+                    })?;
+                let target = backends.get(&rule.use_backend).ok_or_else(|| {
+                    format!(
+                        "listener.{name}.rules[{i}].use_backend does not exist: \"{}\"",
+                        rule.use_backend
+                    )
+                })?;
+                routes.push(eqproxy_net::ResolvedRoute {
+                    rule: compiled,
+                    backend: Arc::clone(target),
+                });
+            }
+            resolved = resolved.with_routes(routes);
             // PROXY v1 reception (B-H9/B-E10): strict front door with
             // allowlisted origins only.
             if listener.proxy_receive {
@@ -1823,6 +1930,8 @@ mod tests {
         eqproxy_config::parse_str(source, Path::new("test.toml")).expect("test config")
     }
 
+    const CLIENT_IP: std::net::IpAddr = std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+
     #[test]
     fn diff_report_is_empty_for_identical_configs() {
         let source = "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9000\"\n";
@@ -1872,7 +1981,15 @@ mod tests {
     #[test]
     fn explain_report_labels_simulation_and_decision() {
         let (config, listener) = two_server_listener();
-        let report = explain_report(&config, &listener, "GET", "example.com", "/a");
+        let report = explain_report(
+            &config,
+            &listener,
+            "GET",
+            "example.com",
+            "/a",
+            &[],
+            CLIENT_IP,
+        );
         for expected in [
             "simulation: true",
             "request: GET /a host=example.com",
@@ -1907,7 +2024,15 @@ mod tests {
             content_type: "text/plain".to_owned(),
             body: "back soon".to_owned(),
         });
-        let report = explain_report(&config, &listener, "GET", "example.com", "/a");
+        let report = explain_report(
+            &config,
+            &listener,
+            "GET",
+            "example.com",
+            "/a",
+            &[],
+            CLIENT_IP,
+        );
         for expected in [
             "timeouts: connect=5s idle=60s client_header=5s server_header=30s",
             "timeout_on_fire: connect=502 after 5s; client_header=408(first exchange)/close after 5s; server_header=504 after 30s; idle=close after 60s",

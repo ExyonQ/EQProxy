@@ -98,6 +98,12 @@ pub struct RequestHead {
     /// The client asked for a `100 Continue` before the body (HTTP/1.1
     /// only; ignored in HTTP/1.0 per RFC 9112 §10.1.2).
     pub expect_continue: bool,
+    /// Host header value as received (may carry `:port`; empty when
+    /// absent). Kept for routing rules (B-H3).
+    pub host: String,
+    /// All request headers (names lowercased by [`parse_header_line`]).
+    /// Kept for routing rules (B-H3).
+    pub headers: Vec<(String, String)>,
 }
 
 /// Parsed and validated response.
@@ -388,6 +394,10 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
     }
     let expect_continue = expect_continue && version >= 11;
 
+    let host = headers
+        .iter()
+        .find(|(name, _)| name == "host")
+        .map_or_else(String::new, |(_, value)| value.clone());
     Ok(RequestHead {
         method: String::from_utf8_lossy(method).into_owned(),
         target: String::from_utf8_lossy(target).into_owned(),
@@ -395,6 +405,8 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         framing,
         wants_close,
         expect_continue,
+        host,
+        headers,
     })
 }
 
@@ -914,11 +926,21 @@ pub async fn serve_http<CR, CW>(
     let mut client_read = BufReader::new(client_read);
     let mut client_write = client_write;
     let mut first_exchange = true;
+    // Bytes the client already sent beyond the current exchange (HTTP/1.1
+    // pipelining): carried across loop iterations instead of dropped with
+    // the exchange scope, so a queued request is never lost.
+    let mut client_carry: Vec<u8> = Vec::new();
 
     loop {
         // --- Client phase: request head ---
-        let (head_bytes, carry) = match read_head(&mut client_read, cfg.client_header_timeout).await
-        {
+        // Prefixed serves the previous exchange's leftover before the
+        // socket (the same shape the server phase uses for the carry).
+        let mut source = Prefixed {
+            prefix: std::mem::take(&mut client_carry),
+            pos: 0,
+            inner: &mut client_read,
+        };
+        let (head_bytes, rest) = match read_head(&mut source, cfg.client_header_timeout).await {
             Ok(pair) => pair,
             Err(HeadError::Eof) => return,
             Err(HeadError::Timeout) => {
@@ -938,6 +960,11 @@ pub async fn serve_http<CR, CW>(
             Err(HeadError::Io) => return,
         };
         first_exchange = false;
+        // Exact stream remainder after the head, in order: bytes read past
+        // the terminator plus any prefix bytes read_head never consumed.
+        let unread_prefix = source.prefix.split_off(source.pos);
+        let mut carry = rest;
+        carry.extend(unread_prefix);
 
         let request = match parse_request_head(&head_bytes) {
             Ok(request) => request,
@@ -950,6 +977,19 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
+        // --- Route the request (B-H3/B-H4): first matching rule wins,
+        // the listener's default backend is the fallback. Selection runs
+        // per exchange: a keep-alive connection may route each request to
+        // a different backend.
+        let facts = eqproxy_core::rules::RequestFacts {
+            method: &request.method,
+            host: &request.host,
+            path: eqproxy_core::rules::path_of(&request.target),
+            headers: &request.headers,
+            peer: peer.ip(),
+        };
+        let backend = cfg.select_backend(&facts);
+
         // --- Backend: reuse from the pool (A16) or dial again ---
         // Retry safety (B-H7): only idempotent requests are replayed
         // unless the backend opts in explicitly.
@@ -958,7 +998,7 @@ pub async fn serve_http<CR, CW>(
         } else {
             RetryContext::non_idempotent()
         };
-        let conn = match checkout_or_connect(cfg, peer, local, &metrics, ctx).await {
+        let conn = match checkout_or_connect(cfg, backend, peer, local, &metrics, ctx).await {
             Ok(conn) => conn,
             Err(OutboundError::NoServer) => {
                 // All servers down/drained (B11): explicit 503 (C9 custom).
@@ -1058,6 +1098,9 @@ pub async fn serve_http<CR, CW>(
             // A19: client abort → the backend is dropped on exit.
             Err(CopyError::Io) => return,
         }
+        // Bytes past the request body belong to the next pipelined
+        // exchange on this client connection.
+        client_carry = from_client.prefix.split_off(from_client.pos);
 
         // --- Server phase: response head ---
         // Interim (1xx) responses are never final (RFC 9112 §6.2): forward
@@ -1201,11 +1244,11 @@ pub async fn serve_http<CR, CW>(
         // Passive detection (B-N10): with `passive = true`, real-traffic
         // verdicts feed the fall/rise machine — 5xx = failure (the
         // "500 → DOWN" acceptance criterion), anything else = success.
-        if cfg.backend.health_check.as_ref().is_some_and(|h| h.passive) {
+        if backend.health_check.as_ref().is_some_and(|h| h.passive) {
             if response.status >= 500 {
-                cfg.backend.balancer.report_fail(conn.addr);
+                backend.balancer.report_fail(conn.addr);
             } else {
-                cfg.backend.balancer.report_ok(conn.addr);
+                backend.balancer.report_ok(conn.addr);
             }
         }
         // Reuse-safety contract (A16): a pooled connection must end the
@@ -1215,20 +1258,21 @@ pub async fn serve_http<CR, CW>(
         // stream disagrees with ours (and hide the over-send).
         let clean_boundary = from_backend.pos == from_backend.prefix.len();
         let backend_alive = !peer_gone(&mut backend_read).await;
-        if !response.wants_close && clean_boundary && backend_alive {
+        // A16 reuse contract, extended: never pool a connection whose
+        // forwarded request carried `Connection: close` (or lacked
+        // keep-alive in HTTP/1.0). The client's hop-by-hop header reaches
+        // the backend verbatim, so the backend will close too: pooling it
+        // would hand the next exchange a dead connection.
+        if !request.wants_close && !response.wants_close && clean_boundary && backend_alive {
             // Clean exchange and server on keep-alive: the connection returns
             // to the pool message-aligned (A16). Every error path
             // returns early without it: after a framing failure, cut,
             // server timeout or close it is never reused.
-            cfg.backend
+            backend
                 .pool
                 .checkin(conn.addr, backend_read, backend_write, Instant::now());
             // The backend connection is no longer ours: the rest of the loop only
             // touches the client.
-            if request.wants_close {
-                let _ = client_write.shutdown().await;
-                return;
-            }
             continue;
         }
         if !clean_boundary {

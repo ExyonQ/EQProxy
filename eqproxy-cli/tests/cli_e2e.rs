@@ -585,6 +585,322 @@ fn run_http_mode_proxies_requests_and_rejects_smuggling() {
     assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
 }
 
+/// Minimal identity backend: answers `200 OK` with the given body and
+/// closes (the routing cases send `Connection: close`).
+fn start_identity_backend(body: &'static str) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind identity");
+    let addr = listener.local_addr().expect("addr identity");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    addr
+}
+
+/// One request through the real binary; returns the raw response.
+fn proxied(proxy: &str, request: &[u8]) -> String {
+    let mut client = TcpStream::connect(proxy).expect("connect proxy");
+    client.write_all(request).expect("write request");
+    let mut response = Vec::new();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("read timeout");
+    let _ = client.read_to_end(&mut response);
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+fn body_of(response: &str) -> &str {
+    response.split_once("\r\n\r\n").map_or("", |(_, body)| body)
+}
+
+/// Routing rules through the **real** binary (v0.6, B-H3/B-H4): paths,
+/// hosts, methods, headers and source IPs route to their backends; first
+/// match wins over later rules, the listener backend is the fallback, and
+/// near misses never route. `config explain` reproduces the decisions
+/// offline, rule by rule.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_routes_by_rules_first_match_wins_with_default_fallback() {
+    let api = start_identity_backend("api");
+    let mgmt = start_identity_backend("mgmt");
+    let fallback = start_identity_backend("fallback");
+    let config = temp_config(
+        "rules",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"fallback\"\n\
+             mode = \"http\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"api-v1\"\n\
+             path_prefix = \"/v1/\"\n\
+             use_backend = \"api\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"special-host\"\n\
+             host = \"special.example.com\"\n\
+             use_backend = \"mgmt\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"admin-post\"\n\
+             path = \"/admin\"\n\
+             methods = [\"POST\"]\n\
+             use_backend = \"mgmt\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"beta-json\"\n\
+             path_regex = \"\\\\.json$\"\n\
+             headers = [{{ name = \"x-beta\", exact = \"on\" }}]\n\
+             use_backend = \"mgmt\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"office-ip\"\n\
+             path = \"/office\"\n\
+             ip = [\"10.0.0.0/8\"]\n\
+             use_backend = \"mgmt\"\n\
+             \n\
+             [backend.api]\n\
+             server = \"{api}\"\n\
+             [backend.mgmt]\n\
+             server = \"{mgmt}\"\n\
+             [backend.fallback]\n\
+             server = \"{fallback}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (rules)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("leer stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    let cases: &[(&[u8], &str, &str)] = &[
+        (
+            b"GET /v1/users HTTP/1.1\r\nHost: special.example.com\r\nConnection: close\r\n\r\n",
+            "api",
+            "first matching rule wins over a later one",
+        ),
+        (
+            b"GET /v1/users HTTP/1.1\r\nHost: other.example.com\r\nConnection: close\r\n\r\n",
+            "api",
+            "path prefix routes",
+        ),
+        (
+            b"GET /other HTTP/1.1\r\nHost: special.example.com:8443\r\nConnection: close\r\n\r\n",
+            "mgmt",
+            "host matches ignoring the :port suffix",
+        ),
+        (
+            b"GET /v10 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "fallback",
+            "literal prefix /v1/ must not swallow /v10",
+        ),
+        (
+            b"POST /admin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "mgmt",
+            "method condition matches",
+        ),
+        (
+            b"GET /admin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "fallback",
+            "method near miss must not route",
+        ),
+        (
+            b"GET /data.json HTTP/1.1\r\nHost: x\r\nx-beta: on\r\nConnection: close\r\n\r\n",
+            "mgmt",
+            "header condition matches",
+        ),
+        (
+            b"GET /data.json HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "fallback",
+            "missing header must not route",
+        ),
+        (
+            b"GET /office HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "fallback",
+            "source IP outside the blocks must not route",
+        ),
+    ];
+    for (request, want, why) in cases {
+        let response = proxied(proxy_addr.as_str(), request);
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK"),
+            "{why}: response {response}"
+        );
+        assert_eq!(body_of(&response), *want, "{why}");
+    }
+
+    // `config explain` reproduces the decisions offline (H4): every rule
+    // with its verdict, then the fired rule and chosen backend.
+    let explain = |args: &[&str]| {
+        let out = bin()
+            .args(["config", "explain", "--config"])
+            .arg(&config)
+            .args(args)
+            .output()
+            .expect("run eqproxy config explain");
+        assert!(out.status.success(), "explain exits 0: {:?}", out);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let report = explain(&["--host", "special.example.com", "--path", "/v1/users"]);
+    assert!(
+        report.contains("rule[0] \"api-v1\": match -> use_backend \"api\""),
+        "{report}"
+    );
+    assert!(
+        report.contains("rule[1] \"special-host\": match -> use_backend \"mgmt\""),
+        "{report}"
+    );
+    assert!(
+        report.contains("route_decision: first matching rule -> backend \"api\""),
+        "{report}"
+    );
+
+    let report = explain(&["--method", "GET", "--host", "x", "--path", "/admin"]);
+    assert!(
+        report.contains("rule[2] \"admin-post\": no match (method:"),
+        "{report}"
+    );
+    assert!(
+        report.contains("route_decision: no rule matched -> default backend \"fallback\""),
+        "{report}"
+    );
+
+    let report = explain(&[
+        "--host",
+        "x",
+        "--path",
+        "/data.json",
+        "--header",
+        "x-beta=on",
+    ]);
+    assert!(
+        report.contains("rule[3] \"beta-json\": match -> use_backend \"mgmt\""),
+        "{report}"
+    );
+
+    let report = explain(&[
+        "--host",
+        "x",
+        "--path",
+        "/office",
+        "--client-ip",
+        "10.1.2.3",
+    ]);
+    assert!(
+        report.contains("rule[4] \"office-ip\": match -> use_backend \"mgmt\""),
+        "{report}"
+    );
+
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success(), "kill -INT must be accepted");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+}
+
+/// Rule errors through the real binary name the field and show an example
+/// (Q1: actionable errors, never opaque).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_names_rule_fields_actionably() {
+    let backend = start_identity_backend("x");
+    let config = temp_config(
+        "rules-bad",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             use_backend = \"api\"\n\
+             host = \"a\"\n\
+             host_regex = \"b\"\n\
+             \n\
+             [backend.api]\n\
+             server = \"{backend}\"\n"
+        ),
+    );
+    let out = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&config);
+    assert!(!out.status.success(), "ambiguous rule must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("rules[0].host"),
+        "the error must name the rule field: {err}"
+    );
+    assert!(
+        err.contains("at most one of host, host_prefix, host_regex"),
+        "the error must say why: {err}"
+    );
+}
+
 #[cfg_attr(
     miri,
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"

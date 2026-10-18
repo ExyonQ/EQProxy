@@ -27,6 +27,9 @@ pub const MAX_LOCAL_RESPONSE_BYTES: usize = 8192;
 /// Resource budget: maximum `maxqueue` per backend (B-H7).
 pub const MAX_QUEUE: u32 = 10_000;
 
+/// Resource budget (v0.6): maximum routing rules per listener.
+pub const MAX_RULES: usize = 256;
+
 /// Maximum `retries` per backend (B-H7).
 pub const MAX_RETRIES: u32 = 5;
 
@@ -291,6 +294,88 @@ pub struct MetricsConfig {
     pub detailed: bool,
 }
 
+/// One header condition of a routing rule (exactly one of `exact`,
+/// `regex` or `present = true`; v0.6, B-H3/B-N3).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderConditionConfig {
+    /// Header name (case-insensitive).
+    pub name: String,
+    /// Exact value (byte-for-byte).
+    pub exact: Option<String>,
+    /// Unanchored regex over the value.
+    pub regex: Option<String>,
+    /// Presence check (`true`; the value is irrelevant).
+    #[serde(default)]
+    pub present: bool,
+}
+
+/// One routing rule (v0.6, B-H3/B-H4): ordered match conditions plus the
+/// `use_backend` action. Rules run in array order, first match wins; the
+/// listener's `backend` is the fallback when no rule matches. All
+/// conditions of a rule are ANDed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleConfig {
+    /// Display name for `explain`/logs (default `"rule-N"`).
+    pub name: Option<String>,
+    /// Action: backend that receives the matching requests.
+    pub use_backend: String,
+    /// Exact host (case-insensitive, port-free).
+    pub host: Option<String>,
+    /// Host prefix (case-insensitive).
+    pub host_prefix: Option<String>,
+    /// Host regex (unanchored).
+    pub host_regex: Option<String>,
+    /// Exact path (query string excluded, case-sensitive).
+    pub path: Option<String>,
+    /// Literal path prefix (no normalization: `/v1` also matches `/v10`).
+    pub path_prefix: Option<String>,
+    /// Path regex (unanchored).
+    pub path_regex: Option<String>,
+    /// Accepted methods (empty = any).
+    #[serde(default)]
+    pub methods: Vec<String>,
+    /// Header conditions (all must hold).
+    #[serde(default)]
+    pub headers: Vec<HeaderConditionConfig>,
+    /// Source CIDR blocks (empty = any).
+    #[serde(default)]
+    pub ip: Vec<String>,
+}
+
+impl RuleConfig {
+    /// Compile input for [`eqproxy_core::rules::Rule::compile`]; `index`
+    /// positions the rule in its listener (default name `"rule-N"`).
+    #[must_use]
+    pub fn to_spec(&self, index: usize) -> eqproxy_core::rules::RuleSpec {
+        eqproxy_core::rules::RuleSpec {
+            name: self
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("rule-{}", index + 1)),
+            host: self.host.clone(),
+            host_prefix: self.host_prefix.clone(),
+            host_regex: self.host_regex.clone(),
+            path: self.path.clone(),
+            path_prefix: self.path_prefix.clone(),
+            path_regex: self.path_regex.clone(),
+            methods: self.methods.clone(),
+            headers: self
+                .headers
+                .iter()
+                .map(|h| eqproxy_core::rules::HeaderSpec {
+                    name: h.name.clone(),
+                    exact: h.exact.clone(),
+                    regex: h.regex.clone(),
+                    present: h.present,
+                })
+                .collect(),
+            ip: self.ip.clone(),
+        }
+    }
+}
+
 /// Full EQProxy configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -353,6 +438,10 @@ pub struct ListenerConfig {
     /// Custom response when no server is available (C9 minimal).
     #[serde(default)]
     pub local_response: Option<LocalResponseConfig>,
+    /// Ordered routing rules (v0.6, B-H3/B-H4): first match wins, the
+    /// `backend` above is the fallback. `http` mode only.
+    #[serde(default)]
+    pub rules: Vec<RuleConfig>,
 }
 
 /// A backend: one or more origin servers with balancing (Phase 2b).
