@@ -179,3 +179,13 @@ Ejecución de referencia: netcup-bench (8 vCPU, 16 GiB, Ubuntu 24.04),
 (`maxqueue = 256`), reintentos (`retries = 1`) y health check
 activo + pasivo (`passive = true`). Evidencia cruda: `results/` de la
 ejecución (`rss.csv`, `summary.json`, `summary.txt`, `eqproxy.log`).
+
+**Resultado del gate v0.5 (medido 2026-10-18, netcup-bench):** PASS —
+24 h exactas (86 400 s), 17 280 000 peticiones OK, 0 errores, 0 respuestas
+fuera de status, 200 rps sostenidos, latencia p50 0.5 ms / p95 2 ms /
+p99 4 ms, RSS en régimen 8.86 MiB (presupuesto 64), RSS pico 9.32 MiB
+(presupuesto 128), apagado SIGINT limpio (exit 0). Los 4 presupuestos se
+cumplen con datos reales (`summary.json` de la ejecución). Un primer
+intento (2026-10-16/17) quedó interrumpido a las 21 h 31 min por un
+reinicio del host (actualización de kernel) y se conserva como evidencia
+de ejecución parcial, sin veredicto.

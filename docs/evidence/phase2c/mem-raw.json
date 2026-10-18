@@ -1,6 +1,6 @@
 {
   "platform": "darwin",
-  "binary": "/Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy",
+  "binary": "target/release/eqproxy",
   "results": [
     {
       "mode": "tcp",

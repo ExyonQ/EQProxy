@@ -7,7 +7,7 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 Nothing yet. Next: v0.6 «Reglas, enrutado y tráfico».
 
-## [v0.5.0] — 2026-10-16
+## [v0.5.0] — 2026-10-18
 
 «Operabilidad y confianza» (completa Phase 3). The two blocks that sat
 under `Unreleased` (planned as 0.4.6 — hot reload and release
@@ -62,7 +62,10 @@ automation) fold into this release.
   policy of the backend.
 - Soak harness (`scripts/soak.py`) with published budgets (BENCHMARK_PLAN
   §9): the real binary under sustained load with RSS/CPU sampled from
-  `/proc`, and an honest verdict (no measurement, no PASS).
+  `/proc`, and an honest verdict (no measurement, no PASS). The 24h gate
+  itself passed on netcup-bench (2026-10-18): 17.28M requests, 0 errors,
+  0 bad status, steady RSS 8.86 MiB (budget 64), peak 9.32 MiB (budget
+  128), clean SIGINT shutdown (exit 0).
 
 ### Changed
 
@@ -98,6 +101,15 @@ automation) fold into this release.
   `sbom`, `sums`, `verify-image`) so local runs and CI share one verified
   pipeline; the image artifact itself is verified (version, config gate
   and live proxied traffic through the container).
+
+### Fixed
+
+- Release-pipeline E2E backend no longer starts Python's `http.server`
+  CLI: on Python 3.14 `HTTPServer.server_bind` resolves reverse DNS
+  (`socket.getfqdn()`) between `bind()` and `listen()`, which hung on the
+  macOS runners and left the probe bound but never listening. The
+  verification backend is now a raw socket with zero name resolution,
+  and the loopback wait in CI reports what actually blocked.
 
 ## [v0.4.5] — 2026-10-15
 

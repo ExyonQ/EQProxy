@@ -71,11 +71,12 @@ EOF
 ./eqproxy-linux-amd64 config validate --config eqproxy.toml
 ```
 
-Docker (linux/amd64 + linux/arm64):
+Docker (linux/amd64 + linux/arm64), same digests on both registries:
 
 ```bash
-docker pull ghcr.io/exyonq/eqproxy:0.5.0
-docker run --rm ghcr.io/exyonq/eqproxy:0.5.0 --version
+docker pull exyonq/eqproxy:0.5.0           # Docker Hub (docs + examples on the repo page)
+docker pull ghcr.io/exyonq/eqproxy:0.5.0   # GitHub Container Registry
+docker run --rm exyonq/eqproxy:0.5.0 --version
 ```
 
 ## Documentation
@@ -102,7 +103,10 @@ docker run --rm ghcr.io/exyonq/eqproxy:0.5.0 --version
 - **Performance goal:** match or beat the reference proxy 3.4.6 LTS on
   connections, memory,
   CPU and P50/P95/P99 latencies in the scenarios of
-  [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md). Goal, not result: no measurements yet.
+  [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md). First measurements
+  (S-TCP-01/S-H1-01/S-TLS-01, [evidence](docs/evidence/phase2c/bench.md)):
+  **Comparable** after the A16 keep-alive pool; the rest of the matrix is
+  **Not measured** (no data, no claim).
 - **Code:** 100 % safe Rust (`#![forbid(unsafe_code)]`, no exceptions);
   extensions WASM-only (Lua discarded due to FFI `unsafe`).
 - **Parity scope:** the OSS edition of the reference proxy only.
