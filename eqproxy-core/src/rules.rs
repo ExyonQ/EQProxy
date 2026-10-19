@@ -417,6 +417,91 @@ pub fn path_of(target: &str) -> &str {
     target.split('?').next().unwrap_or(target)
 }
 
+// --- Rule actions (v0.6 slice 2: rewrite / redirect / direct_response) ---
+//
+// Semantics, defined once (Q8) and never silently changed:
+//
+// - **rewrite** (with `use_backend`): `path_prefix_rewrite` replaces the
+//   rule's matched `path_prefix` in the forwarded target — literal, no
+//   regex (write `""` to strip the prefix) — keeping the query string
+//   untouched; `host_rewrite` replaces the upstream `Host` header with
+//   that exact value. (Envoy `prefix_rewrite` / `host_rewrite`.)
+// - **redirect**: the client gets that 3xx + `Location` rendered per
+//   request from a template with exactly three placeholders:
+//   `$host` (Host header as received, may carry `:port`), `$uri`
+//   (request path, query excluded) and `$request_uri` (the full target
+//   as received). Any other `$…` sequence is a config error; a literal
+//   `$` is written percent-encoded (`%24`).
+// - **direct_response**: that status + body, served locally; the
+//   backend is never contacted.
+
+/// Validates a redirect `location` template (placeholders only, no
+/// control characters). Called by the config gate, once per rule.
+pub fn validate_location(template: &str) -> Result<(), String> {
+    if template.is_empty() {
+        return Err(
+            "location is empty (example: location = \"https://$host$request_uri\")".to_owned(),
+        );
+    }
+    if template.bytes().any(|b| b < 0x20 || b == 0x7f) {
+        return Err("location contains control characters".to_owned());
+    }
+    let mut rest = template;
+    while let Some(pos) = rest.find('$') {
+        rest = &rest[pos..];
+        if rest.starts_with("$request_uri") {
+            rest = &rest["$request_uri".len()..];
+        } else if rest.starts_with("$host") {
+            rest = &rest["$host".len()..];
+        } else if rest.starts_with("$uri") {
+            rest = &rest["$uri".len()..];
+        } else {
+            let shown: String = rest.chars().take(12).collect();
+            return Err(format!(
+                "unknown placeholder in location: {shown:?} (only $host, $uri and $request_uri exist)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Renders a validated `location` template against one request: `host`
+/// is the Host header as received (may carry `:port`) and `target` the
+/// full request target as received (path + query). Errors only on an
+/// unvalidated template (defense in depth at runtime).
+pub fn render_location(template: &str, host: &str, target: &str) -> Result<String, String> {
+    validate_location(template)?;
+    let mut out = String::with_capacity(template.len() + 16);
+    let mut rest = template;
+    while let Some(pos) = rest.find('$') {
+        out.push_str(&rest[..pos]);
+        rest = &rest[pos..];
+        if rest.starts_with("$request_uri") {
+            out.push_str(target);
+            rest = &rest["$request_uri".len()..];
+        } else if rest.starts_with("$host") {
+            out.push_str(host);
+            rest = &rest["$host".len()..];
+        } else {
+            out.push_str(path_of(target));
+            rest = &rest["$uri".len()..];
+        }
+    }
+    out.push_str(rest);
+    Ok(out)
+}
+
+/// Replaces the matched `prefix` at the start of `path` with
+/// `replacement` (literal; `""` strips the prefix). The caller guarantees
+/// `path` starts with `prefix` (the rule matched on it).
+#[must_use]
+pub fn rewrite_prefix(path: &str, prefix: &str, replacement: &str) -> String {
+    match path.strip_prefix(prefix) {
+        Some(rest) => format!("{replacement}{rest}"),
+        None => path.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,5 +758,54 @@ mod tests {
         assert_eq!(path_of("/a/b?x=1&y=2"), "/a/b");
         assert_eq!(path_of("/a/b"), "/a/b");
         assert_eq!(path_of("*"), "*");
+    }
+
+    // --- action semantics: location templates + prefix rewrite ---
+
+    #[test]
+    fn location_placeholders_render_per_request() {
+        assert_eq!(
+            render_location("https://$host$request_uri", "example.com:8443", "/a/b?x=1").unwrap(),
+            "https://example.com:8443/a/b?x=1"
+        );
+        // `$uri` drops the query, `$request_uri` keeps it.
+        assert_eq!(
+            render_location("/moved$uri", "h", "/a?x=1").unwrap(),
+            "/moved/a"
+        );
+        assert_eq!(
+            render_location("/moved$request_uri", "h", "/a?x=1").unwrap(),
+            "/moved/a?x=1"
+        );
+        // Literal text passes through untouched.
+        assert_eq!(
+            render_location("https://fixed.example/", "h", "/a").unwrap(),
+            "https://fixed.example/"
+        );
+    }
+
+    #[test]
+    fn location_rejects_unknown_placeholders_and_controls() {
+        assert!(validate_location("https://$http_host/").is_err());
+        assert!(validate_location("https://$host$").is_err());
+        assert!(validate_location("/ok$uri").is_ok());
+        assert!(validate_location("/bad\r\nX: 1").is_err());
+        assert!(validate_location("").is_err());
+        // Runtime render applies the same validation.
+        assert!(render_location("/$nope", "h", "/a").is_err());
+    }
+
+    #[test]
+    fn prefix_rewrite_is_literal_and_query_preserving() {
+        // Replace the matched prefix (Envoy `prefix_rewrite`).
+        assert_eq!(rewrite_prefix("/api/x", "/api", "/v2"), "/v2/x");
+        assert_eq!(rewrite_prefix("/api", "/api", "/v2"), "/v2");
+        // Empty replacement strips the prefix.
+        assert_eq!(rewrite_prefix("/api/x", "/api", ""), "/x");
+        // Same literal prefix semantics as the match (no normalization):
+        // `/api` also matched `/api2`, so the remainder `2` is kept.
+        assert_eq!(rewrite_prefix("/api2", "/api", "/v2"), "/v22");
+        // A path without the prefix is untouched (defense in depth).
+        assert_eq!(rewrite_prefix("/x", "/api", "/v2"), "/x");
     }
 }

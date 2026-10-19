@@ -64,6 +64,10 @@ pub struct Metrics {
     pub proxy_protocol_invalid: AtomicU64,
     /// Custom local responses served (C9).
     pub local_responses_served: AtomicU64,
+    /// Rule `redirect` responses served (v0.6 slice 2).
+    pub redirects_served: AtomicU64,
+    /// Rule `direct_response` responses served (v0.6 slice 2).
+    pub direct_responses_served: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -94,6 +98,8 @@ pub struct MetricsSnapshot {
     pub proxy_protocol_denied: u64,
     pub proxy_protocol_invalid: u64,
     pub local_responses_served: u64,
+    pub redirects_served: u64,
+    pub direct_responses_served: u64,
 }
 
 impl Metrics {
@@ -127,6 +133,8 @@ impl Metrics {
             proxy_protocol_denied: self.proxy_protocol_denied.load(Ordering::Relaxed),
             proxy_protocol_invalid: self.proxy_protocol_invalid.load(Ordering::Relaxed),
             local_responses_served: self.local_responses_served.load(Ordering::Relaxed),
+            redirects_served: self.redirects_served.load(Ordering::Relaxed),
+            direct_responses_served: self.direct_responses_served.load(Ordering::Relaxed),
         }
     }
 
@@ -171,12 +179,14 @@ impl fmt::Display for MetricsSnapshot {
         )?;
         write!(
             f,
-            " proxy[no_server={} queue_full={} queue_timeout={} retries={} local_responses={}]",
+            " proxy[no_server={} queue_full={} queue_timeout={} retries={} local_responses={} redirects={} direct={}]",
             self.no_available_server,
             self.queue_full,
             self.queue_timeout,
             self.retry_attempts,
-            self.local_responses_served
+            self.local_responses_served,
+            self.redirects_served,
+            self.direct_responses_served
         )?;
         write!(
             f,

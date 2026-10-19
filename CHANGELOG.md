@@ -32,6 +32,33 @@ pointing at v0.5.0 until a final release.
   matched or not (`rule[0] "api": no match (host: expected …)`), then
   `route_decision` naming the chosen backend — never a bare backend
   without the path to it.
+- Rule actions (B-N5/B-I6, second slice; Envoy `prefix_rewrite`/
+  `host_rewrite`, `redirect`, `direct_response`): each rule carries
+  exactly one action — `use_backend` (optionally with a
+  `[listener.*.rules.rewrite]` subtable: `path_prefix_rewrite` replaces
+  the rule's matched `path_prefix` in the forwarded target (literal;
+  `""` strips it) and `host_rewrite` sets the upstream `Host`),
+  `redirect` (that 3xx with `Location` rendered per request from a
+  template with `$host`, `$uri` and `$request_uri`; statuses
+  301/302/303/307/308) or `direct_response` (that status, `content_type`
+  and `body`, served locally). The local actions never contact a backend
+  and drain the request body to keep keep-alive aligned (else close);
+  they are counted in the new `redirects_served` /
+  `direct_responses_served` metrics. `config explain` reports each
+  action (`redirect 301 -> "/new"`, `direct_response 200 …`,
+  `use_backend … (rewrite: …)`) and labels local responses
+  `no backend contacted`.
+- Action validation (Q1): `rewrite` is accepted only on `use_backend`
+  rules and needs the rule's `path_prefix`; redirect templates reject
+  unknown `$…` placeholders; every error names its field
+  (`listener.web.rules[0].redirect.status`) with a concrete example.
+- Differential test harness for the v0.6 gate (declared corpus in
+  `docs/differential-corpus.md`): the same 16 shared-semantics cases run
+  against EQProxy (the built binary), HAProxy 3.4.6, the ingress-nginx
+  data plane and static Envoy v1.34.2 in real containers, comparing the
+  normalized status, `Location` and body. Run 2026-10-19: 16/16 cases
+  agree across the four implementations
+  (`cargo test -p eqproxy-cli --test differential -- --ignored`).
 
 ### Changed
 
@@ -44,8 +71,10 @@ pointing at v0.5.0 until a final release.
   artifact without the folder.
 
 Verified against the built binary (E2E: multi-backend routing, rule
-order, fallback and negative cases) with a property-test corpus and a
-live fuzz target for the evaluator (26,834 executions, 0 crashes).
+order, fallback and negative cases; the rewrite/redirect/direct_response
+actions end to end and their actionable errors) with a property-test
+corpus and a live fuzz target for the evaluator (26,834 executions, 0
+crashes).
 
 ## [v0.5.0] — 2026-10-18
 

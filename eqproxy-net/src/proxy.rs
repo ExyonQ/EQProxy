@@ -152,13 +152,61 @@ impl ResolvedBackend {
     }
 }
 
-/// One compiled routing rule with its destination backend (v0.6, B-H4).
+/// Rewrite applied to the forwarded request (v0.6 slice 2).
+#[derive(Debug, Clone)]
+pub struct ResolvedRewrite {
+    /// The rule's matched `path_prefix`: what `path_prefix_rewrite` replaces.
+    pub matched_prefix: String,
+    /// Literal replacement for the matched prefix (`""` strips it).
+    pub path_prefix_rewrite: Option<String>,
+    /// Exact upstream `Host` value.
+    pub host_rewrite: Option<String>,
+}
+
+/// Action of a matched routing rule (v0.6 slice 2): route to a backend
+/// (optionally rewriting the request), or answer locally.
+#[derive(Debug, Clone)]
+pub enum RouteAction {
+    /// Proxy the request to this backend.
+    Backend {
+        backend: Arc<ResolvedBackend>,
+        rewrite: Option<ResolvedRewrite>,
+    },
+    /// Answer locally: 3xx + `Location` (template rendered per request).
+    Redirect { status: u16, location: String },
+    /// Answer locally: the configured response, no backend contacted.
+    Direct {
+        status: u16,
+        content_type: String,
+        body: String,
+    },
+}
+
+/// Borrowed view of one routing decision (v0.6 slice 2).
+#[derive(Debug)]
+pub enum RouteDecision<'a> {
+    /// Proxy to this backend, optionally rewriting the forwarded head.
+    Proxy {
+        backend: &'a Arc<ResolvedBackend>,
+        rewrite: Option<&'a ResolvedRewrite>,
+    },
+    /// Serve a local 3xx with a `Location` template.
+    Redirect { status: u16, location: &'a str },
+    /// Serve a local response.
+    Direct {
+        status: u16,
+        content_type: &'a str,
+        body: &'a str,
+    },
+}
+
+/// One compiled routing rule with its action (v0.6, B-H4).
 #[derive(Debug, Clone)]
 pub struct ResolvedRoute {
     /// Compiled match conditions (ordered evaluation, first match wins).
     pub rule: eqproxy_core::rules::Rule,
-    /// Backend that receives the matching requests.
-    pub backend: Arc<ResolvedBackend>,
+    /// What a matching request triggers.
+    pub action: RouteAction,
 }
 
 /// Resolved listener (already-validated config: parsed addresses, sound refs).
@@ -250,23 +298,50 @@ impl ResolvedListener {
         self
     }
 
-    /// Backend for one request: first matching rule wins, the default
+    /// Decision for one request: first matching rule wins, the default
     /// backend is the fallback (per-request: keep-alive connections may
-    /// route each exchange to a different backend).
+    /// route each exchange differently).
     #[must_use]
-    pub fn select_backend(
-        &self,
-        facts: &eqproxy_core::rules::RequestFacts<'_>,
-    ) -> &Arc<ResolvedBackend> {
+    pub fn decide(&self, facts: &eqproxy_core::rules::RequestFacts<'_>) -> RouteDecision<'_> {
         self.routes
             .iter()
             .find(|route| route.rule.matches(facts))
-            .map_or(&self.backend, |route| &route.backend)
+            .map_or(
+                RouteDecision::Proxy {
+                    backend: &self.backend,
+                    rewrite: None,
+                },
+                |route| match &route.action {
+                    RouteAction::Backend { backend, rewrite } => RouteDecision::Proxy {
+                        backend,
+                        rewrite: rewrite.as_ref(),
+                    },
+                    RouteAction::Redirect { status, location } => RouteDecision::Redirect {
+                        status: *status,
+                        location,
+                    },
+                    RouteAction::Direct {
+                        status,
+                        content_type,
+                        body,
+                    } => RouteDecision::Direct {
+                        status: *status,
+                        content_type,
+                        body,
+                    },
+                },
+            )
     }
 
-    /// Every distinct backend this listener can route to (default + rules).
+    /// Every distinct backend this listener can route to (default + rule
+    /// actions of the `use_backend` kind).
     pub fn all_backends(&self) -> impl Iterator<Item = &Arc<ResolvedBackend>> {
-        std::iter::once(&self.backend).chain(self.routes.iter().map(|route| &route.backend))
+        std::iter::once(&self.backend).chain(self.routes.iter().filter_map(|route| {
+            match &route.action {
+                RouteAction::Backend { backend, .. } => Some(backend),
+                _ => None,
+            }
+        }))
     }
 
     /// Enables TLS termination on the listener (A11).

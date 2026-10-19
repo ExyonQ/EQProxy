@@ -794,8 +794,10 @@ fn run_routes_by_rules_first_match_wins_with_default_fallback() {
         report.contains("rule[1] \"special-host\": match -> use_backend \"mgmt\""),
         "{report}"
     );
+    // Since slice 2 the decision line reports the full action (not just
+    // the backend), so actions and routing read identically in `explain`.
     assert!(
-        report.contains("route_decision: first matching rule -> backend \"api\""),
+        report.contains("route_decision: first matching rule -> use_backend \"api\""),
         "{report}"
     );
 
@@ -898,6 +900,327 @@ fn validate_names_rule_fields_actionably() {
     assert!(
         err.contains("at most one of host, host_prefix, host_regex"),
         "the error must say why: {err}"
+    );
+}
+
+/// Backend that answers `200 OK` with `body` and records the request
+/// line of every request, so tests can observe what the proxy really
+/// forwarded (e.g. a rewritten path). Same shape as `start_identity_backend`.
+fn start_recording_backend(
+    body: &'static str,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind recording");
+    let addr = listener.local_addr().expect("addr recording");
+    let keep = std::sync::Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let keep = std::sync::Arc::clone(&keep);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request_line = String::from_utf8_lossy(&buf[..total])
+                    .lines()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned();
+                keep.lock().expect("record").push(request_line);
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    (addr, seen)
+}
+
+/// Rule actions through the **real** binary (v0.6 slice 2: B-N5/B-I6 +
+/// Envoy `prefix_rewrite`/`redirect`/`direct_response`): `rewrite`
+/// reshapes the forwarded request, `redirect` answers a rendered 3xx and
+/// `direct_response` serves a body locally — the local actions never
+/// contact a backend. `config explain` shows each action offline.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_rule_actions_rewrite_redirect_and_direct_response() {
+    let (api, seen) = start_recording_backend("api");
+    let config = temp_config(
+        "rules-actions",
+        &format!(
+            r#"schema_version = 1
+[listener.web]
+listen = "127.0.0.1:0"
+backend = "api"
+mode = "http"
+
+[[listener.web.rules]]
+name = "rewrite-v1"
+path_prefix = "/v1/"
+use_backend = "api"
+[listener.web.rules.rewrite]
+path_prefix_rewrite = "/api/"
+
+[[listener.web.rules]]
+name = "redirect-old"
+path = "/old"
+[listener.web.rules.redirect]
+status = 301
+location = "/new"
+
+[[listener.web.rules]]
+name = "direct-health"
+path = "/healthz"
+[listener.web.rules.direct_response]
+status = 200
+body = "pong"
+
+[backend.api]
+server = "{api}"
+"#
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (actions)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("leer stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    // direct_response: local body, no backend involved.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /healthz HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    // Locally-generated responses use the shared lowercase reason
+    // phrases (`phrase()`, same as the C9 503/502 responses).
+    assert!(response.starts_with("HTTP/1.1 200 ok"), "{response}");
+    assert!(
+        response.contains("content-type: text/plain\r\n"),
+        "{response}"
+    );
+    assert_eq!(body_of(&response), "pong", "direct_response body");
+
+    // redirect: 3xx + Location rendered per request.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /old HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 301 moved permanently"),
+        "{response}"
+    );
+    assert!(response.contains("location: /new\r\n"), "{response}");
+
+    assert!(
+        seen.lock().expect("lock").is_empty(),
+        "redirect/direct_response must never contact a backend: {:?}",
+        seen.lock().expect("lock")
+    );
+
+    // rewrite: the backend sees the rewritten target.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /v1/users HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert_eq!(body_of(&response), "api", "proxied to the rule's backend");
+    assert_eq!(
+        *seen.lock().expect("lock"),
+        ["GET /api/users HTTP/1.1"],
+        "the forwarded request must carry the rewritten path"
+    );
+
+    // `config explain` reproduces the actions offline.
+    let explain = |args: &[&str]| {
+        let out = bin()
+            .args(["config", "explain", "--config"])
+            .arg(&config)
+            .args(args)
+            .output()
+            .expect("run eqproxy config explain");
+        assert!(out.status.success(), "explain exits 0: {:?}", out);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+
+    let report = explain(&["--host", "x", "--path", "/v1/users"]);
+    assert!(
+        report.contains(
+            "rule[0] \"rewrite-v1\": match -> use_backend \"api\" (rewrite: path_prefix \"/v1/\" -> \"/api/\")"
+        ),
+        "{report}"
+    );
+    assert!(
+        report.contains("route_decision: first matching rule -> use_backend \"api\" (rewrite:"),
+        "{report}"
+    );
+
+    let report = explain(&["--host", "x", "--path", "/old"]);
+    assert!(
+        report.contains("rule[1] \"redirect-old\": match -> redirect 301 -> \"/new\""),
+        "{report}"
+    );
+    assert!(
+        report.contains("action: local response (no backend contacted)"),
+        "{report}"
+    );
+
+    let report = explain(&["--host", "x", "--path", "/healthz"]);
+    assert!(
+        report.contains("rule[2] \"direct-health\": match -> direct_response 200"),
+        "{report}"
+    );
+    assert!(
+        report.contains("action: local response (no backend contacted)"),
+        "{report}"
+    );
+
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success(), "kill -INT must be accepted");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+}
+
+/// Rule action errors through the real binary name the exact field and
+/// suggest a fix (Q1: actionable errors, never opaque).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_names_rule_action_fields_actionably() {
+    let reject = |rule: &str, want_field: &str, want_why: &str| {
+        let config = temp_config(
+            "actions-bad",
+            &format!(
+                r#"schema_version = 1
+[listener.web]
+listen = "127.0.0.1:0"
+backend = "api"
+mode = "http"
+
+{rule}
+
+[backend.api]
+server = "127.0.0.1:9"
+"#
+            ),
+        );
+        let out = bin()
+            .args(["config", "validate", "--config"])
+            .arg(&config)
+            .output()
+            .expect("run eqproxy config validate");
+        remove_temp(&config);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "must be rejected: {rule}
+{err}"
+        );
+        assert!(
+            err.contains(want_field),
+            "must name the field {want_field}: {err}"
+        );
+        assert!(err.contains(want_why), "must say why ({want_why}): {err}");
+    };
+
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+[listener.web.rules.redirect]
+status = 200
+location = "/y""#,
+        "rules[0].redirect.status",
+        "301, 302, 303, 307, 308",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+[listener.web.rules.redirect]
+location = "/new?from=$scheme""#,
+        "rules[0].redirect.location",
+        "unknown placeholder in location",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+[listener.web.rules.direct_response]
+status = 700
+body = "x""#,
+        "rules[0].direct_response.status",
+        "out of range (200-599)",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+use_backend = "api"
+[listener.web.rules.rewrite]
+path_prefix_rewrite = "/v2/""#,
+        "rules[0].rewrite.path_prefix_rewrite",
+        "needs the rule's path_prefix to replace",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+use_backend = "api"
+[listener.web.rules.redirect]
+location = "/y""#,
+        "rules[0]",
+        "set exactly one of use_backend, redirect or direct_response",
     );
 }
 

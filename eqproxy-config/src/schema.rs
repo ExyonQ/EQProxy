@@ -310,17 +310,62 @@ pub struct HeaderConditionConfig {
     pub present: bool,
 }
 
-/// One routing rule (v0.6, B-H3/B-H4): ordered match conditions plus the
-/// `use_backend` action. Rules run in array order, first match wins; the
-/// listener's `backend` is the fallback when no rule matches. All
-/// conditions of a rule are ANDed.
+/// Rewrite applied to the forwarded request when the rule routes to a
+/// backend (v0.6 slice 2; Envoy `prefix_rewrite`/`host_rewrite`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RewriteConfig {
+    /// Replaces the rule's matched `path_prefix` in the forwarded target
+    /// (literal, no regex; `""` strips the prefix). Query untouched.
+    pub path_prefix_rewrite: Option<String>,
+    /// Exact value of the upstream `Host` header.
+    pub host_rewrite: Option<String>,
+}
+
+/// Local 3xx response (v0.6 slice 2; nginx `return 301`, Envoy `redirect`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedirectConfig {
+    /// 301 (default), 302, 303, 307 or 308.
+    pub status: Option<u16>,
+    /// Location template: literal text plus `$host`, `$uri`, `$request_uri`.
+    pub location: String,
+}
+
+/// Local response served without contacting a backend (v0.6 slice 2;
+/// Envoy `direct_response`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectResponseConfig {
+    /// Status code (200-599).
+    pub status: u16,
+    /// Content type (default `text/plain`).
+    pub content_type: Option<String>,
+    /// Body (default empty; bounded by the local-response budget).
+    pub body: Option<String>,
+}
+
+/// One routing rule (v0.6, B-H3/B-H4): ordered match conditions plus
+/// exactly one action (`use_backend`, `redirect` or `direct_response`).
+/// Rules run in array order, first match wins; the listener's `backend`
+/// is the fallback when no rule matches. All conditions of a rule are
+/// ANDed.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuleConfig {
     /// Display name for `explain`/logs (default `"rule-N"`).
     pub name: Option<String>,
     /// Action: backend that receives the matching requests.
-    pub use_backend: String,
+    pub use_backend: Option<String>,
+    /// Rewrite applied to the forwarded request (`use_backend` only).
+    #[serde(default)]
+    pub rewrite: Option<RewriteConfig>,
+    /// Action: answer locally with 3xx + `Location` (no backend).
+    #[serde(default)]
+    pub redirect: Option<RedirectConfig>,
+    /// Action: answer locally with the configured response (no backend).
+    #[serde(default)]
+    pub direct_response: Option<DirectResponseConfig>,
     /// Exact host (case-insensitive, port-free).
     pub host: Option<String>,
     /// Host prefix (case-insensitive).

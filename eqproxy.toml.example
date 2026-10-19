@@ -1,4 +1,4 @@
-# Example EQProxy configuration (v0.5).
+# Example EQProxy configuration (v0.6).
 #
 # Validation errors: file, line, field, cause and a fix example.
 
@@ -41,6 +41,36 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 #status = 503
 #content_type = "text/plain"
 #body = "back soon"
+
+# Routing rules (B-H3/B-H4; mode = "http" only): ordered, first match
+# wins; the listener's `backend` is the fallback when no rule matches.
+# Conditions AND together: host/host_prefix/host_regex (case-insensitive,
+# port-free), path/path_prefix/path_regex (literal, no normalization),
+# methods, headers (exact/regex/present), ip (CIDR blocks). Exactly one
+# action per rule: use_backend, redirect or direct_response (B-N5/B-I6).
+#[[listener.web.rules]]
+#name = "api-v1"
+#path_prefix = "/v1/"
+#use_backend = "api"
+## Optional rewrite of the forwarded request (only with use_backend):
+#[listener.web.rules.rewrite]
+#path_prefix_rewrite = "/api/"      # replaces the matched path_prefix ("" strips it)
+#host_rewrite = "api.internal"      # exact upstream Host
+#
+#[[listener.web.rules]]
+#name = "moved"
+#path = "/old"
+#[listener.web.rules.redirect]      # local 3xx; the backend is never contacted
+#status = 301                       # 301/302/303/307/308 (default 301)
+#location = "https://$host$request_uri"  # $host, $uri, $request_uri
+#
+#[[listener.web.rules]]
+#name = "healthz"
+#path = "/healthz"
+#[listener.web.rules.direct_response]  # local body; the backend is never contacted
+#status = 200
+#content_type = "text/plain"
+#body = "pong"
 
 [backend.api]
 # One server (compat 0.1.0) …

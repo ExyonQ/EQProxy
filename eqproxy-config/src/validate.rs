@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use eqproxy_core::expectation::{IpBlock, RegexMatcher, StatusExpectation};
-use eqproxy_core::rules::Rule;
+use eqproxy_core::rules::{Rule, validate_location};
 
 use crate::error::{ConfigError, Location};
 use crate::find_line;
@@ -265,16 +265,143 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                         field(&format!("rules[{i}].{suffix}"))
                     }
                 };
-                if !config.backend.contains_key(&rule.use_backend) {
+                // Exactly one action per rule (v0.6 slice 2).
+                let actions = u8::from(rule.use_backend.is_some())
+                    + u8::from(rule.redirect.is_some())
+                    + u8::from(rule.direct_response.is_some());
+                if actions != 1 {
+                    err(
+                        rule_field(""),
+                        "set exactly one of use_backend, redirect or direct_response".to_owned(),
+                        "use_backend = \"api\" (route) | redirect = { status = 301, location = \"https://$host$request_uri\" } | direct_response = { status = 200, body = \"ok\" }".to_owned(),
+                        &section,
+                    );
+                }
+                if let Some(backend) = &rule.use_backend
+                    && !config.backend.contains_key(backend)
+                {
                     err(
                         rule_field("use_backend"),
-                        format!("backend \"{}\" does not exist", rule.use_backend),
+                        format!("backend \"{backend}\" does not exist"),
                         format!(
-                            "use_backend = \"{}\" requires a [backend.{}] section",
-                            rule.use_backend, rule.use_backend
+                            "use_backend = \"{backend}\" requires a [backend.{backend}] section"
                         ),
                         &section,
                     );
+                }
+                // `rewrite` modifies a `use_backend` action only.
+                if let Some(rewrite) = &rule.rewrite {
+                    if rule.use_backend.is_none() {
+                        err(
+                            rule_field("rewrite"),
+                            "rewrite only applies to rules with use_backend".to_owned(),
+                            "use_backend = \"api\" + [listener.LISTENER.rules.rewrite] (or use redirect)".to_owned(),
+                            &section,
+                        );
+                    }
+                    if rewrite.path_prefix_rewrite.is_none() && rewrite.host_rewrite.is_none() {
+                        err(
+                            rule_field("rewrite"),
+                            "rewrite sets no field".to_owned(),
+                            "path_prefix_rewrite = \"/v2\" or host_rewrite = \"internal\""
+                                .to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Some(prefix) = &rewrite.path_prefix_rewrite {
+                        if rule.path_prefix.is_none() {
+                            err(
+                                rule_field("rewrite.path_prefix_rewrite"),
+                                "path_prefix_rewrite needs the rule's path_prefix to replace"
+                                    .to_owned(),
+                                "path_prefix = \"/api\" plus path_prefix_rewrite = \"/v2\""
+                                    .to_owned(),
+                                &section,
+                            );
+                        }
+                        if !(prefix.is_empty() || prefix.starts_with('/'))
+                            || prefix
+                                .bytes()
+                                .any(|b| b <= 0x20 || b == 0x7f || b == b'?' || b == b'#')
+                        {
+                            err(
+                                rule_field("rewrite.path_prefix_rewrite"),
+                                "not a valid path prefix".to_owned(),
+                                "path_prefix_rewrite = \"/v2\" (starts with /; no spaces, ? or #)"
+                                    .to_owned(),
+                                &section,
+                            );
+                        }
+                    }
+                    if let Some(host) = &rewrite.host_rewrite
+                        && (host.is_empty() || host.bytes().any(|b| b <= 0x20 || b == 0x7f))
+                    {
+                        err(
+                            rule_field("rewrite.host_rewrite"),
+                            "not a valid host value".to_owned(),
+                            "host_rewrite = \"internal.svc\" (no spaces or control characters)"
+                                .to_owned(),
+                            &section,
+                        );
+                    }
+                }
+                if let Some(redirect) = &rule.redirect {
+                    if let Some(status) = redirect.status
+                        && !matches!(status, 301 | 302 | 303 | 307 | 308)
+                    {
+                        err(
+                            rule_field("redirect.status"),
+                            format!(
+                                "redirect status {status} is not a redirect (301, 302, 303, 307, 308)"
+                            ),
+                            "status = 308".to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Err(cause) = validate_location(&redirect.location) {
+                        err(
+                            rule_field("redirect.location"),
+                            cause,
+                            "location = \"https://$host$request_uri\"".to_owned(),
+                            &section,
+                        );
+                    }
+                }
+                if let Some(direct) = &rule.direct_response {
+                    if !(200..=599).contains(&direct.status) {
+                        err(
+                            rule_field("direct_response.status"),
+                            format!(
+                                "direct_response.status = {} out of range (200-599)",
+                                direct.status
+                            ),
+                            "status = 200".to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Some(content_type) = &direct.content_type
+                        && content_type.bytes().any(|b| b < 0x20 || b == 0x7f)
+                    {
+                        err(
+                            rule_field("direct_response.content_type"),
+                            "content_type contains control characters".to_owned(),
+                            "content_type = \"text/plain\"".to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Some(body) = &direct.body
+                        && body.len() > MAX_LOCAL_RESPONSE_BYTES
+                    {
+                        err(
+                            rule_field("direct_response.body"),
+                            format!(
+                                "direct_response.body is {} bytes (maximum {MAX_LOCAL_RESPONSE_BYTES})",
+                                body.len()
+                            ),
+                            "shorter body, or a backend for large payloads".to_owned(),
+                            &section,
+                        );
+                    }
                 }
                 if let Err(cause) = Rule::compile(&rule.to_spec(i)) {
                     let example = if cause.example.is_empty() {

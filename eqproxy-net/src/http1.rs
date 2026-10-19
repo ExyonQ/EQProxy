@@ -38,7 +38,8 @@ use tokio::io::{
 use eqproxy_core::Metrics;
 
 use crate::proxy::{
-    ForwardedMode, OutboundError, READ_BUF, ResolvedListener, RetryContext, checkout_or_connect,
+    ForwardedMode, OutboundError, READ_BUF, ResolvedListener, ResolvedRewrite, RetryContext,
+    RouteDecision, checkout_or_connect,
 };
 
 /// Maximum message-head size (final line included) (T03).
@@ -767,9 +768,21 @@ async fn write_error<W: AsyncWrite + Unpin>(writer: &mut W, status: u16, reason:
     let _ = tokio::time::timeout(Duration::from_secs(5), writer.shutdown()).await;
 }
 
-/// Short reason phrase for a locally generated status (C9).
+/// Short reason phrase for a locally generated status (C9 + v0.6
+/// rule actions).
 fn phrase(status: u16) -> &'static str {
     match status {
+        200 => "ok",
+        201 => "created",
+        202 => "accepted",
+        204 => "no content",
+        301 => "moved permanently",
+        302 => "found",
+        303 => "see other",
+        304 => "not modified",
+        307 => "temporary redirect",
+        308 => "permanent redirect",
+        400 => "bad request",
         403 => "forbidden",
         404 => "not found",
         429 => "too many requests",
@@ -777,7 +790,7 @@ fn phrase(status: u16) -> &'static str {
         502 => "bad gateway",
         503 => "service unavailable",
         504 => "gateway timeout",
-        _ => "error",
+        _ => "response",
     }
 }
 
@@ -812,6 +825,157 @@ async fn write_no_server<W: AsyncWrite + Unpin>(
         return;
     }
     write_error(writer, status, reason).await;
+}
+
+/// Locally-served rule response (v0.6 slice 2: `redirect` and
+/// `direct_response`). Keep-alive only when the exchange stayed aligned
+/// (the request body was drained); otherwise `connection: close`.
+async fn write_rule_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    status: u16,
+    reason: &str,
+    location: Option<&str>,
+    content_type: Option<&str>,
+    body: &str,
+    close: bool,
+) {
+    let mut response = format!(
+        "HTTP/1.1 {status} {reason}\r\nconnection: {}\r\n",
+        if close { "close" } else { "keep-alive" }
+    );
+    if let Some(location) = location {
+        response.push_str("location: ");
+        response.push_str(location);
+        response.push_str("\r\n");
+    }
+    response.push_str("content-type: ");
+    response.push_str(content_type.unwrap_or("text/plain"));
+    response.push_str(&format!(
+        "\r\ncontent-length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    ));
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        writer.write_all(response.as_bytes()),
+    )
+    .await;
+}
+
+/// Reads and discards a request body so a locally-served exchange keeps
+/// the connection aligned for the next one (v0.6 slice 2). `true` =
+/// stream aligned (body fully consumed); a framing error leaves it
+/// unaligned and the caller must close.
+async fn drain_body<T: AsyncRead + Unpin>(
+    reader: &mut T,
+    framing: &BodyFraming,
+    idle: Duration,
+    metrics: &Metrics,
+) -> bool {
+    let discard = AtomicU64::new(0);
+    match framing {
+        BodyFraming::None => true,
+        BodyFraming::ContentLength(len) => copy_exact(
+            reader,
+            &mut tokio::io::sink(),
+            *len,
+            idle,
+            &discard,
+            &metrics.idle_timeouts,
+        )
+        .await
+        .is_ok(),
+        BodyFraming::Chunked => copy_chunked(
+            reader,
+            &mut tokio::io::sink(),
+            idle,
+            &discard,
+            &metrics.idle_timeouts,
+        )
+        .await
+        .is_ok(),
+        BodyFraming::UntilEof => false,
+    }
+}
+
+/// New request target after a rule rewrite (v0.6 slice 2): the matched
+/// prefix is replaced literally and the query string preserved.
+fn rewrite_target(target: &str, rewrite: &ResolvedRewrite) -> String {
+    match &rewrite.path_prefix_rewrite {
+        Some(replacement) => {
+            let (path, query) = match target.split_once('?') {
+                Some((path, query)) => (path, Some(query)),
+                None => (target, None),
+            };
+            let path =
+                eqproxy_core::rules::rewrite_prefix(path, &rewrite.matched_prefix, replacement);
+            match query {
+                Some(query) => format!("{path}?{query}"),
+                None => path,
+            }
+        }
+        None => target.to_owned(),
+    }
+}
+
+/// Rule rewrite applied to the forwarded copy of the head (v0.6 slice
+/// 2): the request line's target is rewritten and/or the `Host` header
+/// set to the configured value. The client's bytes are never mutated.
+/// Same line contract as [`apply_forwarded`] (no trailing blank line).
+fn apply_rewrite(head: &[u8], rewrite: &ResolvedRewrite, target: &str) -> Vec<u8> {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut rest = head;
+    while let Some(pos) = rest.windows(2).position(|w| w == b"\r\n") {
+        lines.push(&rest[..pos]);
+        rest = &rest[pos + 2..];
+    }
+    lines.push(rest);
+
+    let new_target = rewrite_target(target, rewrite);
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(lines.len() + 1);
+    let mut host_done = false;
+    for (i, line) in lines.iter().enumerate() {
+        if i == 0 {
+            // Request line: METHOD SP target SP version.
+            let mut parts = line.splitn(3, |&b| b == b' ');
+            let method = parts.next().unwrap_or_default();
+            let version = parts
+                .next()
+                .and_then(|_| parts.next())
+                .unwrap_or(b"HTTP/1.1");
+            let mut rebuilt = Vec::with_capacity(method.len() + new_target.len() + 16);
+            rebuilt.extend_from_slice(method);
+            rebuilt.push(b' ');
+            rebuilt.extend_from_slice(new_target.as_bytes());
+            rebuilt.push(b' ');
+            rebuilt.extend_from_slice(version);
+            out.push(rebuilt);
+            continue;
+        }
+        let name_end = line.iter().position(|&b| b == b':').unwrap_or(line.len());
+        if line[..name_end].eq_ignore_ascii_case(b"host")
+            && let Some(host) = &rewrite.host_rewrite
+        {
+            out.push(format!("host: {host}").into_bytes());
+            host_done = true;
+            continue;
+        }
+        out.push(line.to_vec());
+    }
+    if let Some(host) = &rewrite.host_rewrite
+        && !host_done
+    {
+        out.push(format!("host: {host}").into_bytes());
+    }
+
+    let mut joined = Vec::with_capacity(head.len() + new_target.len() + 32);
+    for (i, line) in out.iter().enumerate() {
+        if i > 0 {
+            joined.extend_from_slice(CRLF);
+        }
+        joined.extend_from_slice(line);
+    }
+    joined
 }
 
 /// Has the peer already closed this connection? One non-blocking poll:
@@ -988,7 +1152,91 @@ pub async fn serve_http<CR, CW>(
             headers: &request.headers,
             peer: peer.ip(),
         };
-        let backend = cfg.select_backend(&facts);
+        let decision = cfg.decide(&facts);
+        let mut from_client = Prefixed {
+            prefix: carry,
+            pos: 0,
+            inner: &mut client_read,
+        };
+        let (backend, rewrite) = match decision {
+            RouteDecision::Proxy { backend, rewrite } => (backend, rewrite),
+            RouteDecision::Redirect { status, location } => {
+                // Templates are validated at the config gate; a failure
+                // here means a corrupted config (fail closed).
+                let location =
+                    eqproxy_core::rules::render_location(location, &request.host, &request.target)
+                        .unwrap_or_else(|_| "about:blank".to_owned());
+                metrics.redirects_served.fetch_add(1, Ordering::Relaxed);
+                // A local answer is final: with `Expect: 100-continue`
+                // the body was never sent (and must not be awaited) and
+                // `UntilEof` bodies have no boundary — both close after
+                // the response. Otherwise the body is drained so the
+                // connection stays aligned for the next exchange.
+                let aligned = !request.expect_continue
+                    && !matches!(request.framing, BodyFraming::UntilEof)
+                    && drain_body(
+                        &mut from_client,
+                        &request.framing,
+                        cfg.idle_timeout,
+                        &metrics,
+                    )
+                    .await;
+                let close = !aligned || request.wants_close;
+                write_rule_response(
+                    &mut client_write,
+                    status,
+                    phrase(status),
+                    Some(&location),
+                    None,
+                    "",
+                    close,
+                )
+                .await;
+                if close {
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(5), client_write.shutdown()).await;
+                    return;
+                }
+                client_carry = from_client.prefix.split_off(from_client.pos);
+                continue;
+            }
+            RouteDecision::Direct {
+                status,
+                content_type,
+                body,
+            } => {
+                metrics
+                    .direct_responses_served
+                    .fetch_add(1, Ordering::Relaxed);
+                let aligned = !request.expect_continue
+                    && !matches!(request.framing, BodyFraming::UntilEof)
+                    && drain_body(
+                        &mut from_client,
+                        &request.framing,
+                        cfg.idle_timeout,
+                        &metrics,
+                    )
+                    .await;
+                let close = !aligned || request.wants_close;
+                write_rule_response(
+                    &mut client_write,
+                    status,
+                    phrase(status),
+                    None,
+                    Some(content_type),
+                    body,
+                    close,
+                )
+                .await;
+                if close {
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(5), client_write.shutdown()).await;
+                    return;
+                }
+                client_carry = from_client.prefix.split_off(from_client.pos);
+                continue;
+            }
+        };
 
         // --- Backend: reuse from the pool (A16) or dial again ---
         // Retry safety (B-H7): only idempotent requests are replayed
@@ -1017,15 +1265,15 @@ pub async fn serve_http<CR, CW>(
         };
         let mut backend_read = conn.read;
         let mut backend_write = conn.write;
-        let mut from_client = Prefixed {
-            prefix: carry,
-            pos: 0,
-            inner: &mut client_read,
-        };
 
         // --- Head + request body forwarding ---
-        // Forwarded headers (B-N4): rewritten on the forwarded copy only.
+        // Forwarded headers (B-N4) and rule rewrites (v0.6 slice 2):
+        // applied to the forwarded copy only, never to the client's bytes.
         let forwarded_head = apply_forwarded(&head_bytes, peer, cfg.forwarded_headers);
+        let forwarded_head = match rewrite {
+            Some(rewrite) => apply_rewrite(&forwarded_head, rewrite, &request.target),
+            None => forwarded_head,
+        };
         if write_with_timeout(&mut backend_write, &forwarded_head, cfg.idle_timeout)
             .await
             .is_err()

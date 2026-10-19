@@ -1298,6 +1298,44 @@ fn listener_names(listeners: &[ResolvedListener]) -> String {
 
 /// Renders the simulation report. Pure function of the resolved config
 /// (verified by unit test); the only I/O of `explain` is printing it.
+/// One-line summary of a rule action for `config explain` (v0.6 slice
+/// 2): the redirect shows its Location rendered against the simulated
+/// request, so the operator sees the exact URL the client would get.
+fn action_summary(action: &eqproxy_net::RouteAction, host: &str, req_path: &str) -> String {
+    match action {
+        eqproxy_net::RouteAction::Backend { backend, rewrite } => {
+            let mut out = format!("use_backend \"{}\"", backend.name);
+            if let Some(rewrite) = rewrite {
+                let mut parts = Vec::new();
+                if let Some(prefix) = &rewrite.path_prefix_rewrite {
+                    parts.push(format!(
+                        "path_prefix {:?} -> {prefix:?}",
+                        rewrite.matched_prefix
+                    ));
+                }
+                if let Some(new_host) = &rewrite.host_rewrite {
+                    parts.push(format!("host -> {new_host:?}"));
+                }
+                out.push_str(&format!(" (rewrite: {})", parts.join(", ")));
+            }
+            out
+        }
+        eqproxy_net::RouteAction::Redirect { status, location } => {
+            let rendered = eqproxy_core::rules::render_location(location, host, req_path)
+                .unwrap_or_else(|why| format!("(invalid template: {why})"));
+            format!("redirect {status} -> {rendered:?}")
+        }
+        eqproxy_net::RouteAction::Direct {
+            status,
+            content_type,
+            body,
+        } => format!(
+            "direct_response {status} {content_type:?} ({} bytes)",
+            body.len()
+        ),
+    }
+}
+
 fn explain_report(
     config: &Config,
     listener: &ResolvedListener,
@@ -1343,18 +1381,18 @@ fn explain_report(
     if !listener.routes.is_empty() {
         let _ = writeln!(out, "rules: {} (first match wins)", listener.routes.len());
     }
-    let mut chosen: Option<&ResolvedBackend> = None;
+    let mut chosen: Option<&eqproxy_net::RouteAction> = None;
     for (i, route) in listener.routes.iter().enumerate() {
         let label = format!("rule[{i}] \"{}\"", route.rule.name);
         match route.rule.explain(&facts) {
             Ok(()) => {
                 let _ = writeln!(
                     out,
-                    "{label}: match -> use_backend \"{}\"",
-                    route.backend.name
+                    "{label}: match -> {}",
+                    action_summary(&route.action, host, req_path)
                 );
                 if chosen.is_none() {
-                    chosen = Some(&route.backend);
+                    chosen = Some(&route.action);
                 }
             }
             Err(reason) => {
@@ -1362,47 +1400,70 @@ fn explain_report(
             }
         }
     }
-    let backend: &ResolvedBackend = chosen.unwrap_or(&listener.backend);
     let _ = writeln!(
         out,
         "route_decision: {}",
         chosen.map_or_else(
-            || format!("no rule matched -> default backend \"{}\"", backend.name),
-            |_| format!("first matching rule -> backend \"{}\"", backend.name)
+            || format!(
+                "no rule matched -> default backend \"{}\"",
+                listener.backend.name
+            ),
+            |action| format!(
+                "first matching rule -> {}",
+                action_summary(action, host, req_path)
+            )
         )
     );
-    let (fall, rise) = config
-        .backend
-        .get(&backend.name)
-        .and_then(|b| b.health_check.as_ref())
-        .map(|hc| (hc.fall, hc.rise))
-        .unwrap_or((3, 2));
-    // Throwaway balancer: the simulated pick advances no shared state.
-    let sim = eqproxy_net::Balancer::new(backend.servers.clone(), fall, rise);
-    let pick = sim.pick();
-    let proxy_protocol = match backend.proxy_protocol {
-        ProxyProtocolMode::None => "none",
-        ProxyProtocolMode::V1 => "v1",
+    // Backend involvement (v0.6 slice 2): local actions (redirect /
+    // direct_response) never contact one, so the backend, balancer and
+    // server lines only appear when a backend is actually used.
+    let sim_pick: Option<(eqproxy_net::Balancer, Option<std::net::SocketAddr>)> = match chosen {
+        Some(
+            eqproxy_net::RouteAction::Redirect { .. } | eqproxy_net::RouteAction::Direct { .. },
+        ) => {
+            let _ = writeln!(out, "action: local response (no backend contacted)");
+            None
+        }
+        _ => {
+            let backend: &ResolvedBackend = match chosen {
+                Some(eqproxy_net::RouteAction::Backend { backend, .. }) => backend,
+                _ => &listener.backend,
+            };
+            let (fall, rise) = config
+                .backend
+                .get(&backend.name)
+                .and_then(|b| b.health_check.as_ref())
+                .map(|hc| (hc.fall, hc.rise))
+                .unwrap_or((3, 2));
+            // Throwaway balancer: the simulated pick advances no shared state.
+            let sim = eqproxy_net::Balancer::new(backend.servers.clone(), fall, rise);
+            let pick = sim.pick();
+            let proxy_protocol = match backend.proxy_protocol {
+                ProxyProtocolMode::None => "none",
+                ProxyProtocolMode::V1 => "v1",
+            };
+            let health = backend
+                .health_check
+                .as_ref()
+                .map(|hc| {
+                    format!(
+                        "interval={:?} timeout={:?} fall={} rise={}",
+                        hc.interval, hc.timeout, fall, rise
+                    )
+                })
+                .unwrap_or_else(|| "none".to_owned());
+            let _ = writeln!(
+                out,
+                "backend \"{}\": balance=roundrobin servers={} tls={} proxy_protocol={} health_check={}",
+                backend.name,
+                backend.servers.len(),
+                if backend.tls.is_some() { "yes" } else { "no" },
+                proxy_protocol,
+                health,
+            );
+            Some((sim, pick))
+        }
     };
-    let health = backend
-        .health_check
-        .as_ref()
-        .map(|hc| {
-            format!(
-                "interval={:?} timeout={:?} fall={} rise={}",
-                hc.interval, hc.timeout, fall, rise
-            )
-        })
-        .unwrap_or_else(|| "none".to_owned());
-    let _ = writeln!(
-        out,
-        "backend \"{}\": balance=roundrobin servers={} tls={} proxy_protocol={} health_check={}",
-        backend.name,
-        backend.servers.len(),
-        if backend.tls.is_some() { "yes" } else { "no" },
-        proxy_protocol,
-        health,
-    );
     // Phase timeouts and their observable outcome when they fire (Q4/H5:
     // no surprises — `explain` documents what each timeout does BEFORE it
     // can fire, including the response the client receives).
@@ -1428,30 +1489,6 @@ fn explain_report(
         ),
     };
     let _ = writeln!(out, "timeout_on_fire: {fire}");
-    let queue = backend.queue.as_ref().map_or_else(
-        || "none (no server up -> 503 immediately)".to_owned(),
-        |q| {
-            format!(
-                "maxqueue={} timeout={:?} (full->503; expired->503)",
-                q.settings.maxqueue, q.settings.timeout
-            )
-        },
-    );
-    let _ = writeln!(out, "queue: {queue}");
-    let retries = if backend.retries.max == 0 {
-        "none (one dial per exchange)".to_owned()
-    } else {
-        format!(
-            "max={} scope={} (connect-phase only; failed server excluded)",
-            backend.retries.max,
-            if backend.retries.non_idempotent {
-                "all methods"
-            } else {
-                "idempotent-only"
-            }
-        )
-    };
-    let _ = writeln!(out, "retries: {retries}");
     if let Some(local) = &listener.local_response {
         let _ = writeln!(
             out,
@@ -1461,30 +1498,60 @@ fn explain_report(
             local.body.len()
         );
     }
-    for server in &backend.servers {
-        let state = if sim.is_up(server.addr) {
-            "UP(initial)"
-        } else {
-            "DOWN(initial)"
+    if let Some((sim, pick)) = &sim_pick {
+        let backend: &ResolvedBackend = match chosen {
+            Some(eqproxy_net::RouteAction::Backend { backend, .. }) => backend,
+            _ => &listener.backend,
         };
-        let _ = writeln!(
-            out,
-            "server {} weight={} state={state}",
-            server.addr, server.weight
+        let queue = backend.queue.as_ref().map_or_else(
+            || "none (no server up -> 503 immediately)".to_owned(),
+            |q| {
+                format!(
+                    "maxqueue={} timeout={:?} (full->503; expired->503)",
+                    q.settings.maxqueue, q.settings.timeout
+                )
+            },
         );
-    }
-    match pick {
-        Some(addr) => {
+        let _ = writeln!(out, "queue: {queue}");
+        let retries = if backend.retries.max == 0 {
+            "none (one dial per exchange)".to_owned()
+        } else {
+            format!(
+                "max={} scope={} (connect-phase only; failed server excluded)",
+                backend.retries.max,
+                if backend.retries.non_idempotent {
+                    "all methods"
+                } else {
+                    "idempotent-only"
+                }
+            )
+        };
+        let _ = writeln!(out, "retries: {retries}");
+        for server in &backend.servers {
+            let state = if sim.is_up(server.addr) {
+                "UP(initial)"
+            } else {
+                "DOWN(initial)"
+            };
             let _ = writeln!(
                 out,
-                "decision: server {addr} reason=\"first weighted round-robin pick on a throwaway balancer (simulation)\""
+                "server {} weight={} state={state}",
+                server.addr, server.weight
             );
         }
-        None => {
-            let _ = writeln!(
-                out,
-                "decision: none reason=\"no operational server (all drained or zero-weight)\""
-            );
+        match pick {
+            Some(addr) => {
+                let _ = writeln!(
+                    out,
+                    "decision: server {addr} reason=\"first weighted round-robin pick on a throwaway balancer (simulation)\""
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "decision: none reason=\"no operational server (all drained or zero-weight)\""
+                );
+            }
         }
     }
     out
@@ -1625,15 +1692,44 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     eqproxy_core::rules::Rule::compile(&rule.to_spec(i)).map_err(|why| {
                         format!("listener.{name}.rules[{i}].{}: {}", why.field, why.cause)
                     })?;
-                let target = backends.get(&rule.use_backend).ok_or_else(|| {
-                    format!(
-                        "listener.{name}.rules[{i}].use_backend does not exist: \"{}\"",
-                        rule.use_backend
-                    )
-                })?;
+                let action = if let Some(backend_name) = &rule.use_backend {
+                    let target = backends.get(backend_name).ok_or_else(|| {
+                        format!(
+                            "listener.{name}.rules[{i}].use_backend does not exist: \"{backend_name}\""
+                        )
+                    })?;
+                    eqproxy_net::RouteAction::Backend {
+                        backend: Arc::clone(target),
+                        rewrite: rule.rewrite.as_ref().map(|rewrite| {
+                            eqproxy_net::ResolvedRewrite {
+                                matched_prefix: rule.path_prefix.clone().unwrap_or_default(),
+                                path_prefix_rewrite: rewrite.path_prefix_rewrite.clone(),
+                                host_rewrite: rewrite.host_rewrite.clone(),
+                            }
+                        }),
+                    }
+                } else if let Some(redirect) = &rule.redirect {
+                    eqproxy_net::RouteAction::Redirect {
+                        status: redirect.status.unwrap_or(301),
+                        location: redirect.location.clone(),
+                    }
+                } else if let Some(direct) = &rule.direct_response {
+                    eqproxy_net::RouteAction::Direct {
+                        status: direct.status,
+                        content_type: direct
+                            .content_type
+                            .clone()
+                            .unwrap_or_else(|| "text/plain".to_owned()),
+                        body: direct.body.clone().unwrap_or_default(),
+                    }
+                } else {
+                    return Err(format!(
+                        "listener.{name}.rules[{i}]: set exactly one of use_backend, redirect or direct_response"
+                    ));
+                };
                 routes.push(eqproxy_net::ResolvedRoute {
                     rule: compiled,
-                    backend: Arc::clone(target),
+                    action,
                 });
             }
             resolved = resolved.with_routes(routes);
