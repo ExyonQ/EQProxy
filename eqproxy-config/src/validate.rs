@@ -5,13 +5,15 @@ use std::net::SocketAddr;
 use std::path::Path;
 
 use eqproxy_core::expectation::{IpBlock, RegexMatcher, StatusExpectation};
-use eqproxy_core::rules::{Rule, validate_location};
+use eqproxy_core::maps;
+use eqproxy_core::rules::{Rule, validate_header_value, validate_location};
 
 use crate::error::{ConfigError, Location};
 use crate::find_line;
 use crate::schema::{
-    Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_LOCAL_RESPONSE_BYTES, MAX_QUEUE,
-    MAX_RETRIES, MAX_RULES, MAX_SECTIONS, MAX_SERVER_WEIGHT, SCHEMA_VERSION,
+    Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_AUTH_USERS,
+    MAX_LOCAL_RESPONSE_BYTES, MAX_MAP_RELOAD_INTERVAL, MAX_QUEUE, MAX_RETRIES, MAX_RULES,
+    MAX_SECTIONS, MAX_SERVER_WEIGHT, MAX_SPLIT_TARGETS, MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
 };
 
 /// Result of validating a full configuration.
@@ -59,11 +61,15 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         });
     };
 
-    if config.schema_version != SCHEMA_VERSION {
+    // Compatibility policy (Q3, declared): a binary accepts every
+    // schema version it knows — 1 up to its own — so older configs keep
+    // working (backward compatible). Newer ones and the invalid 0 are
+    // rejected naming the supported range.
+    if config.schema_version == 0 || config.schema_version > SCHEMA_VERSION {
         err(
             "schema_version".to_owned(),
             format!(
-                "schema_version = {} not supported by this binary (supported: {SCHEMA_VERSION})",
+                "schema_version = {} not supported by this binary (supported: 1..={SCHEMA_VERSION})",
                 config.schema_version
             ),
             "schema_version = 1".to_owned(),
@@ -84,6 +90,103 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             "shutdown_grace = \"10s\"".to_owned(),
             "shutdown_grace",
         );
+    }
+
+    // Data maps (C10/PP-02): one source per map, bounded data, sane
+    // reload window. The file itself is read at load time (`run`), like
+    // certificates.
+    let referenced_maps: std::collections::BTreeSet<&str> = config
+        .listener
+        .values()
+        .flat_map(|listener| listener.rules.iter())
+        .filter_map(|rule| rule.map.as_ref().map(|map| map.name.as_str()))
+        .collect();
+    for (name, map) in &config.maps {
+        let section = format!("[maps.{name}]");
+        let field = |suffix: &str| format!("maps.{name}.{suffix}");
+        match (&map.file, &map.entries) {
+            (Some(_), Some(_)) | (None, None) => err(
+                field(""),
+                "set exactly one of file or entries".to_owned(),
+                "file = \"tenants.map\" (hot-reloaded) or entries = { acme = \"vip\" } (static)"
+                    .to_owned(),
+                &section,
+            ),
+            (Some(file), None) => {
+                if file.trim().is_empty() {
+                    err(
+                        field("file"),
+                        "file is empty".to_owned(),
+                        "file = \"tenants.map\" (relative to the config file)".to_owned(),
+                        &section,
+                    );
+                }
+            }
+            (None, Some(entries)) => {
+                if entries.len() > maps::MAX_MAP_ENTRIES {
+                    err(
+                        field("entries"),
+                        format!(
+                            "too many entries: {} (maximum {})",
+                            entries.len(),
+                            maps::MAX_MAP_ENTRIES
+                        ),
+                        format!(
+                            "split the data into at most {} entries per map",
+                            maps::MAX_MAP_ENTRIES
+                        ),
+                        &section,
+                    );
+                }
+                for (key, value) in entries {
+                    if let Err(why) = maps::validate_key(key) {
+                        err(
+                            field("entries"),
+                            why,
+                            "acme = \"vip\" (keys are single tokens)".to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Err(why) = maps::validate_value(value) {
+                        err(
+                            field("entries"),
+                            why,
+                            "acme = \"vip\" (values are single-line)".to_owned(),
+                            &section,
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(default) = &map.default
+            && let Err(why) = maps::validate_value(default)
+        {
+            err(
+                field("default"),
+                why,
+                "default = \"free\" (value for keys without an entry)".to_owned(),
+                &section,
+            );
+        }
+        let interval = map.reload_interval;
+        if !interval.is_zero()
+            && (interval < MIN_MAP_RELOAD_INTERVAL || interval > MAX_MAP_RELOAD_INTERVAL)
+        {
+            err(
+                field("reload_interval"),
+                format!(
+                    "reload_interval = {:?} out of range (\"0s\" = load once; otherwise between {:?} and {:?})",
+                    interval, MIN_MAP_RELOAD_INTERVAL, MAX_MAP_RELOAD_INTERVAL
+                ),
+                "reload_interval = \"5s\"".to_owned(),
+                &section,
+            );
+        }
+        if !referenced_maps.contains(name.as_str()) {
+            result
+                .warnings
+                .push(format!("[maps.{name}] is never referenced by any rule"));
+        }
     }
 
     for (name, listener) in &config.listener {
@@ -267,15 +370,83 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                 };
                 // Exactly one action per rule (v0.6 slice 2).
                 let actions = u8::from(rule.use_backend.is_some())
+                    + u8::from(rule.split.is_some())
                     + u8::from(rule.redirect.is_some())
                     + u8::from(rule.direct_response.is_some());
                 if actions != 1 {
                     err(
                         rule_field(""),
-                        "set exactly one of use_backend, redirect or direct_response".to_owned(),
-                        "use_backend = \"api\" (route) | redirect = { status = 301, location = \"https://$host$request_uri\" } | direct_response = { status = 200, body = \"ok\" }".to_owned(),
+                        "set exactly one of use_backend, split, redirect or direct_response"
+                            .to_owned(),
+                        "use_backend = \"api\" (route) | split = [{ backend = \"stable\", weight = 90 }, { backend = \"canary\", weight = 10 }] | redirect = { status = 301, location = \"https://$host$request_uri\" } | direct_response = { status = 200, body = \"ok\" }".to_owned(),
                         &section,
                     );
+                }
+                // Weighted traffic split (B-I11): sound references,
+                // bounded targets, no duplicates, at least one enabled.
+                if let Some(targets) = &rule.split {
+                    if targets.len() < 2 {
+                        err(
+                            rule_field("split"),
+                            "a split needs at least two targets (use use_backend for one backend)"
+                                .to_owned(),
+                            "split = [{ backend = \"stable\", weight = 90 }, { backend = \"canary\", weight = 10 }]".to_owned(),
+                            &section,
+                        );
+                    }
+                    if targets.len() > MAX_SPLIT_TARGETS {
+                        err(
+                            rule_field("split"),
+                            format!(
+                                "too many targets: {} (maximum {MAX_SPLIT_TARGETS})",
+                                targets.len()
+                            ),
+                            format!("reduce split to {MAX_SPLIT_TARGETS} targets"),
+                            &section,
+                        );
+                    }
+                    let mut seen = std::collections::BTreeSet::new();
+                    for (j, target) in targets.iter().enumerate() {
+                        if !seen.insert(target.backend.as_str()) {
+                            err(
+                                rule_field(&format!("split[{j}].backend")),
+                                format!("backend \"{}\" is listed twice", target.backend),
+                                "each backend appears exactly once in split".to_owned(),
+                                &section,
+                            );
+                        }
+                        if !config.backend.contains_key(&target.backend) {
+                            err(
+                                rule_field(&format!("split[{j}].backend")),
+                                format!("backend \"{}\" does not exist", target.backend),
+                                format!(
+                                    "split = [{{ backend = \"{}\", weight = 90 }}] requires a [backend.{}] section",
+                                    target.backend, target.backend
+                                ),
+                                &section,
+                            );
+                        }
+                        if target.weight > MAX_SERVER_WEIGHT {
+                            err(
+                                rule_field(&format!("split[{j}].weight")),
+                                format!(
+                                    "weight = {} out of range (0..={MAX_SERVER_WEIGHT})",
+                                    target.weight
+                                ),
+                                "weight = 10 (0 = target disabled)".to_owned(),
+                                &section,
+                            );
+                        }
+                    }
+                    if !targets.iter().any(|target| target.weight > 0) {
+                        err(
+                            rule_field("split"),
+                            "every target has weight = 0 (no request would ever be routed)"
+                                .to_owned(),
+                            "give at least one target a weight above 0".to_owned(),
+                            &section,
+                        );
+                    }
                 }
                 if let Some(backend) = &rule.use_backend
                     && !config.backend.contains_key(backend)
@@ -288,14 +459,15 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                         ),
                         &section,
                     );
-                }
-                // `rewrite` modifies a `use_backend` action only.
+                } // `rewrite` modifies a forwarding action only.
                 if let Some(rewrite) = &rule.rewrite {
-                    if rule.use_backend.is_none() {
+                    if !rule.forwards() {
                         err(
                             rule_field("rewrite"),
-                            "rewrite only applies to rules with use_backend".to_owned(),
-                            "use_backend = \"api\" + [listener.LISTENER.rules.rewrite] (or use redirect)".to_owned(),
+                            "rewrite only applies to forwarding rules (use_backend or split)"
+                                .to_owned(),
+                            "use_backend = \"api\" + [listener.LISTENER.rules.rewrite] (or use redirect)"
+                                .to_owned(),
                             &section,
                         );
                     }
@@ -341,6 +513,227 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                             "not a valid host value".to_owned(),
                             "host_rewrite = \"internal.svc\" (no spaces or control characters)"
                                 .to_owned(),
+                            &section,
+                        );
+                    }
+                }
+                // Header actions (B-N4/B-I4/B-E17). Request-side ones
+                // modify a forwarded request: forwarding actions only
+                // (like `rewrite`). The proxy owns the framing headers.
+                let request_header_ops = !rule.set_headers.is_empty()
+                    || !rule.add_headers.is_empty()
+                    || !rule.del_headers.is_empty();
+                if request_header_ops && !rule.forwards() {
+                    err(
+                        rule_field("set_headers"),
+                        "set_headers/add_headers/del_headers only apply to forwarding rules (use_backend or split)"
+                            .to_owned(),
+                        "use_backend = \"api\" + set_headers = [{ name = \"x-beta\", value = \"on\" }] (or use response_headers)".to_owned(),
+                        &section,
+                    );
+                }
+                for (op_field, ops) in [
+                    ("set_headers", &rule.set_headers),
+                    ("add_headers", &rule.add_headers),
+                    ("response_headers", &rule.response_headers),
+                ] {
+                    for (j, op) in ops.iter().enumerate() {
+                        let name = op.name.to_ascii_lowercase();
+                        if op.name.is_empty()
+                            || op.name.bytes().any(|b| b <= 0x20 || b == 0x7f || b == b':')
+                        {
+                            err(
+                                rule_field(&format!("{op_field}[{j}].name")),
+                                "not a valid header name".to_owned(),
+                                "name = \"x-beta\" (no spaces, control characters or :)".to_owned(),
+                                &section,
+                            );
+                        }
+                        if matches!(name.as_str(), "content-length" | "transfer-encoding") {
+                            err(
+                                rule_field(&format!("{op_field}[{j}].name")),
+                                format!("{name} is a framing header the proxy owns"),
+                                "a custom header like \"x-backend-hint\" (framing stays the proxy's job)"
+                                    .to_owned(),
+                                &section,
+                            );
+                        }
+                        if let Err(cause) = validate_header_value(&op.value) {
+                            err(
+                                rule_field(&format!("{op_field}[{j}].value")),
+                                cause,
+                                "value = \"$scheme\" (literal text or $remote_addr, $host, $scheme)"
+                                    .to_owned(),
+                                &section,
+                            );
+                        }
+                    }
+                }
+                for (j, name) in rule.del_headers.iter().enumerate() {
+                    let lowered = name.to_ascii_lowercase();
+                    if name.is_empty() || name.bytes().any(|b| b <= 0x20 || b == 0x7f || b == b':')
+                    {
+                        err(
+                            rule_field(&format!("del_headers[{j}]")),
+                            "not a valid header name".to_owned(),
+                            "del_headers = [\"x-gone\"]".to_owned(),
+                            &section,
+                        );
+                    }
+                    if matches!(lowered.as_str(), "content-length" | "transfer-encoding") {
+                        err(
+                            rule_field(&format!("del_headers[{j}]")),
+                            format!("{lowered} is a framing header the proxy owns"),
+                            "del_headers = [\"x-gone\"] (a custom header; framing stays the proxy's job)"
+                                .to_owned(),
+                            &section,
+                        );
+                    }
+                }
+                // CORS policy (B-I10).
+                if let Some(cors) = &rule.cors {
+                    if !rule.forwards() {
+                        err(
+                            rule_field("cors"),
+                            "cors only applies to forwarding rules (use_backend or split)"
+                                .to_owned(),
+                            "use_backend = \"api\" + [listener.LISTENER.rules.cors]".to_owned(),
+                            &section,
+                        );
+                    }
+                    if cors.allow_origin.is_empty()
+                        || cors.allow_origin.bytes().any(|b| b <= 0x20 || b == 0x7f)
+                    {
+                        err(
+                            rule_field("cors.allow_origin"),
+                            "not a valid origin value".to_owned(),
+                            "allow_origin = \"https://app.example.com\"".to_owned(),
+                            &section,
+                        );
+                    }
+                    if cors.allow_origin == "*" && cors.allow_credentials {
+                        err(
+                            rule_field("cors.allow_origin"),
+                            "\"*\" cannot be combined with allow_credentials (the browser rejects that pair)"
+                                .to_owned(),
+                            "allow_origin = \"https://app.example.com\" with allow_credentials = true"
+                                .to_owned(),
+                            &section,
+                        );
+                    }
+                    for (op_field, value) in [
+                        ("cors.allow_methods", cors.allow_methods.as_deref()),
+                        ("cors.allow_headers", cors.allow_headers.as_deref()),
+                        ("cors.expose_headers", cors.expose_headers.as_deref()),
+                    ] {
+                        if let Some(value) = value
+                            && value.bytes().any(|b| b < 0x20 || b == 0x7f)
+                        {
+                            err(
+                                rule_field(op_field),
+                                "value contains control characters".to_owned(),
+                                "comma-separated header list (e.g. \"GET, POST\")".to_owned(),
+                                &section,
+                            );
+                        }
+                    }
+                }
+                // Rate limit (B-N8/B-I7/B-E16): explicit values only.
+                if let Some(limit) = &rule.rate_limit {
+                    if limit.rate == 0 {
+                        err(
+                            rule_field("rate_limit.rate"),
+                            "rate must be at least 1".to_owned(),
+                            "rate = 10".to_owned(),
+                            &section,
+                        );
+                    }
+                    if limit.per.is_zero() {
+                        err(
+                            rule_field("rate_limit.per"),
+                            "per must be greater than zero".to_owned(),
+                            "per = \"1s\"".to_owned(),
+                            &section,
+                        );
+                    }
+                    if limit.burst == Some(0) {
+                        err(
+                            rule_field("rate_limit.burst"),
+                            "burst must be at least 1".to_owned(),
+                            "burst = 20".to_owned(),
+                            &section,
+                        );
+                    }
+                }
+                // Authentication (B-N9/B-I9): at least one mechanism;
+                // htpasswd entries are parsed with the same code the
+                // dataplane verifies with (defined once, Q8).
+                if let Some(auth) = &rule.auth {
+                    if auth.url.is_none() && auth.kind.is_none() {
+                        err(
+                            rule_field("auth"),
+                            "auth needs at least one of url or type".to_owned(),
+                            "url = \"http://127.0.0.1:9000/verify\" (or type = \"basic\")"
+                                .to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Some(url) = &auth.url
+                        && let Err(cause) = eqproxy_core::auth::parse_auth_url(url)
+                    {
+                        err(
+                            rule_field("auth.url"),
+                            cause,
+                            "url = \"http://127.0.0.1:9000/verify\"".to_owned(),
+                            &section,
+                        );
+                    }
+                    if auth.kind.is_none() && (!auth.users.is_empty() || auth.realm.is_some()) {
+                        err(
+                            rule_field("auth.type"),
+                            "users and realm only apply to type = \"basic\"".to_owned(),
+                            "type = \"basic\"".to_owned(),
+                            &section,
+                        );
+                    }
+                    if auth.kind.is_some() && auth.users.is_empty() {
+                        err(
+                            rule_field("auth.users"),
+                            "basic auth needs at least one user".to_owned(),
+                            "users = [\"alice:$apr1$…\"]".to_owned(),
+                            &section,
+                        );
+                    }
+                    if auth.users.len() > MAX_AUTH_USERS {
+                        err(
+                            rule_field("auth.users"),
+                            format!(
+                                "too many users: {} (maximum {MAX_AUTH_USERS} per rule)",
+                                auth.users.len()
+                            ),
+                            format!("at most {MAX_AUTH_USERS} users entries"),
+                            &section,
+                        );
+                    }
+                    if let Err(cause) = eqproxy_core::auth::BasicUsers::parse(&auth.users) {
+                        err(
+                            rule_field("auth.users"),
+                            cause,
+                            "users = [\"alice:$apr1$…\"] (htpasswd entries)".to_owned(),
+                            &section,
+                        );
+                    }
+                    if let Some(realm) = &auth.realm
+                        && (realm.is_empty()
+                            || realm
+                                .bytes()
+                                .any(|b| b < 0x20 || b == 0x7f || b == b'"' || b == b'\\'))
+                    {
+                        err(
+                            rule_field("auth.realm"),
+                            "not a valid realm (no control characters, quotes or backslashes)"
+                                .to_owned(),
+                            "realm = \"EQProxy\"".to_owned(),
                             &section,
                         );
                     }
@@ -403,6 +796,21 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                         );
                     }
                 }
+                // Map-backed condition (C10): the referenced map must
+                // exist (shape problems land in Rule::compile below).
+                if let Some(map) = &rule.map
+                    && !config.maps.contains_key(&map.name)
+                {
+                    err(
+                        rule_field("map.name"),
+                        format!("map \"{}\" does not exist", map.name),
+                        format!(
+                            "map = {{ name = \"{}\", key = \"host\" }} requires a [maps.{}] section",
+                            map.name, map.name
+                        ),
+                        &section,
+                    );
+                }
                 if let Err(cause) = Rule::compile(&rule.to_spec(i)) {
                     let example = if cause.example.is_empty() {
                         format!("rule \"{}\"", rule.name.clone().unwrap_or_default())
@@ -433,6 +841,30 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
     for (name, backend) in &config.backend {
         let section = format!("[backend.{name}]");
         let field = |suffix: &str| format!("backend.{name}.{suffix}");
+        // Session affinity (B-H8/B-N13/B-I8).
+        if let Some(affinity) = &backend.affinity {
+            if affinity.mode != "cookie" && affinity.mode != "source" {
+                err(
+                    field("affinity.mode"),
+                    "mode must be \"cookie\" or \"source\"".to_owned(),
+                    "mode = \"cookie\"".to_owned(),
+                    &section,
+                );
+            }
+            if let Some(cookie) = &affinity.cookie
+                && (cookie.is_empty()
+                    || cookie
+                        .bytes()
+                        .any(|b| b <= 0x20 || b == 0x7f || b == b';' || b == b'='))
+            {
+                err(
+                    field("affinity.cookie"),
+                    "not a valid cookie name".to_owned(),
+                    "cookie = \"eqproxy_affinity\"".to_owned(),
+                    &section,
+                );
+            }
+        }
 
         match (&backend.server, &backend.servers) {
             (None, None) => err(
@@ -468,11 +900,11 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             } else {
                 format!("servers[{idx}].addr")
             };
-            if addr.parse::<SocketAddr>().is_err() {
+            if let Err(why) = crate::schema::parse_server_target(addr) {
                 err(
                     field(&suffix),
-                    format!("\"{addr}\" is not a valid address (expected IP:PORT)"),
-                    "addr = \"127.0.0.1:9000\"".to_owned(),
+                    format!("{why} (expected IP:PORT or HOSTNAME:PORT)"),
+                    "addr = \"127.0.0.1:9000\" (or \"api.internal:9000\")".to_owned(),
                     &section,
                 );
             }
@@ -484,7 +916,7 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
-            if !seen_addrs.insert(addr) {
+            if !seen_addrs.insert(addr.to_ascii_lowercase()) {
                 err(
                     field(&suffix),
                     format!("duplicate server: \"{addr}\" appears more than once"),
@@ -492,6 +924,34 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
+        }
+
+        // Slow start (B14): bounded like HAProxy `slowstart` (0 = off,
+        // maximum 1h). A silent unbounded ramp would be a footgun.
+        if backend.slow_start > std::time::Duration::from_secs(3600) {
+            err(
+                field("slow_start"),
+                format!(
+                    "slow_start = \"{:?}\" out of range (maximum 1h)",
+                    backend.slow_start
+                ),
+                "slow_start = \"30s\" (0s = disabled; maximum 1h)".to_owned(),
+                &section,
+            );
+        }
+
+        // Re-resolution (B-H13/B-N18/B-E15): bounded. "0s" = resolve
+        // once at startup (no periodic re-resolution).
+        if backend.resolve_interval > std::time::Duration::from_secs(24 * 3600) {
+            err(
+                field("resolve_interval"),
+                format!(
+                    "resolve_interval = \"{:?}\" out of range (maximum 24h)",
+                    backend.resolve_interval
+                ),
+                "resolve_interval = \"30s\" (0s = resolve once at startup; maximum 24h)".to_owned(),
+                &section,
+            );
         }
 
         if let Some(hc) = &backend.health_check {
@@ -671,6 +1131,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             listener: BTreeMap::new(),
             backend: BTreeMap::new(),
+            maps: BTreeMap::new(),
             shutdown_grace: Duration::from_secs(10),
             metrics: crate::schema::MetricsConfig::default(),
         };
@@ -695,6 +1156,7 @@ mod tests {
                     idle_timeout: Duration::from_secs(60),
                     client_header_timeout: Duration::from_secs(5),
                     server_header_timeout: Duration::from_secs(30),
+                    max_stream_duration: Duration::ZERO,
                     tls: None,
                     proxy_receive: false,
                     proxy_allow: Vec::new(),
@@ -787,6 +1249,70 @@ mod tests {
         }
     }
 
+    /// Authentication (B-N9/B-I9): every bad auth block is rejected
+    /// naming its field and the fix; a well-formed pair of mechanisms
+    /// validates.
+    #[test]
+    fn auth_rules_name_the_field_and_the_fix() {
+        let source_for = |auth: &str| {
+            format!(
+                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nmode = \"http\"\nbackend = \"api\"\n[[listener.web.rules]]\npath = \"/x\"\nuse_backend = \"api\"\n{auth}\n[backend.api]\nserver = \"127.0.0.1:9000\"\n"
+            )
+        };
+        for (auth, field, why) in [
+            (
+                "[listener.web.rules.auth]\nrealm = \"x\"",
+                "listener.web.rules[0].auth",
+                "at least one of url or type",
+            ),
+            (
+                "[listener.web.rules.auth]\nurl = \"https://auth.example/verify\"",
+                "listener.web.rules[0].auth.url",
+                "http:// only",
+            ),
+            (
+                "[listener.web.rules.auth]\ntype = \"basic\"",
+                "listener.web.rules[0].auth.users",
+                "at least one user",
+            ),
+            (
+                "[listener.web.rules.auth]\nusers = [\"alice:x\"]",
+                "listener.web.rules[0].auth.type",
+                "only apply to type",
+            ),
+            (
+                "[listener.web.rules.auth]\ntype = \"basic\"\nusers = [\"alice:$2y$05$abcdefghijklmnopqrstuv\"]",
+                "listener.web.rules[0].auth.users",
+                "openssl passwd -apr1",
+            ),
+            (
+                "[listener.web.rules.auth]\ntype = \"basic\"\nusers = [\"alice:x\"]\nrealm = \"bad\\\"realm\"",
+                "listener.web.rules[0].auth.realm",
+                "realm",
+            ),
+        ] {
+            let result = check_source(&source_for(auth));
+            let err = result
+                .errors
+                .iter()
+                .find(|err| err.field.as_deref() == Some(field))
+                .unwrap_or_else(|| panic!("no error for {field}: {:?}", result.errors));
+            assert!(
+                err.cause.contains(why),
+                "cause must contain {why:?}: {}",
+                err.cause
+            );
+        }
+        for auth in [
+            "[listener.web.rules.auth]\ntype = \"basic\"\nusers = [\"alice:$apr1$eqpr0xyS$DDjQzF4.2qDil6v9iW4Xo1\"]\nrealm = \"EQProxy\"",
+            "[listener.web.rules.auth]\nurl = \"http://127.0.0.1:9000/verify\"",
+            "[listener.web.rules.auth]\nurl = \"http://auth.example/verify\"\ntype = \"basic\"\nusers = [\"alice:x\"]",
+        ] {
+            let result = check_source(&source_for(auth));
+            assert!(result.is_valid(), "unexpected errors: {:?}", result.errors);
+        }
+    }
+
     #[test]
     fn queue_and_retries_rules() {
         let result = check_source(
@@ -851,6 +1377,35 @@ mod tests {
             "#,
         );
         assert!(result.is_valid(), "unexpected errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn schema_version_policy_accepts_known_rejects_newer() {
+        // Backward compatibility (Q3): every known version is accepted.
+        let result = check_source(
+            "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n",
+        );
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
+        // Newer (and the invalid 0) are rejected, naming the range.
+        for version in ["0", "2", "99"] {
+            let source = format!(
+                "schema_version = {version}\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n"
+            );
+            let result = check_source(&source);
+            assert!(!result.is_valid(), "version {version} must be rejected");
+            let err = &result.errors[0];
+            assert_eq!(err.field.as_deref(), Some("schema_version"));
+            assert!(
+                err.cause.contains("not supported by this binary"),
+                "cause: {}",
+                err.cause
+            );
+            assert!(
+                err.cause.contains("supported: 1..="),
+                "must name the supported range: {}",
+                err.cause
+            );
+        }
     }
 
     #[test]
@@ -1028,6 +1583,67 @@ server = "127.0.0.1:9000"
     }
 
     #[test]
+    fn hostname_servers_parse_and_validate_actionably() {
+        use crate::schema::{ServerTarget, parse_server_target};
+
+        // Parser (shared by validate and the dataplane translation).
+        assert_eq!(
+            parse_server_target("127.0.0.1:9000").expect("literal"),
+            ServerTarget::Ip("127.0.0.1:9000".parse().expect("addr"))
+        );
+        assert_eq!(
+            parse_server_target("[::1]:9000").expect("v6"),
+            ServerTarget::Ip("[::1]:9000".parse().expect("addr"))
+        );
+        assert_eq!(
+            parse_server_target("API.Internal:9000").expect("name"),
+            ServerTarget::Name {
+                host: "api.internal".to_owned(),
+                port: 9000,
+            },
+            "hostnames are lowercased (DNS is case-insensitive)"
+        );
+        let missing_port = parse_server_target("api.internal").expect_err("no port");
+        assert!(missing_port.contains(":PORT"), "{missing_port}");
+        let bad_host = parse_server_target("bad host:80").expect_err("space");
+        assert!(bad_host.contains("letters, digits"), "{bad_host}");
+        let bad_port = parse_server_target("api.internal:http").expect_err("port");
+        assert!(bad_port.contains("between 0 and 65535"), "{bad_port}");
+        let raw_v6 = parse_server_target("::1:8080").expect_err("unbracketed v6");
+        assert!(raw_v6.contains("brackets"), "{raw_v6}");
+
+        // Validation: hostnames accepted, errors name field + cause.
+        let ok = check_source(
+            "schema_version = 1\n[backend.api]\nresolve_interval = \"30s\"\nservers = [{ addr = \"api.internal:9000\" }]\n",
+        );
+        assert!(ok.is_valid(), "errors: {:?}", ok.errors);
+
+        let bad = check_source(
+            "schema_version = 1\n[backend.api]\nresolve_interval = \"25h\"\nservers = [{ addr = \"bad host:80\" }]\n",
+        );
+        let fields: Vec<_> = bad.errors.iter().filter_map(|e| e.field.clone()).collect();
+        assert_eq!(
+            fields,
+            vec![
+                "backend.api.servers[0].addr",
+                "backend.api.resolve_interval"
+            ],
+            "errors: {:?}",
+            bad.errors
+        );
+        assert!(
+            bad.errors[0].cause.contains("letters, digits"),
+            "the address error must name the cause: {:?}",
+            bad.errors[0]
+        );
+        assert!(
+            bad.errors[1].cause.contains("maximum 24h"),
+            "the interval error must name the bound: {:?}",
+            bad.errors[1]
+        );
+    }
+
+    #[test]
     fn health_check_values_must_be_positive() {
         let result = check_source(
             "schema_version = 1\n[backend.api]\nserver = \"127.0.0.1:1\"\n[backend.api.health_check]\ninterval = \"0s\"\ntimeout = \"0ms\"\nfall = 0\nrise = 0\n",
@@ -1104,6 +1720,236 @@ server = "127.0.0.1:9000"
             result.warnings.iter().any(|w| w.contains("ulimit")),
             "warnings: {:?}",
             result.warnings
+        );
+    }
+
+    // --- B-I11 (split) and C10 (hot maps) gate ---
+
+    fn split_config(targets: &str) -> String {
+        format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8080\"\n\
+             mode = \"http\"\n\
+             backend = \"stable\"\n\
+             [[listener.web.rules]]\n\
+             name = \"canary\"\n\
+             path_prefix = \"/\"\n\
+             split = [{targets}]\n\
+             [backend.stable]\n\
+             server = \"127.0.0.1:9000\"\n\
+             [backend.canary]\n\
+             server = \"127.0.0.1:9001\"\n"
+        )
+    }
+
+    #[test]
+    fn split_targets_are_validated_with_actionable_fields() {
+        let ok = check_source(&split_config(
+            "{ backend = \"stable\", weight = 90 }, { backend = \"canary\", weight = 10 }",
+        ));
+        assert!(ok.is_valid(), "errors: {:?}", ok.errors);
+
+        let ghost = check_source(&split_config(
+            "{ backend = \"stable\", weight = 9 }, { backend = \"ghost\", weight = 1 }",
+        ));
+        let err = ghost
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("listener.web.rules[0].split[1].backend"))
+            .expect("names split[1].backend");
+        assert!(err.cause.contains("ghost"), "{err:?}");
+        assert!(err.example.contains("[backend.ghost]"), "{err:?}");
+
+        let dupe = check_source(&split_config(
+            "{ backend = \"stable\", weight = 1 }, { backend = \"stable\", weight = 1 }",
+        ));
+        assert!(
+            dupe.errors.iter().any(|e| e.cause.contains("listed twice")),
+            "errors: {:?}",
+            dupe.errors
+        );
+
+        let single = check_source(&split_config("{ backend = \"stable\", weight = 1 }"));
+        assert!(
+            single
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("at least two targets")),
+            "errors: {:?}",
+            single.errors
+        );
+
+        let zero = check_source(&split_config(
+            "{ backend = \"stable\", weight = 0 }, { backend = \"canary\", weight = 0 }",
+        ));
+        assert!(
+            zero.errors
+                .iter()
+                .any(|e| e.cause.contains("weight = 0 (no request")),
+            "errors: {:?}",
+            zero.errors
+        );
+
+        let heavy = check_source(&split_config(
+            "{ backend = \"stable\", weight = 257 }, { backend = \"canary\", weight = 1 }",
+        ));
+        assert!(
+            heavy.errors.iter().any(|e| e.field.as_deref()
+                == Some("listener.web.rules[0].split[0].weight")
+                && e.cause.contains("out of range")),
+            "errors: {:?}",
+            heavy.errors
+        );
+    }
+
+    #[test]
+    fn split_is_an_exclusive_action_and_forwards() {
+        let both = check_source(
+            &split_config(
+                "{ backend = \"stable\", weight = 1 }, { backend = \"canary\", weight = 1 }",
+            )
+            .replace("split = ", "use_backend = \"stable\"\nsplit = "),
+        );
+        assert!(
+            both.errors
+                .iter()
+                .any(|e| e.cause.contains("set exactly one of use_backend, split")),
+            "errors: {:?}",
+            both.errors
+        );
+
+        // A split forwards: rewrite and request-side header ops apply.
+        let forwards = check_source(
+            &split_config(
+                "{ backend = \"stable\", weight = 1 }, { backend = \"canary\", weight = 1 }",
+            )
+            .replace(
+                "split = ",
+                "set_headers = [{ name = \"x-beta\", value = \"on\" }]\nrewrite = { host_rewrite = \"internal\" }\nsplit = ",
+            ),
+        );
+        assert!(forwards.is_valid(), "errors: {:?}", forwards.errors);
+    }
+
+    #[test]
+    fn map_sections_validate_sources_budgets_and_reload_window() {
+        let both = check_source(
+            "schema_version = 1\n[maps.t]\nfile = \"t.map\"\nentries = { a = \"1\" }\n",
+        );
+        assert!(
+            both.errors
+                .iter()
+                .any(|e| e.cause.contains("set exactly one of file or entries")),
+            "errors: {:?}",
+            both.errors
+        );
+        let neither = check_source("schema_version = 1\n[maps.t]\ndefault = \"x\"\n");
+        assert!(
+            neither
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("set exactly one of file or entries")),
+            "errors: {:?}",
+            neither.errors
+        );
+        let fast = check_source(
+            "schema_version = 1\n[maps.t]\nfile = \"t.map\"\nreload_interval = \"100ms\"\n",
+        );
+        let err = fast
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("maps.t.reload_interval"))
+            .expect("names maps.t.reload_interval");
+        assert!(err.cause.contains("out of range"), "{err:?}");
+
+        let bad_key =
+            check_source("schema_version = 1\n[maps.t]\nentries = { \"has space\" = \"1\" }\n");
+        assert!(
+            bad_key
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("whitespace")),
+            "errors: {:?}",
+            bad_key.errors
+        );
+
+        // Unreferenced maps warn; referenced ones do not.
+        let orphan = check_source("schema_version = 1\n[maps.t]\nfile = \"t.map\"\n");
+        assert!(orphan.is_valid(), "errors: {:?}", orphan.errors);
+        assert!(
+            orphan.warnings.iter().any(|w| w.contains("[maps.t]")),
+            "warnings: {:?}",
+            orphan.warnings
+        );
+    }
+
+    #[test]
+    fn map_conditions_need_an_existing_map_and_valid_shape() {
+        let ghost = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8080\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             [[listener.web.rules]]\n\
+             name = \"gate\"\n\
+             map = { name = \"ghost\", key = \"host\" }\n\
+             use_backend = \"api\"\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        let err = ghost
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("listener.web.rules[0].map.name"))
+            .expect("names map.name");
+        assert!(err.cause.contains("does not exist"), "{err:?}");
+        assert!(err.example.contains("[maps.ghost]"), "{err:?}");
+
+        let ambiguous = check_source(
+            "schema_version = 1\n\
+             [maps.t]\n\
+             file = \"t.map\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8080\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             [[listener.web.rules]]\n\
+             name = \"gate\"\n\
+             map = { name = \"t\", key = \"host\", header = \"x-a\" }\n\
+             use_backend = \"api\"\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            ambiguous.errors.iter().any(|e| e.field.as_deref()
+                == Some("listener.web.rules[0].map.key")
+                && e.cause.contains("exactly one of key or header")),
+            "errors: {:?}",
+            ambiguous.errors
+        );
+
+        // Cookies: a bad name is rejected with the shared matcher grammar.
+        let bad_cookie = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8080\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             [[listener.web.rules]]\n\
+             name = \"canary\"\n\
+             cookies = [{ name = \"bad name\", present = true }]\n\
+             use_backend = \"api\"\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            bad_cookie.errors.iter().any(|e| e.field.as_deref()
+                == Some("listener.web.rules[0].cookies[0]")
+                && e.cause.contains("cookie name")),
+            "errors: {:?}",
+            bad_cookie.errors
         );
     }
 }

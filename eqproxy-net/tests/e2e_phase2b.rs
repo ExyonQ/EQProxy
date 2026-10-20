@@ -117,7 +117,7 @@ fn base_listener(name: &str, backend: Arc<ResolvedBackend>) -> ResolvedListener 
         name,
         "127.0.0.1:0".parse().expect("addr"),
         backend.name.clone(),
-        backend.servers[0].addr,
+        backend.servers[0].addr.clone(),
         ProxyMode::Tcp,
         64,
         Duration::from_secs(2),
@@ -339,9 +339,18 @@ async fn balancer_roundrobin() {
     let backend = ResolvedBackend::new(
         "api",
         vec![
-            ResolvedServer { addr: a, weight: 1 },
-            ResolvedServer { addr: b, weight: 1 },
-            ResolvedServer { addr: c, weight: 1 },
+            ResolvedServer {
+                addr: a.into(),
+                weight: 1,
+            },
+            ResolvedServer {
+                addr: b.into(),
+                weight: 1,
+            },
+            ResolvedServer {
+                addr: c.into(),
+                weight: 1,
+            },
         ],
         3,
         2,
@@ -379,8 +388,14 @@ async fn balancer_weights() {
     let backend = ResolvedBackend::new(
         "api",
         vec![
-            ResolvedServer { addr: a, weight: 1 },
-            ResolvedServer { addr: b, weight: 3 },
+            ResolvedServer {
+                addr: a.into(),
+                weight: 1,
+            },
+            ResolvedServer {
+                addr: b.into(),
+                weight: 3,
+            },
         ],
         3,
         2,
@@ -415,9 +430,12 @@ async fn healthchecks_e2e() {
     let backend = ResolvedBackend::new(
         "api",
         vec![
-            ResolvedServer { addr: a, weight: 1 },
             ResolvedServer {
-                addr: b_addr,
+                addr: a.into(),
+                weight: 1,
+            },
+            ResolvedServer {
+                addr: b_addr.into(),
                 weight: 1,
             },
         ],
@@ -528,6 +546,64 @@ async fn proxy_protocol_v1() {
     stop_proxy(handle, serve).await;
 }
 
+/// A10: the same journey with the PROXY v2 binary header. The
+/// expectation is built byte by byte (not with `encode_v2`), so the test
+/// pins the wire format independently of the encoder.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proxy_protocol_v2() {
+    // Backend that reads the fixed 28-byte v2 TCP4 header and answers
+    // with it (header + "pong").
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let backend_addr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut header = [0u8; 28];
+                if socket.read_exact(&mut header).await.is_err() {
+                    return;
+                }
+                let mut payload = [0u8; 4];
+                let _ = socket.read_exact(&mut payload).await;
+                let _ = socket.write_all(&header).await;
+                let _ = socket.write_all(b"pong").await;
+            });
+        }
+    });
+
+    let backend =
+        ResolvedBackend::single("api", backend_addr).with_proxy_protocol(ProxyProtocolMode::V2);
+    let cfg = base_listener("web", Arc::new(backend));
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::new(Metrics::default())).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    let client_port = client.local_addr().expect("local").port();
+    client.write_all(b"ping").await.expect("write");
+    let mut expected = Vec::new();
+    expected.extend_from_slice(b"\x0D\x0A\x0D\x0A\x00\x0D\x0AQUIT\x0A");
+    expected.extend_from_slice(&[0x21, 0x11, 0x00, 0x0c]);
+    expected.extend_from_slice(&[127, 0, 0, 1]); // claimed source
+    expected.extend_from_slice(&[127, 0, 0, 1]); // destination
+    expected.extend_from_slice(&client_port.to_be_bytes());
+    expected.extend_from_slice(&proxy_addr.port().to_be_bytes());
+    expected.extend_from_slice(b"pong");
+    let mut response = vec![0u8; expected.len()];
+    tokio::time::timeout(WAIT, client.read_exact(&mut response))
+        .await
+        .expect("response in time")
+        .expect("full response");
+    assert_eq!(
+        response, expected,
+        "the PROXY v2 header must reflect the real peer and destination"
+    );
+
+    drop(client); // without this, `serve` waits for the live tunnel to drain
+    stop_proxy(handle, serve).await;
+}
+
 // --------------------------------------------------- errors and limits -----
 
 #[cfg_attr(
@@ -541,7 +617,7 @@ async fn all_servers_down_returns_503_in_http_mode() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: dead,
+            addr: dead.into(),
             weight: 1,
         }],
         1,
@@ -591,7 +667,7 @@ async fn all_servers_down_closes_connection_in_tcp_mode() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: dead,
+            addr: dead.into(),
             weight: 1,
         }],
         1,
@@ -631,9 +707,12 @@ async fn drained_server_is_skipped() {
     let backend = ResolvedBackend::new(
         "api",
         vec![
-            ResolvedServer { addr: a, weight: 1 },
             ResolvedServer {
-                addr: drained,
+                addr: a.into(),
+                weight: 1,
+            },
+            ResolvedServer {
+                addr: drained.into(),
                 weight: 0,
             },
         ],

@@ -1,0 +1,107 @@
+# EQProxy migration matrix — the translation
+#
+# The single EQProxy config the four source configs of this directory migrate
+# to: docs/migration/{haproxy.cfg,nginx.conf,envoy.yaml,ingress.yaml}. Every
+# matrix case of README.md routes here exactly as in each original. The
+# harness renders this file with the topology's host ports in place of the
+# Service/container addresses below (documented substitution: semantics
+# unchanged, only where the demo pools live).
+schema_version = 1
+
+[listener.web]
+listen = "0.0.0.0:8080"
+mode = "http"
+backend = "fallback"
+forwarded_headers = "append"
+
+# Local answers (no backend contacted).
+[[listener.web.rules]]
+name = "healthz"
+path = "/healthz"
+[listener.web.rules.direct_response]
+status = 200
+body = "ok"
+
+[[listener.web.rules]]
+name = "old-blog"
+path = "/old/blog"
+[listener.web.rules.redirect]
+status = 301
+location = "/blog"
+
+# /admin: POST writes go to the admin pool, everything else is the
+# storefront (method-scoped routing).
+[[listener.web.rules]]
+name = "admin-writes"
+host = "shop.example.com"
+path_prefix = "/admin"
+methods = ["POST"]
+use_backend = "admin"
+
+[[listener.web.rules]]
+name = "admin-reads"
+host = "shop.example.com"
+path_prefix = "/admin"
+use_backend = "web"
+
+# /reports: the reports API.
+[[listener.web.rules]]
+name = "reports"
+host = "shop.example.com"
+path_prefix = "/reports/"
+use_backend = "api"
+
+# Canary of shop.example.com: flagged by cookie or by header.
+[[listener.web.rules]]
+name = "canary-cookie"
+host = "shop.example.com"
+cookies = [{ name = "canary", exact = "on" }]
+use_backend = "canary"
+
+[[listener.web.rules]]
+name = "canary-header"
+host = "shop.example.com"
+headers = [{ name = "x-canary", exact = "on" }]
+use_backend = "canary"
+
+# api.example.com: /api/v1/<rest> -> /api/<rest>, then .json and /api/.
+[[listener.web.rules]]
+name = "api-rewrite"
+host = "api.example.com"
+path_prefix = "/api/v1/"
+use_backend = "api"
+[listener.web.rules.rewrite]
+path_prefix_rewrite = "/api/"
+
+[[listener.web.rules]]
+name = "api-json"
+host = "api.example.com"
+path_regex = "\\.json$"
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "api"
+host = "api.example.com"
+path_prefix = "/api/"
+use_backend = "api"
+
+# The storefront vhost, and (with no other rule matching) the fallback.
+[[listener.web.rules]]
+name = "shop"
+host = "shop.example.com"
+use_backend = "web"
+
+[backend.web]
+server = "172.24.0.11:80"
+
+[backend.api]
+server = "172.24.0.12:80"
+
+[backend.admin]
+server = "172.24.0.13:80"
+
+[backend.canary]
+server = "172.24.0.14:80"
+
+[backend.fallback]
+server = "172.24.0.15:80"

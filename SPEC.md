@@ -158,8 +158,17 @@ only under the documented separation rule.
   default** (Mozilla roots + `ca_file` for private CAs). The SNI/verified name
   defaults to the server's IP literal, overridable with `server_name`.
   The handshake is bounded by `connect_timeout`.
-- **Balancing (B1/B7):** one shared balancer per backend (also shared between
-  listeners referencing it): smooth weighted round-robin, `weight` 0..=256.
+- **Balancing (B1/B7 + B-H5/B-N12/B-E6 + B14):** one shared balancer per
+  backend (also shared between listeners referencing it). Two algorithms:
+  `balance = "roundrobin"` (default; smooth weighted round-robin) and
+  `balance = "leastconn"` (weighted least-connections — HAProxy `leastconn`,
+  nginx `least_conn`, Envoy `LEAST_REQUEST`, all accepted as names: the
+  pick minimizes `active exchanges / effective weight`, ties smoothed by
+  SWRR). **Dynamic weighting:** the weight used at pick time is the
+  *effective weight* = `weight` × the slow-start ramp — with
+  `slow_start = "30s"` (B14; `"0s"` = off, maximum `"1h"`) every
+  transition to operational (startup or recovery after `rise`) ramps it
+  linearly from ~0 to `weight` over the window. `weight` 0..=256.
 - **Health checks (B11 TCP):** one task per backend with checks configured;
   `interval`/`timeout`/`fall`/`rise`. Servers start up; `fall` consecutive
   failures take a server down, `rise` consecutive successes bring it back.
@@ -297,22 +306,29 @@ the whole service), sanitizers/concurrency tools where appropriate.
   4. **HTTP framing (Phase 2a):** EQProxy rejects every ambiguous message
      (CL+TE, duplicates, TE ≠ `chunked`, absolute-form, obs-fold) instead of
      normalizing it as the reference proxy may do in some cases;
-     `CONNECT`/`Upgrade` answer 501 until Phase 4. Trailers only empty or
-     without framing headers.
+     `CONNECT` and `Upgrade` are tunnelled since v0.6 (B-H15/B-I18/B-E11,
+     per-direction idle timeouts). Trailers only empty or without framing
+     headers.
   5. **TLS and ALPN (Phase 2b):** only TLS 1.2/1.3 (TLS 1.0/1.1 never);
      ALPN offers only the configured protocols (only `http/1.1` in this phase)
      and the handshake **fails** when there is no common protocol instead of
      negotiating nothing silently. Backend TLS verifies certificate **and
      hostname by default** (Mozilla roots + `ca_file`); `verify = false` is an
      explicit opt-out with documented risk (THREAT_MODEL).
-  6. **Load balancing (Phase 2b):** smooth weighted round-robin (deterministic;
-     ties broken by configuration order) instead of the reference proxy's WRR
-     variant; `weight = 0` means drained (never picked, still health-checked).
-  7. **Health checks (Phase 2b, TCP):** a check is a TCP connect; check OK ≠
-     functional success (§8.8). HTTP checks with `expect` come in Phase 3.
-  8. **PROXY protocol (Phase 2b):** send-only v1 (header before the payload;
-     `PROXY UNKNOWN` for mixed families); reception and its trust policy come
-     in Phase 3 (never trust PROXY from unauthorized sources).
+  6. **Load balancing (Phase 2b + v0.6 slice):** smooth weighted round-robin
+     (deterministic; ties broken by configuration order) and weighted
+     least-connections (`leastconn`; `active / effective weight`, ties
+     smoothed by SWRR); slow start (B14) ramps the effective weight after
+     every transition to operational; `weight = 0` means drained (never
+     picked, still health-checked).
+  7. **Health checks (Phase 2b/3):** TCP connect, or HTTP with `expect
+     status|rstring`; check OK ≠ functional success (§8.8). HTTP checks
+     complete at the HTTP message boundary (RFC 9112 §6, v0.6 fix), so a
+     keep-alive origin never flaps a healthy server.
+  8. **PROXY protocol (Phase 2b + v0.6):** v1 send (header before the
+     payload; `PROXY UNKNOWN` for mixed families) and v2 send; reception is
+     autodetected (v1/v2) and gated by the origin allowlists of Phase 3 —
+     PROXY is never trusted from unauthorized sources.
   9. (Living log: each matrix row extends it.)
 
 ## 14. Project state and evidence
@@ -327,3 +343,6 @@ the whole service), sanitizers/concurrency tools where appropriate.
 | Phase 2b code (TLS termination/backend TLS/ALPN, weighted RR, TCP health checks, PROXY v1 send) | **Tested** (2026-10-13) | 93 tests green: 57 unit + 26 E2E with real sockets (6 TCP + 8 HTTP + 12 Phase 2b) + 10 E2E through the real `eqproxy` binary (incl. real TLS traffic via `openssl s_client`). Veyra audit ACCEPTED + EvoForge slice eval F=1. Details in the 0.2.0 delivery |
 | Phase 2c code (framing fuzz corpus + live fuzz, first benchmarks, measured budgets) | **Tested** (2026-10-14) | 3 new corpus tests (~10k parser mutants, no-panic + explicit statuses); live cargo-fuzz `framing` 3.83M execs, 0 crashes; S-TCP-01 Comparable, S-H1-01/S-TLS-01 Worse under sustained concurrency (verified EADDRNOTAVAIL root cause, pool in Phase 3); RSS/conn measured (TCP ~37.8, HTTP ~15.1 KiB). Evidence in `docs/evidence/phase2c/bench.md` |
 | Benchmarks | **Measured (Phase 2 scope)** | First runs S-TCP-01, S-H1-01, S-TLS-01 vs 3.4.6 with raw data ([docs/evidence/phase2c/bench.md](docs/evidence/phase2c/bench.md)); full matrix remains Phase 9 |
+| HTTP health-check response framing (close at the message boundary, RFC 9112 §6) | **Tested** (2026-10-19) | 5 unit tests (Content-Length / chunked / HEAD / close-delimited / 64 KiB budget) + 2 E2E interop journeys against keep-alive origins that never close a connection (library level and through the real binary): no check timeout, no flapping to `down` |
+| v0.6 routing rules and traffic control (B-H3/B-H4/B-N2/B-N3/B-N4/B-I4/B-E17/B-N5/B-I6/B-I11/B-H5/B-N8/B-I7/B-I10/B-H8/B-N13/B-N9/B-I9/C10) | **Tested** (2026-10-20) | 302 tests green across 21 suites (unit, property, E2E over real sockets and the real binary) plus two Docker-gated harnesses: differential corpus **23/23** cases (HAProxy 3.4.6, nginx, ingress-nginx data plane, static Envoy v1.34.2) and migration matrix **13/13 cases × 5 implementations = 65/65 checks** ([docs/migration/](docs/migration/README.md), evidence in `docs/evidence/v06-migration/`) |
+| Non-blocking dynamic DNS (B-H13/B-N18/B-E15, CE7) | **Tested** (2026-10-19) | 8 tests: 4 balancer-slot unit + 3 resolver-loop unit (stub seam) + 2 dataplane E2E (hot re-resolution, hung DNS → immediate 503 + recovery) + 2 through the real binary with the OS resolver (broken `.invalid` name → listeners announced < 3 s + counted 503; `localhost` backend → traffic + periodic rounds in METRICS) |

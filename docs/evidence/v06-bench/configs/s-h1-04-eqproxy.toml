@@ -1,0 +1,1078 @@
+schema_version = 1
+shutdown_grace = "5s"
+
+[listener.web]
+listen = "0.0.0.0:19401"
+mode = "http"
+backend = "api"
+maxconn = 4096
+
+[[listener.web.rules]]
+name = "r01-host"
+host = "host1.example"
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r02-path"
+path_prefix = "/p2/"
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r03-method"
+methods = ["POST"]
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r04-header"
+headers = [{ name = "x-tag", exact = "t4" }]
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r05-host"
+host = "host5.example"
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r06-path"
+path_prefix = "/p6/"
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r07-method"
+methods = ["POST"]
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r08-header"
+headers = [{ name = "x-tag", exact = "t8" }]
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r09-host"
+host = "host9.example"
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r10-path"
+path_prefix = "/p10/"
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r11-method"
+methods = ["POST"]
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r12-header"
+headers = [{ name = "x-tag", exact = "t12" }]
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r13-host"
+host = "host13.example"
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r14-path"
+path_prefix = "/p14/"
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r15-method"
+methods = ["POST"]
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r16-header"
+headers = [{ name = "x-tag", exact = "t16" }]
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r17-host"
+host = "host17.example"
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r18-path"
+path_prefix = "/p18/"
+use_backend = "mgmt"
+
+[[listener.web.rules]]
+name = "r19-method"
+methods = ["POST"]
+use_backend = "api"
+
+[[listener.web.rules]]
+name = "r20-bench"
+path_prefix = "/bench/"
+del_headers = ["x-gone"]
+use_backend = "api"
+
+[listener.web.rules.rewrite]
+path_prefix_rewrite = "/api/"
+
+[[listener.web.rules.set_headers]]
+name = "x-beta"
+value = "on"
+
+[[listener.web.rules.add_headers]]
+name = "x-hint"
+value = "extra"
+
+[[listener.web.rules.response_headers]]
+name = "x-marker"
+value = "v06"
+
+[listener.l2]
+listen = "0.0.0.0:19402"
+mode = "http"
+backend = "b3"
+maxconn = 4096
+
+[listener.l3]
+listen = "0.0.0.0:19403"
+mode = "http"
+backend = "b4"
+maxconn = 4096
+
+[listener.l4]
+listen = "0.0.0.0:19404"
+mode = "http"
+backend = "b5"
+maxconn = 4096
+
+[listener.l5]
+listen = "0.0.0.0:19405"
+mode = "http"
+backend = "b6"
+maxconn = 4096
+
+[listener.l6]
+listen = "0.0.0.0:19406"
+mode = "http"
+backend = "b7"
+maxconn = 4096
+
+[listener.l7]
+listen = "0.0.0.0:19407"
+mode = "http"
+backend = "b8"
+maxconn = 4096
+
+[listener.l8]
+listen = "0.0.0.0:19408"
+mode = "http"
+backend = "b9"
+maxconn = 4096
+
+[listener.l9]
+listen = "0.0.0.0:19409"
+mode = "http"
+backend = "b10"
+maxconn = 4096
+
+[listener.l10]
+listen = "0.0.0.0:19410"
+mode = "http"
+backend = "b11"
+maxconn = 4096
+
+[backend.api]
+server = "172.20.0.2:19002"
+[backend.api.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.mgmt]
+server = "172.20.0.2:19003"
+[backend.mgmt.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b3]
+server = "172.20.0.2:19003"
+[backend.b3.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b4]
+server = "172.20.0.2:19002"
+[backend.b4.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b5]
+server = "172.20.0.2:19003"
+[backend.b5.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b6]
+server = "172.20.0.2:19002"
+[backend.b6.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b7]
+server = "172.20.0.2:19003"
+[backend.b7.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b8]
+server = "172.20.0.2:19002"
+[backend.b8.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b9]
+server = "172.20.0.2:19003"
+[backend.b9.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b10]
+server = "172.20.0.2:19002"
+[backend.b10.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b11]
+server = "172.20.0.2:19003"
+[backend.b11.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b12]
+server = "172.20.0.2:19002"
+[backend.b12.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b13]
+server = "172.20.0.2:19003"
+[backend.b13.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b14]
+server = "172.20.0.2:19002"
+[backend.b14.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b15]
+server = "172.20.0.2:19003"
+[backend.b15.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b16]
+server = "172.20.0.2:19002"
+[backend.b16.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b17]
+server = "172.20.0.2:19003"
+[backend.b17.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b18]
+server = "172.20.0.2:19002"
+[backend.b18.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b19]
+server = "172.20.0.2:19003"
+[backend.b19.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b20]
+server = "172.20.0.2:19002"
+[backend.b20.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b21]
+server = "172.20.0.2:19003"
+[backend.b21.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b22]
+server = "172.20.0.2:19002"
+[backend.b22.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b23]
+server = "172.20.0.2:19003"
+[backend.b23.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b24]
+server = "172.20.0.2:19002"
+[backend.b24.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b25]
+server = "172.20.0.2:19003"
+[backend.b25.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b26]
+server = "172.20.0.2:19002"
+[backend.b26.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b27]
+server = "172.20.0.2:19003"
+[backend.b27.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b28]
+server = "172.20.0.2:19002"
+[backend.b28.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b29]
+server = "172.20.0.2:19003"
+[backend.b29.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b30]
+server = "172.20.0.2:19002"
+[backend.b30.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b31]
+server = "172.20.0.2:19003"
+[backend.b31.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b32]
+server = "172.20.0.2:19002"
+[backend.b32.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b33]
+server = "172.20.0.2:19003"
+[backend.b33.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b34]
+server = "172.20.0.2:19002"
+[backend.b34.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b35]
+server = "172.20.0.2:19003"
+[backend.b35.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b36]
+server = "172.20.0.2:19002"
+[backend.b36.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b37]
+server = "172.20.0.2:19003"
+[backend.b37.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b38]
+server = "172.20.0.2:19002"
+[backend.b38.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b39]
+server = "172.20.0.2:19003"
+[backend.b39.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b40]
+server = "172.20.0.2:19002"
+[backend.b40.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b41]
+server = "172.20.0.2:19003"
+[backend.b41.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b42]
+server = "172.20.0.2:19002"
+[backend.b42.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b43]
+server = "172.20.0.2:19003"
+[backend.b43.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b44]
+server = "172.20.0.2:19002"
+[backend.b44.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b45]
+server = "172.20.0.2:19003"
+[backend.b45.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b46]
+server = "172.20.0.2:19002"
+[backend.b46.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b47]
+server = "172.20.0.2:19003"
+[backend.b47.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b48]
+server = "172.20.0.2:19002"
+[backend.b48.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b49]
+server = "172.20.0.2:19003"
+[backend.b49.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b50]
+server = "172.20.0.2:19002"
+[backend.b50.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b51]
+server = "172.20.0.2:19003"
+[backend.b51.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b52]
+server = "172.20.0.2:19002"
+[backend.b52.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b53]
+server = "172.20.0.2:19003"
+[backend.b53.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b54]
+server = "172.20.0.2:19002"
+[backend.b54.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b55]
+server = "172.20.0.2:19003"
+[backend.b55.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b56]
+server = "172.20.0.2:19002"
+[backend.b56.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b57]
+server = "172.20.0.2:19003"
+[backend.b57.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b58]
+server = "172.20.0.2:19002"
+[backend.b58.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b59]
+server = "172.20.0.2:19003"
+[backend.b59.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b60]
+server = "172.20.0.2:19002"
+[backend.b60.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b61]
+server = "172.20.0.2:19003"
+[backend.b61.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b62]
+server = "172.20.0.2:19002"
+[backend.b62.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b63]
+server = "172.20.0.2:19003"
+[backend.b63.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b64]
+server = "172.20.0.2:19002"
+[backend.b64.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b65]
+server = "172.20.0.2:19003"
+[backend.b65.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b66]
+server = "172.20.0.2:19002"
+[backend.b66.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b67]
+server = "172.20.0.2:19003"
+[backend.b67.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b68]
+server = "172.20.0.2:19002"
+[backend.b68.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b69]
+server = "172.20.0.2:19003"
+[backend.b69.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b70]
+server = "172.20.0.2:19002"
+[backend.b70.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b71]
+server = "172.20.0.2:19003"
+[backend.b71.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b72]
+server = "172.20.0.2:19002"
+[backend.b72.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b73]
+server = "172.20.0.2:19003"
+[backend.b73.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b74]
+server = "172.20.0.2:19002"
+[backend.b74.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b75]
+server = "172.20.0.2:19003"
+[backend.b75.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b76]
+server = "172.20.0.2:19002"
+[backend.b76.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b77]
+server = "172.20.0.2:19003"
+[backend.b77.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b78]
+server = "172.20.0.2:19002"
+[backend.b78.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b79]
+server = "172.20.0.2:19003"
+[backend.b79.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b80]
+server = "172.20.0.2:19002"
+[backend.b80.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b81]
+server = "172.20.0.2:19003"
+[backend.b81.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b82]
+server = "172.20.0.2:19002"
+[backend.b82.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b83]
+server = "172.20.0.2:19003"
+[backend.b83.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b84]
+server = "172.20.0.2:19002"
+[backend.b84.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b85]
+server = "172.20.0.2:19003"
+[backend.b85.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b86]
+server = "172.20.0.2:19002"
+[backend.b86.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b87]
+server = "172.20.0.2:19003"
+[backend.b87.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b88]
+server = "172.20.0.2:19002"
+[backend.b88.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b89]
+server = "172.20.0.2:19003"
+[backend.b89.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b90]
+server = "172.20.0.2:19002"
+[backend.b90.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b91]
+server = "172.20.0.2:19003"
+[backend.b91.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b92]
+server = "172.20.0.2:19002"
+[backend.b92.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b93]
+server = "172.20.0.2:19003"
+[backend.b93.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b94]
+server = "172.20.0.2:19002"
+[backend.b94.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b95]
+server = "172.20.0.2:19003"
+[backend.b95.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b96]
+server = "172.20.0.2:19002"
+[backend.b96.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b97]
+server = "172.20.0.2:19003"
+[backend.b97.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b98]
+server = "172.20.0.2:19002"
+[backend.b98.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b99]
+server = "172.20.0.2:19003"
+[backend.b99.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2
+
+[backend.b100]
+server = "172.20.0.2:19002"
+[backend.b100.health_check]
+type = "http"
+interval = "2s"
+timeout = "5s"
+fall = 3
+rise = 2

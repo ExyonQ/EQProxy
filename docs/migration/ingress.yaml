@@ -1,0 +1,246 @@
+# EQProxy migration matrix — source config: ingress-nginx (Kubernetes objects)
+#
+# The same demo deployment as docs/migration/haproxy.cfg, written as the
+# objects an SRE applies to a cluster: Ingress rules per host/path, the
+# canary Ingress for shop.example.com (canary-by-header + canary-by-cookie)
+# and one snippet per local answer / method routing (the standard operator
+# escape hatch; ingress has no method or local-answer routing natively).
+# Service IPs stand for the cluster Services of the demo deployment.
+# Translation: docs/migration/eqproxy.toml. The controller-shaped config
+# these objects generate is docs/migration/ingress-nginx-generated.conf
+# (what the harness runs; the controller object->config translation itself
+# is not exercised — same declared limitation as the differential corpus).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+spec:
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admin
+spec:
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: canary
+spec:
+  ports:
+    - port: 80
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fallback
+spec:
+  ports:
+    - port: 80
+---
+# shop.example.com: local health answer.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-healthz
+  annotations:
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      return 200 "ok";
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /healthz
+            pathType: Exact
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
+---
+# shop.example.com: legacy path redirect.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-redirect
+  annotations:
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      return 301 /blog;
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /old/blog
+            pathType: Exact
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
+---
+# shop.example.com: admin writes go to the admin pool (method routing via
+# snippet: ingress routes by host/path only).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-admin
+  annotations:
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      if ($request_method = POST) { proxy_pass http://172.24.0.13:80; }
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /admin
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
+---
+# shop.example.com: reports API.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-reports
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /reports
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+---
+# shop.example.com: storefront (default route of the vhost).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web
+                port:
+                  number: 80
+---
+# Canary of `shop`: same host + paths, flagged by header or cookie.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shop-canary
+  annotations:
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-by-header: "x-canary"
+    nginx.ingress.kubernetes.io/canary-by-header-value: "on"
+    nginx.ingress.kubernetes.io/canary-by-cookie: "canary"
+    nginx.ingress.kubernetes.io/canary-by-cookie-value: "on"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: canary
+                port:
+                  number: 80
+---
+# api.example.com: rewrite-target /api/v1/<rest> -> /api/<rest>.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /api/$1
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api/v1/(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+---
+# api.example.com: everything under /api/ goes to the API pool.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: api-catch
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: api.example.com
+      http:
+        paths:
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 80
+---
+# Default backend: any other host reaches the fallback pool.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: default
+spec:
+  ingressClassName: nginx
+  defaultBackend:
+    service:
+      name: fallback
+      port:
+        number: 80
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fallback
+                port:
+                  number: 80

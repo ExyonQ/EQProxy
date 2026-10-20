@@ -3,12 +3,133 @@
 Language: **English**. Format follows "Keep a Changelog" (Added / Changed /
 Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
+## [v0.6.0] — 2026-10-20
+
+«Rules, routing and traffic» (Phase 4), complete: requests are routed by
+typed rules, a request can be shaped on the way up and back, traffic is
+balanced, split, limited, pinned and authenticated per rule, DNS changes
+in hot, and migrations from the four reference implementations are
+demonstrated case by case. The version gate closes with every criterion
+measured (below). `v0.6.0-alpha` published the first slice of this same
+phase; everything in the next section is part of this release.
+
+### Added
+
+- Typed routing rules per listener (B-H3/B-H4/B-N2/B-N3): ordered
+  first-match-wins conditions — `host`/`host_prefix`/`host_regex`
+  (case-insensitive, port-free), `path`/`path_prefix`/`path_regex`
+  (literal, no normalization), `methods`, `headers`, `cookies` (RFC 6265),
+  `map` (hot data, below), `ip` CIDR blocks — routing to exactly one action;
+  the listener's `backend` is the default server when nothing matches.
+- Rule actions (B-N5/B-I6/B-I11): `use_backend`, `split` (weighted
+  traffic with smooth round-robin shares and `weight = 0` rollback),
+  `redirect` (3xx with a `$host`/`$uri`/`$request_uri` template) and
+  `direct_response` (local answer, no backend contacted), plus
+  `rewrite.path_prefix_rewrite`/`host_rewrite`.
+- Request and response header actions (B-N4/B-I4/B-E17): `set_headers`,
+  `add_headers`, `del_headers`, `response_headers`, templated with
+  `$remote_addr`/`$host`/`$scheme`; the `forwarded_headers` policy is
+  applied last so a rule can never spoof it, and framing headers are
+  rejected.
+- Balancing (B-H5/B-N12/B-E6): `roundrobin`, `leastconn` (weighted
+  least-connections with SWRR tie-breaking) and `slow_start` dynamic
+  weighting that ramps a recovered server from ~0 to its weight.
+- Source and cookie affinity (B-H8/B-N13/B-I8), bounded by construction
+  (no stick tables): `mode = "source"` hashes the client IP, `mode =
+  "cookie"` inserts a slot token re-issued only when stale.
+- Canary and weighted traffic (B-I11; ingress `canary-weight`,
+  `canary-by-header`, `canary-by-cookie`; Envoy `weighted_clusters`) and
+  hot data maps (C10/PP-02): `[maps.*]` re-read on `reload_interval` and
+  swapped atomically **without a config reload and without losing any
+  other state**; a bad update is rejected once, the last good data keeps
+  serving, `maps[reloads= failures=]` counts it.
+- Per-rule rate limiting (B-N8/B-I7/B-E16): token bucket per client IP
+  with explicit `429` + `rate_limited` counter, no network in the hot
+  path.
+- CORS and HSTS (B-I10): local preflight for `OPTIONS`
+  (`204` + allow-methods/headers/max-age, the backend never sees it) and
+  `access-control-*`/`vary: origin` on rule responses, with `"*"` +
+  credentials rejected at the config gate.
+- Per-rule authentication (B-N9/B-I9): `type = "basic"` against htpasswd
+  (`$apr1$` pinned to `openssl passwd -apr1`, plain allowed, bcrypt/crypt
+  rejected by name) and `auth-url` subrequests carrying the client
+  headers and `X-Original-Method`/`X-Original-URL`, failing closed
+  (`500` for a refusing auth service, `502` when it is down or times out,
+  counted in `auth_denied`/`auth_service_errors`).
+- Non-blocking dynamic DNS (B-H13/B-N18/B-E15): listeners bind and serve
+  immediately whatever DNS does, unresolved slots answer an explicit
+  `503` (counted in `no_available_server`), `resolve_interval` re-resolves
+  and swaps addresses in hot keeping the last-known one on failure, with
+  `dns[ok= failures= updates=]` in METRICS.
+- WebSocket upgrades and `CONNECT` tunnels (B-H15/B-I18/B-E11) with
+  per-direction idle timeouts, and PROXY protocol v2 send + autodetected
+  receive (B-H9/B-E10).
+- Timeouts per phase and direction (Q5/B-H11(p)/B-E12):
+  `stream_idle_timeout`, `max_stream_duration` (total exchange cap,
+  `504` when it fires), `request_headers_timeout`, each documented in
+  `config explain` (`timeout_on_fire`).
+- Migration matrix (v0.6 gate «migración demostrada»): `docs/migration/`
+  holds the same demo deployment written in HAProxy 3.4, operator nginx,
+  static Envoy 1.34 and ingress-nginx Kubernetes objects (plus the config
+  the controller generates) and its translation to `eqproxy.toml`; the
+  harness `eqproxy-cli/tests/migration.rs` runs all four originals in real
+  containers next to the EQProxy binary and asserts **13/13 cases** on
+  every implementation (**65/65 checks**, no exclusions), covering pool
+  choice, canary by header/cookie, method routing, prefix rewrites,
+  redirects, local answers and the default backend.
+- `schema_version` compatibility policy (Q3, ADR-0002): the binary accepts
+  `1..=SCHEMA_VERSION`, rejects unknown fields and versions outside the
+  range by name, and version validation moves only with a declared
+  transition.
+
+### Changed
+
+- Workspace version and the internal path-dependency pins move to
+  `0.6.0` (the release tag must match the workspace version).
+- `config validate`, `doctor`, `config explain` and the config gate now
+  cover the rules, actions, maps, CORS, rate limit, auth, affinity and
+  DNS fields, each error naming the field, the cause and a valid example.
+
+### Fixed
+
+- HTTP health checks complete at the HTTP message boundary (RFC 9112 §6)
+  instead of waiting for the origin to close (`Content-Length`, chunked,
+  `HEAD`/1xx/204/304 and close-delimited bodies), so a keep-alive origin
+  no longer flaps a healthy server to `down`.
+
+### Version gate (all criteria measured)
+
+- Property-test corpus + live fuzzing of the rule evaluator: green
+  (26,834 executions, 0 crashes).
+- Differential corpus against HAProxy 3.4.6, nginx, the ingress-nginx data
+  plane and static Envoy v1.34.2: **23/23 cases**, 0 exclusions
+  (`cargo test -p eqproxy-cli --test differential -- --ignored`).
+- Migration demonstrated: **13/13 cases × 5 implementations = 65/65
+  checks** (`cargo test -p eqproxy-cli --test migration -- --ignored`),
+  evidence in `docs/evidence/v06-migration/`.
+- `config explain` explains the routing decision per rule; hung-DNS
+  startup serves (or answers an explicit `503`); benchmarks S-H1-04/05 on
+  amd64 and arm64 with raw data in `docs/evidence/v06-bench{,-arm64}/`.
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets` (0
+  warnings) and `cargo test --workspace` green.
+
+### Declared gaps (postponed by owner decision, 2026-10-20)
+
+- `hash_policy` (consistent hashing / keyed sessions) and
+  `request_mirror` → v0.6.x.
+- Multi-certificate TLS per SNI (B-I2/B-H10/B-E9) → v0.6.x/v0.7.
+- Public JSON Schema / editor autocompletion (Q1/CE1) → v0.6.x.
+- The B-E4 native-filter equivalence table (CORS, ext_authz, rate_limit
+  already exist under their own names) → v0.6.x.
+- Map values are consumed through `equals` matching only (not as backend
+  names or header values), and map files must be written atomically.
+
 ## [v0.6.0-alpha] — 2026-10-19
 
-First slice of v0.6 «Reglas, enrutado y tráfico»: typed routing rules.
-Published as a **prerelease** (v0.6 stays open: differential tests and
-the remaining version gates are pending). The `:latest` image tags keep
-pointing at v0.5.0 until a final release.
+Prerelease slice of v0.6 «Reglas, enrutado y tráfico»: typed routing rules,
+rule actions and the differential harness; superseded by **v0.6.0** above,
+which carries the complete feature set. Published as a **prerelease** (the
+`:latest` image tags kept pointing at v0.5.0).
 
 ### Added
 
@@ -59,6 +180,118 @@ pointing at v0.5.0 until a final release.
   normalized status, `Location` and body. Run 2026-10-19: 16/16 cases
   agree across the four implementations
   (`cargo test -p eqproxy-cli --test differential -- --ignored`).
+- Header cases in the differential corpus (the B-N4/B-I4 executable
+  spec): `h1` XFF append, `h2` XFF/X-Real-IP anti-spoofing, `h4`
+  X-Forwarded-Proto, `h5`–`h8` set/add/del-header on the way up and a
+  response marker on the way back — each on an `append` and an
+  `anti-spoofing` endpoint per implementation, with declared
+  expectations. The client address is calibrated at run time (the
+  `CLIENT` token) and comma-joined header values are normalized. Run
+  2026-10-19: 23/23 cases agree across their applicable implementations
+  — `h1`/`h2` (implemented)  agree on all four columns; `h4`–`h8` ran as spec ahead of the
+  EQProxy implementation with `PENDING` skips, removed when the header
+  slice landed in this release.
+
+- Header actions and variables (B-N4/B-I4/B-E17; nginx
+  `proxy_set_header`/`add_header`/`proxy_hide_header`, HAProxy
+  `set-header`/`del-header`/`add-header`, Envoy
+  `request_headers_to_add/remove`): per-rule `set_headers` (replace or
+  insert), `add_headers` (append, keeping the client's), `del_headers`
+  (remove before forwarding) and `response_headers` (on the response
+  the client sees, proxied or local). Values are templates with
+  `$remote_addr`, `$host` and `$scheme`, validated at the config gate
+  (unknown placeholders and CR/LF rejected naming the field).
+  Request-side actions require `use_backend`; the `forwarded_headers`
+  policy is applied last and a rule can never override it;
+  `content-length`/`transfer-encoding` are rejected (the proxy owns
+  framing). `forwarded_headers` now also sets `X-Forwarded-Proto` to
+  the client-facing scheme (a single-value header: replaced, never
+  chained). `config explain` shows each action. Differential corpus:
+  23/23 cases with all four columns asserted, 0 exclusions.
+- Advanced balancing (B-H5/B-N12/B-E6, first slice) + slow start (B14):
+  `balance = "leastconn"` (aliases `least_conn` (nginx) and
+  `least_request` (Envoy `LEAST_REQUEST`)) is weighted
+  least-connections — the pick minimizes `active exchanges / effective
+  weight`, ties smoothed by the SWRR rotation. Slow start is the
+  dynamic-weighting engine: with `slow_start = "30s"` (`"0s"` = off,
+  maximum `"1h"`) the *effective weight* ramps linearly from ~0 to
+  `weight` over the window after every transition to operational
+  (startup or recovery after `rise`), so a cold or recovered server is
+  never hammered with full traffic. The in-flight slot is taken under
+  the same lock as the pick (no pick/lease race) and released by an RAII
+  guard at exchange end. Out of this slice (explicitly open): `source`
+  (≈ affinity `mode = "source"`), `uri`/`hdr()` hashing and consistent
+  hashing (RING_HASH/MAGLEV). E2E over real sockets (leastconn routes to
+  the idle server; a 2:1 weighted backend splits 4:2 in flight; the
+  recovered server ramps and then gets exactly 1:1) and against the real
+  binary (`run_leastconn_sends_new_requests_to_the_idle_server`,
+  `run_slow_start_ramps_the_recovered_server_up`, plus the config gate:
+  aliases accepted, `slow_start` bounded, unknown algorithms rejected by
+  name).
+- Non-blocking dynamic DNS (B-H13/B-N18/B-E15) + startup with hung DNS
+  (CE7): `servers = [{ addr = "HOSTNAME:PORT" }]` are resolved in a
+  background task started after `bind` — listeners serve from the first
+  moment whatever DNS does, unresolved slots answer an explicit 503
+  (counted in `no_available_server`) instead of blocking, and
+  `resolve_interval` (default `"30s"`, `"0s"` = resolve once at startup,
+  maximum `"24h"`) re-resolves periodically and swaps addresses in hot
+  (nginx `resolver valid=` / Envoy `dns_refresh_rate` semantics; the raw
+  DNS TTL is not visible through `getaddrinfo`). A failed, empty or
+  timed-out round keeps the last-known address (nginx `valid=` /
+  HAProxy `init-addr last`) and counts in `dns_resolution_failures`; a
+  changed address restarts the health machine and the slow-start ramp.
+  New `dns[ok= failures= updates=]` cluster in METRICS. E2E: hot
+  re-resolution and hung DNS at dataplane level (injected resolver seam,
+  never the request path) plus the real binary with the OS resolver (a
+  broken `.invalid` name → immediate listener + counted 503; a
+  `localhost` backend → traffic + periodic rounds counted). Limitations
+  declared: multi-A records use the first address (nginx `server
+  name:port` semantics; STRICT_DNS-style expansion is a gap); affinity
+  tokens are stable slot indexes across re-resolutions.
+- Canary and weighted traffic (B-I11; ingress-nginx `canary`,
+  `canary-weight`, `canary-by-header`, `canary-by-cookie`; Envoy
+  `weighted_clusters`): the `split` rule action fans requests out
+  across backends by weight — smooth weighted round-robin with exact
+  shares in rotation (3:1 = 3 of every 4 requests), deterministic per
+  request order; `weight = 0` disables a target without touching the
+  rest (canary rollback). Canary-by-header is a rule with a `headers`
+  condition and canary-by-cookie a new `cookies` condition (RFC 6265
+  pair parsing in the `Cookie` header: `;`-separated, pairs without `=`
+  ignored, first occurrence wins, names case-insensitive; exact /
+  unanchored regex / presence). `split` is mutually exclusive with the
+  other actions; `rewrite` and header actions apply to the forwarded
+  request whatever target wins. E2E against the real binary
+  (`run_canary_split_routes_by_weight_with_header_and_cookie_overrides`:
+  3:1 over 8 requests = 6:2, both overrides route 100 % to the canary,
+  `config explain` shows `split [stable w=3, canary w=1]` and the
+  cookie gate offline) and over real sockets
+  (`split_traffic_shares_requests_by_weight_across_backends`,
+  `canary_by_cookie_and_header_overrides_route_to_the_canary`, plus the
+  weight-0 rollback). Selection is deterministic SWRR (documented
+  difference: Envoy's `weighted_clusters` selects randomly).
+- Hot data maps (C10/PP-02): named `key → value` tables consulted by
+  the new `map` rule condition and updatable **in hot**. `[maps.*]`
+  sections hold `file` maps (line format `key value`, `#` comments at
+  line start, duplicate keys rejected; optional `default` like nginx
+  `map`) or static inline `entries`; file maps are re-read every
+  `reload_interval` (default `"5s"`, `"0s"` = load once) and the new
+  data swaps in atomically **without a config reload and without losing
+  any other state** — counters, buckets, pools and live connections
+  survive (the PP-02 success criterion). A malformed or oversized
+  update is rejected once (counted in the new `maps[reloads=
+  failures=]` METRICS cluster) and the last good data keeps serving.
+  The `map` condition selects its lookup key from the request
+  (`key = "ip" | "host" | "path" | "method"`, or `header = "name"`) and
+  matches on presence or `equals` (the mapped value). E2E against the
+  real binary (`run_hot_maps_swap_under_traffic_without_config_reload`:
+  a 100 000-entry map updated under traffic — the modified entries
+  change, the untouched ones keep working, a held keep-alive connection
+  survives the swap and METRICS shows `maps[reloads=1 failures=1]` with
+  `cfg[reloads=0`) and over real sockets
+  (`map_condition_consults_hot_data_and_swaps_in_hot`). Caveat: write
+  map files atomically (write + rename) so the watcher never sees a
+  torn file; map values are not yet usable as backend names or header
+  values (only via `equals` matching).
 
 ### Changed
 
@@ -70,11 +303,29 @@ pointing at v0.5.0 until a final release.
   (it absorbed `scripts/release.sh`), so CI builds and verifies every
   artifact without the folder.
 
+### Fixed
+
+- HTTP health checks complete at the HTTP message boundary (RFC 9112 §6)
+  instead of waiting for the origin to close: `Content-Length` bodies end
+  at the declared length, chunked bodies at the terminal chunk,
+  `HEAD`/1xx/204/304 carry no body whatever the headers announce, and
+  only close-delimited bodies (no framing header) are read to EOF. A
+  keep-alive origin that holds the socket open no longer times every
+  check out and flaps a healthy server to `down` (interop pinned by E2E
+  tests against never-closing origins, Content-Length and chunked, at
+  library and real-binary level).
+
 Verified against the built binary (E2E: multi-backend routing, rule
 order, fallback and negative cases; the rewrite/redirect/direct_response
 actions end to end and their actionable errors) with a property-test
 corpus and a live fuzz target for the evaluator (26,834 executions, 0
-crashes).
+crashes). The v0.6 benchmark campaign (S-H1-04/05, BENCHMARK_PLAN §3)
+was repeated on the second supported architecture (linux/arm64,
+oracle-quasar, 4 vCPU): S-H1-04's gaps replicate within noise (rps
+ratio 1.150 vs 1.141 on amd64, e2e p95 1.38× vs 1.33×), while S-H1-05
+narrows from 4.51× to 1.30× rps because HAProxy's S-H1-05 throughput is
+host-dependent; EQProxy leads on both architectures and both scenarios
+(raw data + cross-arch comparison in `docs/evidence/v06-bench-arm64/`).
 
 ## [v0.5.0] — 2026-10-18
 

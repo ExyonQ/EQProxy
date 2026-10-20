@@ -6,30 +6,46 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: Phase 3 complete (2026-10-16).** A real TCP and HTTP/1.1 proxy
-> (crates `eqproxy-core/config/net/cli`): strict framing, per-phase timeouts,
-> signal cancellation, **TLS termination and backend TLS (verification on by
-> default), ALPN h1, mTLS with client CAs**, weighted round-robin with
-> **active TCP/HTTP health checks (`expect status`/`expect rstring`) and
-> passive failure detection, safe connect-phase retries (idempotent-only
-> unless opted in) with bounded backend queues, incoming PROXY protocol v1
-> with origin allowlists (plus v1 send), forwarded headers (X-Forwarded-For /
-> X-Real-IP), custom local responses, and hot config + certificate reload
-> under traffic with measured swap latency**, backend keep-alive pool, typed
-> TOML configuration with actionable errors and the `eqproxy` CLI (`validate`,
-> `explain` with per-timeout outcomes, `diff`, `plan` dry run, offline
-> `apply`/`rollback` with versioned state, `doctor` pre-flight checks),
-> RFC 9112 conformance for interim responses (1xx) and `Expect:
-> 100-continue`, with 181 tests green (including E2E over real sockets,
-> the real binary, and a framing fuzz corpus). No HTTP/2 yet. Release v0.5.0
-> (binaries and multi-arch image, see Install). Performance (first runs vs
-> 3.4.6, [evidence](docs/evidence/phase2c/bench.md)): after the A16 backend
-> keep-alive pool landed, S-TCP-01, S-H1-01 and S-TLS-01 measure
-> **Comparable** (zero non-2xx; tails comparable, H1/TLS at or below the
-> reference).
+> **Status: v0.6.0 «rules, routing and traffic» (2026-10-20).** A real TCP
+> and HTTP/1.1 proxy (crates `eqproxy-core/config/net/cli`) with **typed
+> routing rules per listener** — host/path/method/header/cookie/map/IP
+> conditions, first match wins — and four rule actions: `use_backend`,
+> `split` (weighted canary with `weight = 0` rollback), `redirect` and
+> `direct_response`. On top of the v0.5 dataplane (strict framing,
+> per-phase timeouts, **TLS termination and backend TLS, ALPN h1, mTLS**,
+> **active TCP/HTTP health checks, passive failure detection, safe
+> idempotent retries, bounded queues, PROXY protocol v1/v2,
+> hot config + certificate reload under traffic**, backend keep-alive pool):
+> **set/add/del request headers and response headers with `$remote_addr`/
+> `$host`/`$scheme` templates, weighted round-robin + leastconn + slow
+> start, source/cookie affinity, non-blocking dynamic DNS, canary by
+> header/cookie/weight, hot data maps updated without a config reload,
+> per-rule rate limiting, CORS/HSTS, basic + subrequest authentication,
+> WebSocket/`CONNECT` tunnels, `max_stream_duration`**, and the `eqproxy`
+> CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
+> `diff`, `plan`, offline `apply`/`rollback`, `doctor`), with **302 tests**
+> green plus two Docker-gated harnesses run before the release:
+> [differential corpus](docs/differential-corpus.md) **23/23** cases against
+> HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy
+> v1.34.2, and the [migration matrix](docs/migration/README.md) **65/65
+> checks** (four real source configs and their `eqproxy.toml` translation
+> routing identically; evidence in
+> [docs/evidence/v06-migration/](docs/evidence/v06-migration/)). No HTTP/2
+> yet. Release v0.6.0 (binaries for darwin/linux amd64+arm64 and multi-arch
+> image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
+> of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100
+> backends, 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms),
+> S-H1-05 (500 backends + health checks) **15 624 vs 3 466 rps** (p95 5.16
+> vs 31.4 ms); the arm64 campaign
+> ([evidence](docs/evidence/v06-bench-arm64/)) leads in both scenarios with
+> S-H1-04 gaps within noise.
 >
-> **Scope honesty:** v0.5.0 is not declared production ready (Phase 9 gate
-> pending): TCP + HTTP/1.1 only; the 24h soak gate **passed** on
+> **Scope honesty:** v0.6.0 is not declared production ready (Phase 9 gate
+> pending). Known gaps, postponed by owner decision and listed in the
+> [CHANGELOG](CHANGELOG.md): consistent hashing (`hash_policy`) and
+> `request_mirror`, multi-certificate TLS per SNI, the public JSON Schema
+> and the remaining WASM-only reference filters (v0.9). Ecosystem
+> extension is WASM-only (v0.9). The 24h soak gate **passed** on
 > netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
 > 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown; budgets in
 > [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) §9).
@@ -43,17 +59,17 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.5.0
+## Install from release v0.6.0
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.5.0).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.0).
 
 ```bash
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.5.0/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.5.0/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.0/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.0/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # Linux: sha256sum -c --ignore-missing SHA256SUMS.txt
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 --version
@@ -74,9 +90,9 @@ EOF
 Docker (linux/amd64 + linux/arm64), same digests on both registries:
 
 ```bash
-docker pull exyonq/eqproxy:0.5.0           # Docker Hub (docs + examples on the repo page)
-docker pull ghcr.io/exyonq/eqproxy:0.5.0   # GitHub Container Registry
-docker run --rm exyonq/eqproxy:0.5.0 --version
+docker pull exyonq/eqproxy:0.6.0           # Docker Hub (docs + examples on the repo page)
+docker pull ghcr.io/exyonq/eqproxy:0.6.0   # GitHub Container Registry
+docker run --rm exyonq/eqproxy:0.6.0 --version
 ```
 
 ## Documentation
@@ -86,6 +102,8 @@ docker run --rm exyonq/eqproxy:0.5.0 --version
 | [SPEC.md](SPEC.md) | Specification: goals, priorities, architecture, state taxonomy |
 | [THREAT_MODEL.md](THREAT_MODEL.md) | Threat model and non-protections statement |
 | [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) | Honest benchmark plan and operator-task study |
+| [docs/differential-corpus.md](docs/differential-corpus.md) | Declared shared-semantics corpus vs HAProxy, nginx, ingress-nginx and Envoy |
+| [docs/migration/README.md](docs/migration/README.md) | Migration matrix: the same deployment in the four source formats and in EQProxy |
 | [docs/adr/](docs/adr/) | Architecture decision records |
 
 ## Key decisions

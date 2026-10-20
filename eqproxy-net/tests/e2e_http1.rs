@@ -431,7 +431,7 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
     );
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
 
-    // T01–T02 corpus: each case must get 400/431/501/505 and never reach
+    // T01–T02 corpus: each case must get 400/431/505 and never reach
     // the backend as a processable request.
     let corpus: &[&[u8]] = &[
         b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n",
@@ -442,7 +442,6 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
         b"GET / HTTP/1.1\r\n Host: x\r\n\r\n",
         b"GET http://evil/ HTTP/1.1\r\nHost: x\r\n\r\n",
         b"GET / HTTP/2.0\r\nHost: x\r\n\r\n",
-        b"CONNECT host:443 HTTP/1.1\r\nHost: x\r\n\r\n",
     ];
     for request in corpus {
         let response = send_and_read(proxy_addr, request).await;
@@ -466,6 +465,193 @@ async fn http1_smuggling_corpus_is_rejected_before_backend() {
     );
     assert_eq!(metrics.snapshot().http_requests_proxied, 0);
 
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+/// Backend that answers the handshake with `status_line` (e.g. "101
+/// Switching Protocols" or "200 Connection established") and then
+/// echoes every raw byte it receives (A7/A8 tunnel shape).
+async fn start_switch_echo_backend(status_line: &'static str) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind switch backend");
+    let addr = listener.local_addr().expect("addr switch backend");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                // Reads the request head (the tests never send bodies).
+                let mut buf = vec![0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    match socket.read(&mut buf[total..]).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                    if total == buf.len() {
+                        return;
+                    }
+                }
+                let response = format!(
+                    "HTTP/1.1 {status_line}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+                );
+                if socket.write_all(response.as_bytes()).await.is_err() {
+                    return;
+                }
+                // Echo tunnel: every byte back.
+                let mut buf = [0u8; 1024];
+                loop {
+                    match socket.read(&mut buf).await {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => {
+                            if socket.write_all(&buf[..n]).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// Reads from `socket` until the head terminator, returning the head and
+/// any bytes read past it.
+async fn read_head_until_blank(socket: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+    use tokio::io::AsyncReadExt;
+    let mut collected: Vec<u8> = Vec::new();
+    let mut buf = [0u8; 256];
+    loop {
+        let n = tokio::time::timeout(WAIT, socket.read(&mut buf))
+            .await
+            .expect("head timeout")
+            .expect("head read");
+        assert!(n > 0, "EOF before the head terminator");
+        collected.extend_from_slice(&buf[..n]);
+        if let Some(end) = collected.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&collected[..end + 4]).into_owned();
+            let rest = collected[end + 4..].to_vec();
+            return (head, rest);
+        }
+    }
+}
+
+/// A7: an upgrade handshake (WebSocket shape) is forwarded and on `101`
+/// the exchange becomes a raw bidirectional tunnel — bytes flow both
+/// ways until close. The connection is consumed: never pooled.
+#[tokio::test]
+async fn upgrade_handshake_opens_a_bidirectional_tunnel() {
+    let backend = start_switch_echo_backend("101 Switching Protocols").await;
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let metrics = Arc::new(Metrics::default());
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut socket = tokio::time::timeout(WAIT, tokio::net::TcpStream::connect(proxy_addr))
+        .await
+        .expect("connect timeout")
+        .expect("proxy up");
+    {
+        use tokio::io::AsyncWriteExt;
+        socket
+            .write_all(
+                b"GET /ws HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n",
+            )
+            .await
+            .expect("handshake write");
+    }
+    let (head, rest) = read_head_until_blank(&mut socket).await;
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    assert!(head.to_lowercase().contains("upgrade: websocket"), "{head}");
+    assert!(rest.is_empty(), "nothing tunneled yet: {rest:?}");
+
+    // Tunnel: raw bytes to the backend and back.
+    {
+        use tokio::io::AsyncWriteExt;
+        socket
+            .write_all(b"ping-tunnel-bytes")
+            .await
+            .expect("tunnel write");
+    }
+    let mut buf = [0u8; 64];
+    let n = tokio::time::timeout(WAIT, socket.read(&mut buf))
+        .await
+        .expect("echo timeout")
+        .expect("echo read");
+    assert_eq!(
+        &buf[..n],
+        b"ping-tunnel-bytes",
+        "the tunnel echoes both ways"
+    );
+
+    drop(socket);
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+/// A8: CONNECT routes on its authority host and on backend `2xx` becomes
+/// the same raw bidirectional tunnel.
+#[tokio::test]
+async fn connect_opens_a_raw_tunnel_on_2xx() {
+    let backend = start_switch_echo_backend("200 Connection established").await;
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    let metrics = Arc::new(Metrics::default());
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut socket = tokio::time::timeout(WAIT, tokio::net::TcpStream::connect(proxy_addr))
+        .await
+        .expect("connect timeout")
+        .expect("proxy up");
+    {
+        use tokio::io::AsyncWriteExt;
+        socket
+            .write_all(b"CONNECT target:443 HTTP/1.1\r\nHost: target:443\r\n\r\n")
+            .await
+            .expect("connect write");
+    }
+    let (head, _) = read_head_until_blank(&mut socket).await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    // Tunnel: a TLS-client-hello shape flows both ways.
+    {
+        use tokio::io::AsyncWriteExt;
+        socket
+            .write_all(b"tunneled-payload")
+            .await
+            .expect("tunnel write");
+    }
+    let mut buf = [0u8; 64];
+    let n = tokio::time::timeout(WAIT, socket.read(&mut buf))
+        .await
+        .expect("echo timeout")
+        .expect("echo read");
+    assert_eq!(
+        &buf[..n],
+        b"tunneled-payload",
+        "the tunnel echoes both ways"
+    );
+
+    drop(socket);
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
         .await
@@ -540,6 +726,48 @@ async fn http1_server_header_timeout_returns_504() {
         "respuesta: {response}"
     );
     assert_eq!(metrics.snapshot().header_timeouts, 1);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http1_max_stream_duration_cuts_the_exchange_with_504() {
+    // B-H11/B-E12: the total exchange cap fires even while every
+    // per-phase timeout would still wait (duration ≠ inactivity, Q5).
+    let backend = start_silent_backend().await;
+    let metrics = Arc::new(Metrics::default());
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    )
+    .with_max_stream_duration(Duration::from_millis(200));
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let start = std::time::Instant::now();
+    let response = send_and_read(
+        proxy_addr,
+        b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(
+        response.starts_with("HTTP/1.1 504"),
+        "respuesta: {response}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "the cap must fire before the phase timeouts: {:?}",
+        start.elapsed()
+    );
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)

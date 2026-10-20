@@ -394,6 +394,11 @@ fn diff_changes(left: &Config, right: &Config) -> Vec<String> {
                 l.server_header_timeout,
                 r.server_header_timeout,
             ),
+            (
+                "max_stream_duration",
+                l.max_stream_duration,
+                r.max_stream_duration,
+            ),
         ] {
             if a != b {
                 changes.push(format!("~ listener \"{name}\" {field}: {a:?} -> {b:?}"));
@@ -673,11 +678,12 @@ fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
         );
         let _ = writeln!(
             out,
-            "  timeouts: connect={:?} idle={:?} client_header={:?} server_header={:?} shutdown_grace={:?}",
+            "  timeouts: connect={:?} idle={:?} client_header={:?} server_header={:?} max_stream={:?} shutdown_grace={:?}",
             listener.connect_timeout,
             listener.idle_timeout,
             listener.client_header_timeout,
             listener.server_header_timeout,
+            listener.max_stream_duration,
             config.shutdown_grace
         );
     }
@@ -690,6 +696,7 @@ fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
         let proxy_protocol = match backend.proxy_protocol {
             ProxyProtocolMode::None => "none",
             ProxyProtocolMode::V1 => "v1",
+            ProxyProtocolMode::V2 => "v2",
         };
         let health = backend
             .health_check
@@ -1301,6 +1308,51 @@ fn listener_names(listeners: &[ResolvedListener]) -> String {
 /// One-line summary of a rule action for `config explain` (v0.6 slice
 /// 2): the redirect shows its Location rendered against the simulated
 /// request, so the operator sees the exact URL the client would get.
+/// One-line summary of a rule's header actions (B-N4/B-I4/B-E17) for
+/// `config explain`; empty when the rule has none.
+fn headers_summary(headers: Option<&eqproxy_net::ResolvedHeaders>) -> String {
+    let Some(headers) = headers else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    for (name, value) in &headers.set {
+        parts.push(format!("set {name} -> {value:?}"));
+    }
+    for (name, value) in &headers.add {
+        parts.push(format!("add {name} -> {value:?}"));
+    }
+    for name in &headers.del {
+        parts.push(format!("del {name}"));
+    }
+    for (name, value) in &headers.response {
+        parts.push(format!("response set {name} -> {value:?}"));
+    }
+    if let Some(cors) = &headers.cors {
+        parts.push(format!("cors origin {}", cors.allow_origin));
+    }
+    if let Some(limit) = &headers.rate_limit {
+        parts.push(limit.describe());
+    }
+    if let Some(auth) = &headers.auth {
+        let mut kinds = Vec::new();
+        if auth.basic.is_some() {
+            kinds.push(format!("basic realm {:?}", auth.realm));
+        }
+        if let Some(url) = &auth.url {
+            kinds.push(format!(
+                "subrequest http://{}:{}{}",
+                url.host, url.port, url.path
+            ));
+        }
+        parts.push(format!("auth {}", kinds.join(" + ")));
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" [headers: {}]", parts.join(", "))
+    }
+}
+
 fn action_summary(action: &eqproxy_net::RouteAction, host: &str, req_path: &str) -> String {
     match action {
         eqproxy_net::RouteAction::Backend { backend, rewrite } => {
@@ -1319,6 +1371,17 @@ fn action_summary(action: &eqproxy_net::RouteAction, host: &str, req_path: &str)
                 out.push_str(&format!(" (rewrite: {})", parts.join(", ")));
             }
             out
+        }
+        eqproxy_net::RouteAction::Split { targets, .. } => {
+            let parts: Vec<String> = targets
+                .targets()
+                .iter()
+                .map(|target| format!("{} w={}", target.backend.name, target.weight))
+                .collect();
+            format!(
+                "split [{}] (smooth weighted round-robin per request)",
+                parts.join(", ")
+            )
         }
         eqproxy_net::RouteAction::Redirect { status, location } => {
             let rendered = eqproxy_core::rules::render_location(location, host, req_path)
@@ -1377,22 +1440,26 @@ fn explain_report(
         path: req_path,
         headers,
         peer: client_ip,
+        maps: listener.maps.as_ref(),
     };
     if !listener.routes.is_empty() {
         let _ = writeln!(out, "rules: {} (first match wins)", listener.routes.len());
     }
     let mut chosen: Option<&eqproxy_net::RouteAction> = None;
+    let mut chosen_headers: Option<&eqproxy_net::ResolvedHeaders> = None;
     for (i, route) in listener.routes.iter().enumerate() {
         let label = format!("rule[{i}] \"{}\"", route.rule.name);
         match route.rule.explain(&facts) {
             Ok(()) => {
                 let _ = writeln!(
                     out,
-                    "{label}: match -> {}",
-                    action_summary(&route.action, host, req_path)
+                    "{label}: match -> {}{}",
+                    action_summary(&route.action, host, req_path),
+                    headers_summary(route.headers.as_ref())
                 );
                 if chosen.is_none() {
                     chosen = Some(&route.action);
+                    chosen_headers = route.headers.as_ref();
                 }
             }
             Err(reason) => {
@@ -1409,38 +1476,82 @@ fn explain_report(
                 listener.backend.name
             ),
             |action| format!(
-                "first matching rule -> {}",
-                action_summary(action, host, req_path)
+                "first matching rule -> {}{}",
+                action_summary(action, host, req_path),
+                headers_summary(chosen_headers)
             )
         )
     );
+    // Data maps in force (C10): what `map` conditions see (the file
+    // watchers keep this data fresh without any reload).
+    for map in listener.maps.iter() {
+        let _ = writeln!(out, "map \"{}\": {}", map.name(), map.describe());
+    }
     // Backend involvement (v0.6 slice 2): local actions (redirect /
     // direct_response) never contact one, so the backend, balancer and
-    // server lines only appear when a backend is actually used.
-    let sim_pick: Option<(eqproxy_net::Balancer, Option<std::net::SocketAddr>)> = match chosen {
+    // server lines only appear when a backend is actually used. For a
+    // `split` (B-I11) the shown backend is the target a throwaway
+    // splitter picks first — the simulated pick advances no shared
+    // state, same contract as the sim balancer.
+    let sim_backend: Option<Arc<ResolvedBackend>> = match chosen {
         Some(
             eqproxy_net::RouteAction::Redirect { .. } | eqproxy_net::RouteAction::Direct { .. },
-        ) => {
+        ) => None,
+        Some(eqproxy_net::RouteAction::Backend { backend, .. }) => Some(Arc::clone(backend)),
+        Some(eqproxy_net::RouteAction::Split { targets, .. }) => {
+            let throwaway = eqproxy_net::SplitTargets::new(
+                targets
+                    .targets()
+                    .iter()
+                    .map(|target| eqproxy_net::SplitTarget {
+                        backend: Arc::clone(&target.backend),
+                        weight: target.weight,
+                    })
+                    .collect(),
+            );
+            Some(Arc::clone(throwaway.pick()))
+        }
+        None => Some(Arc::clone(&listener.backend)),
+    };
+    let sim_pick: Option<(eqproxy_net::Balancer, Option<std::net::SocketAddr>)> = match &sim_backend
+    {
+        None => {
             let _ = writeln!(out, "action: local response (no backend contacted)");
             None
         }
-        _ => {
-            let backend: &ResolvedBackend = match chosen {
-                Some(eqproxy_net::RouteAction::Backend { backend, .. }) => backend,
-                _ => &listener.backend,
-            };
-            let (fall, rise) = config
-                .backend
-                .get(&backend.name)
+        Some(backend) => {
+            let backend_cfg = config.backend.get(&backend.name);
+            let (fall, rise) = backend_cfg
                 .and_then(|b| b.health_check.as_ref())
                 .map(|hc| (hc.fall, hc.rise))
                 .unwrap_or((3, 2));
+            let (algorithm, slow_start) = backend_cfg.map_or(
+                (
+                    eqproxy_config::schema::BalanceAlgorithm::RoundRobin,
+                    std::time::Duration::ZERO,
+                ),
+                |b| (b.balance, b.slow_start),
+            );
             // Throwaway balancer: the simulated pick advances no shared state.
-            let sim = eqproxy_net::Balancer::new(backend.servers.clone(), fall, rise);
+            let sim = eqproxy_net::Balancer::with_options(
+                backend.servers.clone(),
+                fall,
+                rise,
+                balance_algorithm(algorithm),
+                slow_start,
+            );
             let pick = sim.pick();
+            let affinity = match &backend.affinity {
+                Some(affinity) => match affinity.mode {
+                    eqproxy_net::AffinityMode::Cookie => format!("cookie({})", affinity.cookie),
+                    eqproxy_net::AffinityMode::Source => "source".to_owned(),
+                },
+                None => "none".to_owned(),
+            };
             let proxy_protocol = match backend.proxy_protocol {
                 ProxyProtocolMode::None => "none",
                 ProxyProtocolMode::V1 => "v1",
+                ProxyProtocolMode::V2 => "v2",
             };
             let health = backend
                 .health_check
@@ -1452,14 +1563,26 @@ fn explain_report(
                     )
                 })
                 .unwrap_or_else(|| "none".to_owned());
+            let balance_name = match algorithm {
+                eqproxy_config::schema::BalanceAlgorithm::RoundRobin => "roundrobin",
+                eqproxy_config::schema::BalanceAlgorithm::LeastConn => "leastconn",
+            };
+            let slow = if slow_start.is_zero() {
+                String::new()
+            } else {
+                format!(" slow_start={slow_start:?}")
+            };
             let _ = writeln!(
                 out,
-                "backend \"{}\": balance=roundrobin servers={} tls={} proxy_protocol={} health_check={}",
+                "backend \"{}\": balance={} servers={} tls={} proxy_protocol={} health_check={} affinity={}{}",
                 backend.name,
+                balance_name,
                 backend.servers.len(),
                 if backend.tls.is_some() { "yes" } else { "no" },
                 proxy_protocol,
                 health,
+                affinity,
+                slow
             );
             Some((sim, pick))
         }
@@ -1469,24 +1592,34 @@ fn explain_report(
     // can fire, including the response the client receives).
     let _ = writeln!(
         out,
-        "timeouts: connect={:?} idle={:?} client_header={:?} server_header={:?}",
+        "timeouts: connect={:?} idle={:?} client_header={:?} server_header={:?} max_stream={:?}",
         listener.connect_timeout,
         listener.idle_timeout,
         listener.client_header_timeout,
-        listener.server_header_timeout
+        listener.server_header_timeout,
+        listener.max_stream_duration
     );
     let fire = match listener.mode {
         ProxyMode::Tcp => format!(
             "connect=close after {:?}; idle=close after {:?} (tcp: no response channel)",
             listener.connect_timeout, listener.idle_timeout
         ),
-        ProxyMode::Http => format!(
-            "connect=502 after {:?}; client_header=408(first exchange)/close after {:?}; server_header=504 after {:?}; idle=close after {:?}",
-            listener.connect_timeout,
-            listener.client_header_timeout,
-            listener.server_header_timeout,
-            listener.idle_timeout
-        ),
+        ProxyMode::Http => {
+            let mut fire = format!(
+                "connect=502 after {:?}; client_header=408(first exchange)/close after {:?}; server_header=504 after {:?}; idle=close after {:?}",
+                listener.connect_timeout,
+                listener.client_header_timeout,
+                listener.server_header_timeout,
+                listener.idle_timeout
+            );
+            if !listener.max_stream_duration.is_zero() {
+                fire.push_str(&format!(
+                    "; max_stream=504(before head)/close after {:?}",
+                    listener.max_stream_duration
+                ));
+            }
+            fire
+        }
     };
     let _ = writeln!(out, "timeout_on_fire: {fire}");
     if let Some(local) = &listener.local_response {
@@ -1498,11 +1631,8 @@ fn explain_report(
             local.body.len()
         );
     }
-    if let Some((sim, pick)) = &sim_pick {
-        let backend: &ResolvedBackend = match chosen {
-            Some(eqproxy_net::RouteAction::Backend { backend, .. }) => backend,
-            _ => &listener.backend,
-        };
+    if let (Some((sim, pick)), Some(backend)) = (&sim_pick, &sim_backend) {
+        let backend: &ResolvedBackend = backend;
         let queue = backend.queue.as_ref().map_or_else(
             || "none (no server up -> 503 immediately)".to_owned(),
             |q| {
@@ -1528,10 +1658,17 @@ fn explain_report(
         };
         let _ = writeln!(out, "retries: {retries}");
         for server in &backend.servers {
-            let state = if sim.is_up(server.addr) {
-                "UP(initial)"
-            } else {
-                "DOWN(initial)"
+            let state = match &server.addr {
+                eqproxy_net::ServerAddr::Ip(ip) => {
+                    if sim.is_up(*ip) {
+                        "UP(initial)"
+                    } else {
+                        "DOWN(initial)"
+                    }
+                }
+                // Names are resolved in the background (B-H13): the
+                // simulation never blocks on DNS.
+                eqproxy_net::ServerAddr::Name { .. } => "UNRESOLVED(dns)",
             };
             let _ = writeln!(
                 out,
@@ -1541,9 +1678,13 @@ fn explain_report(
         }
         match pick {
             Some(addr) => {
+                let reason = match sim.algorithm() {
+                    eqproxy_net::Balance::RoundRobin => "first weighted round-robin pick",
+                    eqproxy_net::Balance::LeastConn => "first least-connections pick",
+                };
                 let _ = writeln!(
                     out,
-                    "decision: server {addr} reason=\"first weighted round-robin pick on a throwaway balancer (simulation)\""
+                    "decision: server {addr} reason=\"{reason} on a throwaway balancer (simulation)\""
                 );
             }
             None => {
@@ -1564,10 +1705,72 @@ fn base_dir(path: &Path) -> &Path {
         .unwrap_or(Path::new("."))
 }
 
+/// Config balancing algorithm → dataplane (B-H5/B-N12/B-E6).
+fn balance_algorithm(algorithm: eqproxy_config::schema::BalanceAlgorithm) -> eqproxy_net::Balance {
+    match algorithm {
+        eqproxy_config::schema::BalanceAlgorithm::RoundRobin => eqproxy_net::Balance::RoundRobin,
+        eqproxy_config::schema::BalanceAlgorithm::LeastConn => eqproxy_net::Balance::LeastConn,
+    }
+}
+
+/// Loads the `[maps.*]` data maps (C10/PP-02) into one registry per
+/// config generation: file maps are read here (fail-closed at load,
+/// like certificates) and watched by the dataplane afterwards, which
+/// swaps their data in hot without any reload.
+fn load_maps(
+    config: &Config,
+    base_dir: &Path,
+) -> Result<Arc<eqproxy_core::maps::MapRegistry>, String> {
+    let mut registry = eqproxy_core::maps::MapRegistry::new();
+    for (name, map) in &config.maps {
+        let (data, file) = match (&map.file, &map.entries) {
+            (Some(file), None) => {
+                let path = if Path::new(file).is_absolute() {
+                    PathBuf::from(file)
+                } else {
+                    base_dir.join(file)
+                };
+                let meta = std::fs::metadata(&path)
+                    .map_err(|e| format!("maps.{name}.file cannot be read: {e}"))?;
+                if meta.len() > eqproxy_core::maps::MAX_MAP_FILE_BYTES {
+                    return Err(format!(
+                        "maps.{name}.file is {} bytes (maximum {})",
+                        meta.len(),
+                        eqproxy_core::maps::MAX_MAP_FILE_BYTES
+                    ));
+                }
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| format!("maps.{name}.file cannot be read: {e}"))?;
+                let data = eqproxy_core::maps::MapData::parse_bytes(&bytes, map.default.clone())
+                    .map_err(|why| format!("maps.{name}.file: {why} (example: {})", why.example))?;
+                (data, Some(path))
+            }
+            (None, Some(entries)) => {
+                let data = eqproxy_core::maps::MapData::from_entries(entries, map.default.clone())
+                    .map_err(|why| {
+                        format!("maps.{name}.entries: {why} (example: {})", why.example)
+                    })?;
+                (data, None)
+            }
+            _ => {
+                return Err(format!("maps.{name}: set exactly one of file or entries"));
+            }
+        };
+        registry.insert(eqproxy_core::maps::HotMap::new(
+            name.clone(),
+            data,
+            file,
+            map.reload_interval,
+        ));
+    }
+    Ok(Arc::new(registry))
+}
+
 /// Resolves the validated config to the dataplane model: parsed
 /// addresses, shared backends (one [`Balancer`] per backend), PEM-loaded
 /// TLS and health checks. `base_dir` is the base of relative paths.
 fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, String> {
+    let maps = load_maps(config, base_dir)?;
     let mut backends: std::collections::BTreeMap<String, Arc<ResolvedBackend>> =
         std::collections::BTreeMap::new();
     for (name, backend) in &config.backend {
@@ -1575,9 +1778,17 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
             .server_entries()
             .into_iter()
             .map(|(addr, weight)| {
-                let addr: SocketAddr = addr.parse().map_err(|_| {
-                    format!("backend.{name} invalid address: \"{addr}\" (expected IP:PORT)")
-                })?;
+                // Literal IPs serve immediately; hostnames start
+                // unresolved and the background resolver (B-H13) fills
+                // them in — nothing here blocks on DNS.
+                let target = eqproxy_config::schema::parse_server_target(addr)
+                    .map_err(|why| format!("backend.{name} invalid server address: {why}"))?;
+                let addr = match target {
+                    eqproxy_config::schema::ServerTarget::Ip(ip) => eqproxy_net::ServerAddr::Ip(ip),
+                    eqproxy_config::schema::ServerTarget::Name { host, port } => {
+                        eqproxy_net::ServerAddr::Name { host, port }
+                    }
+                };
                 Ok(ResolvedServer { addr, weight })
             })
             .collect::<Result<_, String>>()?;
@@ -1590,7 +1801,27 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
             .with_proxy_protocol(match backend.proxy_protocol {
                 eqproxy_config::schema::ProxyProtocolMode::None => ProxyProtocolMode::None,
                 eqproxy_config::schema::ProxyProtocolMode::V1 => ProxyProtocolMode::V1,
+                eqproxy_config::schema::ProxyProtocolMode::V2 => ProxyProtocolMode::V2,
+            })
+            // Balance avanzado (B-H5/B-N12/B-E6 + B14): algoritmo y
+            // ventana de slow start (ponderación dinámica).
+            .with_balance(balance_algorithm(backend.balance), backend.slow_start)
+            // DNS dinámico (B-H13/B-N18/B-E15): re-resolución periódica
+            // de HOSTNAME:PORT fuera de la ruta caliente.
+            .with_resolve_interval(backend.resolve_interval);
+        if let Some(affinity) = &backend.affinity {
+            resolved = resolved.with_affinity(eqproxy_net::ResolvedAffinity {
+                mode: if affinity.mode == "source" {
+                    eqproxy_net::AffinityMode::Source
+                } else {
+                    eqproxy_net::AffinityMode::Cookie
+                },
+                cookie: affinity
+                    .cookie
+                    .clone()
+                    .unwrap_or_else(|| "eqproxy_affinity".to_owned()),
             });
+        }
         if let Some(hc) = &backend.health_check {
             let mut check = HealthCheck::tcp(hc.interval, hc.timeout).with_passive(hc.passive);
             if hc.kind == eqproxy_config::schema::HealthCheckKind::Http {
@@ -1672,7 +1903,7 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                 name.clone(),
                 listen,
                 listener.backend.clone(),
-                backend.servers[0].addr,
+                backend.servers[0].addr.clone(),
                 match listener.mode {
                     eqproxy_config::ListenerMode::Tcp => ProxyMode::Tcp,
                     eqproxy_config::ListenerMode::Http => ProxyMode::Http,
@@ -1692,6 +1923,15 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     eqproxy_core::rules::Rule::compile(&rule.to_spec(i)).map_err(|why| {
                         format!("listener.{name}.rules[{i}].{}: {}", why.field, why.cause)
                     })?;
+                // The rewrite applies to the forwarded request on both
+                // forwarding actions (`use_backend` and `split`).
+                let rewrite = || {
+                    rule.rewrite.as_ref().map(|rewrite| eqproxy_net::ResolvedRewrite {
+                        matched_prefix: rule.path_prefix.clone().unwrap_or_default(),
+                        path_prefix_rewrite: rewrite.path_prefix_rewrite.clone(),
+                        host_rewrite: rewrite.host_rewrite.clone(),
+                    })
+                };
                 let action = if let Some(backend_name) = &rule.use_backend {
                     let target = backends.get(backend_name).ok_or_else(|| {
                         format!(
@@ -1700,13 +1940,29 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     })?;
                     eqproxy_net::RouteAction::Backend {
                         backend: Arc::clone(target),
-                        rewrite: rule.rewrite.as_ref().map(|rewrite| {
-                            eqproxy_net::ResolvedRewrite {
-                                matched_prefix: rule.path_prefix.clone().unwrap_or_default(),
-                                path_prefix_rewrite: rewrite.path_prefix_rewrite.clone(),
-                                host_rewrite: rewrite.host_rewrite.clone(),
-                            }
-                        }),
+                        rewrite: rewrite(),
+                    }
+                } else if let Some(targets) = &rule.split {
+                    // Weighted traffic split (B-I11): one SWRR state for
+                    // the rule, one target per configured backend.
+                    let resolved = targets
+                        .iter()
+                        .map(|target| {
+                            let backend = backends.get(&target.backend).ok_or_else(|| {
+                                format!(
+                                    "listener.{name}.rules[{i}].split backend does not exist: \"{}\"",
+                                    target.backend
+                                )
+                            })?;
+                            Ok(eqproxy_net::SplitTarget {
+                                backend: Arc::clone(backend),
+                                weight: target.weight,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?;
+                    eqproxy_net::RouteAction::Split {
+                        targets: Arc::new(eqproxy_net::SplitTargets::new(resolved)),
+                        rewrite: rewrite(),
                     }
                 } else if let Some(redirect) = &rule.redirect {
                     eqproxy_net::RouteAction::Redirect {
@@ -1724,15 +1980,89 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     }
                 } else {
                     return Err(format!(
-                        "listener.{name}.rules[{i}]: set exactly one of use_backend, redirect or direct_response"
+                        "listener.{name}.rules[{i}]: set exactly one of use_backend, split, redirect or direct_response"
                     ));
                 };
+                let headers = eqproxy_net::ResolvedHeaders {
+                    set: rule
+                        .set_headers
+                        .iter()
+                        .map(|op| (op.name.clone(), op.value.clone()))
+                        .collect(),
+                    add: rule
+                        .add_headers
+                        .iter()
+                        .map(|op| (op.name.clone(), op.value.clone()))
+                        .collect(),
+                    del: rule.del_headers.clone(),
+                    response: rule
+                        .response_headers
+                        .iter()
+                        .map(|op| (op.name.clone(), op.value.clone()))
+                        .collect(),
+                    rate_limit: rule.rate_limit.as_ref().map(|limit| {
+                        std::sync::Arc::new(eqproxy_net::RateLimiter::new(
+                            limit.rate,
+                            limit.per,
+                            limit.burst.unwrap_or(limit.rate),
+                        ))
+                    }),
+                    cors: rule.cors.as_ref().map(|cors| eqproxy_net::ResolvedCors {
+                        allow_origin: cors.allow_origin.clone(),
+                        allow_methods: cors
+                            .allow_methods
+                            .clone()
+                            .unwrap_or_else(|| "GET, HEAD, POST, OPTIONS".to_owned()),
+                        allow_headers: cors.allow_headers.clone(),
+                        expose_headers: cors.expose_headers.clone(),
+                        max_age: cors.max_age,
+                        allow_credentials: cors.allow_credentials,
+                    }),
+                    auth: rule
+                        .auth
+                        .as_ref()
+                        .map(|auth| -> Result<eqproxy_net::ResolvedAuth, String> {
+                            let basic = if auth.kind.is_some() {
+                                Some(std::sync::Arc::new(
+                                    eqproxy_core::auth::BasicUsers::parse(&auth.users).map_err(
+                                        |why| {
+                                            format!("listener.{name}.rules[{i}].auth.users: {why}")
+                                        },
+                                    )?,
+                                ))
+                            } else {
+                                None
+                            };
+                            Ok(eqproxy_net::ResolvedAuth {
+                                url: auth
+                                    .url
+                                    .as_deref()
+                                    .map(eqproxy_core::auth::parse_auth_url)
+                                    .transpose()
+                                    .map_err(|why| {
+                                        format!("listener.{name}.rules[{i}].auth.url: {why}")
+                                    })?,
+                                basic,
+                                realm: auth.realm.clone().unwrap_or_else(|| "EQProxy".to_owned()),
+                            })
+                        })
+                        .transpose()?,
+                };
+                let headers = (!headers.set.is_empty()
+                    || !headers.add.is_empty()
+                    || !headers.del.is_empty()
+                    || !headers.response.is_empty()
+                    || headers.cors.is_some()
+                    || headers.rate_limit.is_some()
+                    || headers.auth.is_some())
+                .then_some(headers);
                 routes.push(eqproxy_net::ResolvedRoute {
                     rule: compiled,
                     action,
+                    headers,
                 });
             }
-            resolved = resolved.with_routes(routes);
+            resolved = resolved.with_routes(routes).with_maps(Arc::clone(&maps));
             // PROXY v1 reception (B-H9/B-E10): strict front door with
             // allowlisted origins only.
             if listener.proxy_receive {
@@ -1741,6 +2071,7 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                         .map_err(|why| format!("listener.{name}.proxy_allow: {why}"))?;
                 resolved = resolved.with_proxy_receive(allowlist);
             }
+            resolved = resolved.with_max_stream_duration(listener.max_stream_duration);
             resolved = resolved.with_forwarded_headers(match listener.forwarded_headers {
                 eqproxy_config::schema::ForwardedHeaders::Off => {
                     eqproxy_net::proxy::ForwardedMode::Off
@@ -1966,6 +2297,7 @@ mod tests {
             schema_version: 1,
             listener: BTreeMap::new(),
             backend,
+            maps: BTreeMap::new(),
             shutdown_grace: Duration::from_secs(10),
             metrics: eqproxy_config::schema::MetricsConfig::default(),
         };
@@ -1973,11 +2305,11 @@ mod tests {
             "api",
             vec![
                 ResolvedServer {
-                    addr: "127.0.0.1:9000".parse().expect("addr"),
+                    addr: eqproxy_net::ServerAddr::Ip("127.0.0.1:9000".parse().expect("addr")),
                     weight: 3,
                 },
                 ResolvedServer {
-                    addr: "127.0.0.1:9001".parse().expect("addr"),
+                    addr: eqproxy_net::ServerAddr::Ip("127.0.0.1:9001".parse().expect("addr")),
                     weight: 1,
                 },
             ],
@@ -1988,7 +2320,7 @@ mod tests {
             "web",
             "127.0.0.1:8080".parse().expect("addr"),
             "api",
-            "127.0.0.1:9000".parse().expect("addr"),
+            "127.0.0.1:9000".parse::<SocketAddr>().expect("addr"),
             ProxyMode::Http,
             1024,
             Duration::from_secs(5),
@@ -2093,6 +2425,34 @@ mod tests {
             "backend \"api\": balance=roundrobin servers=2",
             "server 127.0.0.1:9000 weight=3 state=UP(initial)",
             "decision: server 127.0.0.1:9000",
+        ] {
+            assert!(
+                report.contains(expected),
+                "missing {expected:?} in:\n{report}"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_report_shows_leastconn_and_slow_start() {
+        let (mut config, listener) = two_server_listener();
+        let backend = config.backend.get_mut("api").expect("backend api");
+        backend.balance = eqproxy_config::schema::BalanceAlgorithm::LeastConn;
+        backend.slow_start = Duration::from_secs(30);
+        let report = explain_report(
+            &config,
+            &listener,
+            "GET",
+            "example.com",
+            "/a",
+            &[],
+            CLIENT_IP,
+        );
+        for expected in [
+            "backend \"api\": balance=leastconn servers=2",
+            "slow_start=30s",
+            "decision: server 127.0.0.1:9000",
+            "least-connections pick",
         ] {
             assert!(
                 report.contains(expected),

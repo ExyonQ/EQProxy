@@ -73,6 +73,15 @@ evaluating alternatives first.
 **TOML as the canonical format**, with:
 
 1. Mandatory `schema_version = 1` (versioned schema; explicit migrations).
+   **Declared compatibility policy (Q3, 2026-10-19):** a binary accepts
+   every schema version it knows (`1..=SCHEMA_VERSION`, backward
+   compatible: an older config keeps loading) and rejects newer ones —
+   or the invalid `0` — naming the supported range. Unknown fields are
+   rejected at the gate (`deny_unknown_fields`), and validation
+   hardening only lands together with a `schema_version` transition,
+   never silently inside a version. The upgrade path has a way back:
+   `config apply` keeps `history/` and `config rollback` re-gates and
+   restores the previous config (v0.4.2).
 2. Typed model in `eqproxy-config` (serde structs) + separate **semantic
    validation** (nonexistent references, unreachable/contradictory rules where
    feasible, warnings for dangerous configurations, resource estimation with

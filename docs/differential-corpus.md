@@ -28,7 +28,10 @@ image digests and the binary hash.)
 
 Backends are identity-echo servers (`nginx:alpine` serving
 `return 200 "<id> $request_uri"`), so the target each proxy forwards —
-and therefore any rewrite — is observable in the response body.
+and therefore any rewrite — is observable in the response body. Paths
+under `/h…` echo the forwarded request headers instead (`xff`, `real`,
+`beta`, `gone`, `added`; `/h4…` also echoes `proto`), which is how the
+header cases observe what each proxy actually forwarded.
 
 ## Normalization (declared)
 
@@ -39,6 +42,14 @@ and therefore any rewrite — is observable in the response body.
   semantics.
 - The **body** is compared only when the case declares one: 3xx bodies
   differ legitimately (nginx sends its error page, the others send none).
+- **Comma-joined header values** use one canonical separator (`", "`):
+  some backends merge duplicate header lines with a comma and no space,
+  others with `", "`; the joined value is the same header semantics.
+- The **client address** is topology-dependent (host loopback for the
+  native binary, docker gateway for the containerized references), so
+  the harness calibrates it once per implementation — a probe without
+  XFF on the append endpoint echoes it as the sole XFF entry — and
+  substitutes it as the `CLIENT` token in bodies.
 
 ## Corpus
 
@@ -65,6 +76,35 @@ one outcome; all applicable implementations must produce it.
 | `c11-regex` | `GET /c11/data.json` | `200` · `mgmt /c11/data.json` | a path regex over `.json` paths routes |
 | `c11-boundary` | `GET /c11/data.jsonx` | `200` · `fallback /c11/data.jsonx` | regex near miss must not route |
 
+### Header cases — the B-N4/B-I4 executable spec
+
+Header semantics run on **two endpoints**, each with its own config per
+implementation: `main` (forwarded headers append) and `replace`
+(anti-spoofing). The request headers are sent by the client (including
+spoofed `X-Forwarded-For`/`X-Real-IP`); the declared outcome is what the
+backend must observe after the proxy. Response-header cases declare the
+header the client must observe. `CLIENT` is the calibrated client
+address (see normalization).
+
+| id | endpoint | request | declared outcome | shared semantics |
+|---|---|---|---|---|
+| `h1-xff-append` | `main` | `GET /h1/x` · `X-Forwarded-For: 10.9.9.9` | `xff=[10.9.9.9, CLIENT]` · `real=[]` | XFF grows: client-sent hops are kept, the client is appended |
+| `h2-xff-xri-replace` | `replace` | `GET /h2/x` · `X-Forwarded-For: 10.9.9.9` · `X-Real-IP: 1.2.3.4` | `xff=[CLIENT]` · `real=[CLIENT]` | anti-spoofing: both headers carry the real client only |
+| `h4-xfp` | `main` | `GET /h4/x` | `proto=[http]` | `X-Forwarded-Proto` carries the client scheme |
+| `h5-set-header` | `main` | `GET /h5/x` · `x-beta: off` | `beta=[on]` | set-header replaces the client's value on the forwarded request |
+| `h6-del-header` | `main` | `GET /h6/x` · `x-gone: please` | `gone=[]` | del-header removes the client's header before forwarding |
+| `h7-add-header` | `main` | `GET /h7/x` · `x-added: base` | `added=[base, extra]` | add-header combines the added value with the client's |
+| `h8-response-marker` | `main` | `GET /h8/x` | response header `x-marker: v06` | response headers can be set on the way back |
+
+EQProxy implements the whole table (B-N4/B-I4/B-E17):
+`forwarded_headers = "append"/"replace"` covers `h1`/`h2`, both modes
+also set `X-Forwarded-Proto` (`h4`), and the rule header actions
+(`set_headers`/`add_headers`/`del_headers`/`response_headers`) cover
+`h5`–`h8`. Before implementation, `h4`–`h8` ran as spec with
+`PENDING` skips asserted on the three references: their agreement is
+the evidence that the declared outcome is the shared semantics, not an
+EQProxy invention.
+
 ### Per-implementation mapping (same observable, different mechanism)
 
 - **Ordered rules (`c5`)**: HAProxy uses an ordered `use_backend` chain,
@@ -89,12 +129,42 @@ one outcome; all applicable implementations must produce it.
 - **Local answers (`c6`, `c7`)**: HAProxy `http-request redirect` /
   `http-request return`, nginx `return`, Envoy `redirect` /
   `direct_response`, EQProxy `redirect` / `direct_response` actions.
+- **Forwarded headers (`h1`, `h2`)**: HAProxy `http-request set-header`
+  with `"%[hdr(x-forwarded-for)], %[src]"` / `"%[src]"`, nginx
+  `$proxy_add_x_forwarded_for` / `$remote_addr`, Envoy
+  `request_headers_to_add` with `%DOWNSTREAM_REMOTE_ADDRESS_WITHOUT_PORT%`
+  (its own XFF append is disabled with `skip_xff_append` so the header
+  ops are the whole story), EQProxy `forwarded_headers =
+  "append"/"replace"`.
+- **Header actions (`h5`–`h8`)**: HAProxy `set-header` / `del-header` /
+  `add-header` + `http-response set-header`, nginx `proxy_set_header` /
+  `add_header`, Envoy route-level `request_headers_to_remove` /
+  `request_headers_to_add` / `response_headers_to_add`, EQProxy
+  `set_headers`/`add_headers`/`del_headers`/`response_headers` on the
+  matched rule. In all four the rules are scoped to the `/h` namespace;
+  the `h8` marker is a global response rule in HAProxy (present in
+  every response, asserted only where declared).
+- **X-Forwarded-Proto (`h4`)**: emitted with the client-facing scheme
+  by all four (Envoy natively; the others via explicit header rules).
+  A single-value header: the client's is replaced, never chained.
 
-## Findings (run 2026-10-19)
+## Findings
 
-16/16 cases agree across the four implementations, with no divergences
-and no case needing a per-implementation exclusion. Full matrix with
-image digests in the generated report.
+- **2026-10-19 (routing)**: 16/16 cases agree across the four
+  implementations, with no divergences and no case needing a
+  per-implementation exclusion.
+- **2026-10-19 (headers)**: 23/23 cases agree across their applicable
+  implementations. `h1`/`h2` agree on **all four** columns — the B-N4
+  slice-1 semantics (append/replace) are shared with the references,
+  not invented. `h4`–`h8` agreed on the three references with 5
+  documented `PENDING` exclusions in the `eqproxy` column (spec ahead
+  of implementation). No divergences. Full matrix with image digests
+  in the generated report.
+- **2026-10-19 (headers implemented)**: the B-N4/B-I4/B-E17 slice
+  implemented in EQProxy (XFP + rule header actions + `$remote_addr`/
+  `$host`/`$scheme` values); the `PENDING` skips are gone and the
+  corpus closes **23/23 with all four columns asserted and 0
+  exclusions**.
 
 ## Limitations
 
@@ -102,9 +172,10 @@ image digests in the generated report.
   the controller translation (Ingress/CRD objects → nginx.conf) is NOT
   exercised, by the same decision that covers Envoy with a static
   bootstrap.
-- The corpus covers v0.6 rule matching and rule actions. Timeouts,
-  retries, error classes (503 vs 502), header manipulation and PROXY
-  protocol semantics are NOT in this corpus (their references diverge
-  legitimately or belong to later slices).
+- The corpus covers v0.6 rule matching and rule actions and the
+  B-N4/B-I4 header semantics (declared here ahead of the EQProxy
+  implementation for `h4`–`h8`). Timeouts, retries, error classes
+  (503 vs 502) and PROXY protocol semantics are NOT in this corpus
+  (their references diverge legitimately or belong to later slices).
 - Comparison is per-case against the declared outcome; the corpus does
   not fingerprint whole config files or fuzz the references.

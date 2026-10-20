@@ -7,19 +7,27 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod balancer;
 pub mod health;
 pub mod http1;
+pub mod maps;
 pub mod pool;
 pub mod proxy;
 pub mod proxy_proto;
 pub mod tls;
 
-pub use balancer::{Balancer, ResolvedServer};
+pub mod dns;
+
+pub use auth::{AuthOutcome, DenyResponse, check_basic};
+pub use balancer::{ActiveGuard, Balance, Balancer, ResolvedServer, ServerAddr};
+pub use dns::{DnsSettings, Resolving, SystemResolver};
 pub use health::HealthCheck;
 pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, MAX_IDLE_PER_SERVER, Pool};
 pub use proxy::{
-    BoundProxy, OutboundError, ProxyError, ProxyMode, READ_BUF, ResolvedBackend, ResolvedListener,
-    ResolvedRewrite, ResolvedRoute, RouteAction, RouteDecision, SwapSummary, bind, connect_backend,
+    AffinityMode, BoundProxy, OutboundError, ProxyError, ProxyMode, READ_BUF, RateLimiter,
+    ResolvedAffinity, ResolvedAuth, ResolvedBackend, ResolvedCors, ResolvedHeaders,
+    ResolvedListener, ResolvedRewrite, ResolvedRoute, RouteAction, RouteDecision, SplitTarget,
+    SplitTargets, SwapSummary, bind, connect_backend,
 };
 pub use proxy_proto::ProxyProtocolMode;

@@ -30,6 +30,14 @@ pub struct Metrics {
     pub http_requests_proxied: AtomicU64,
     /// HTTP requests rejected by framing/validation (400/417/431/501/505).
     pub http_requests_rejected: AtomicU64,
+    /// Requests rejected by a rule's rate limiter (B-N8/B-I7/B-E16).
+    pub rate_limited: AtomicU64,
+    /// Requests rejected by rule authentication (B-N9/B-I9): wrong or
+    /// missing Basic credentials, or a 401/403 from the auth subrequest.
+    pub auth_denied: AtomicU64,
+    /// Auth subrequests that could not decide (service down, timeout,
+    /// bad response): the request fails closed and this counts.
+    pub auth_service_errors: AtomicU64,
     /// Message heads not received within their phase timeout.
     pub header_timeouts: AtomicU64,
     /// Failed TLS handshakes (client to listener, or proxy to backend).
@@ -68,6 +76,18 @@ pub struct Metrics {
     pub redirects_served: AtomicU64,
     /// Rule `direct_response` responses served (v0.6 slice 2).
     pub direct_responses_served: AtomicU64,
+    /// Successful DNS resolution rounds (B-H13/B-N18/B-E15).
+    pub dns_resolutions_ok: AtomicU64,
+    /// DNS rounds that failed, timed out or returned no address
+    /// (the last-known address keeps serving).
+    pub dns_resolution_failures: AtomicU64,
+    /// Server address swaps applied by a re-resolution round (B-H13).
+    pub dns_address_updates: AtomicU64,
+    /// Hot data map swaps applied by the file watcher (C10/PP-02).
+    pub map_reloads: AtomicU64,
+    /// Map reloads that failed (unreadable or invalid file): the last
+    /// good data keeps serving and this counts (C10).
+    pub map_reload_failures: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -83,6 +103,9 @@ pub struct MetricsSnapshot {
     pub bytes_backend_to_client: u64,
     pub http_requests_proxied: u64,
     pub http_requests_rejected: u64,
+    pub rate_limited: u64,
+    pub auth_denied: u64,
+    pub auth_service_errors: u64,
     pub header_timeouts: u64,
     pub tls_handshake_failures: u64,
     pub no_available_server: u64,
@@ -100,6 +123,11 @@ pub struct MetricsSnapshot {
     pub local_responses_served: u64,
     pub redirects_served: u64,
     pub direct_responses_served: u64,
+    pub dns_resolutions_ok: u64,
+    pub dns_resolution_failures: u64,
+    pub dns_address_updates: u64,
+    pub map_reloads: u64,
+    pub map_reload_failures: u64,
 }
 
 impl Metrics {
@@ -116,6 +144,9 @@ impl Metrics {
             bytes_backend_to_client: self.bytes_backend_to_client.load(Ordering::Relaxed),
             http_requests_proxied: self.http_requests_proxied.load(Ordering::Relaxed),
             http_requests_rejected: self.http_requests_rejected.load(Ordering::Relaxed),
+            rate_limited: self.rate_limited.load(Ordering::Relaxed),
+            auth_denied: self.auth_denied.load(Ordering::Relaxed),
+            auth_service_errors: self.auth_service_errors.load(Ordering::Relaxed),
             header_timeouts: self.header_timeouts.load(Ordering::Relaxed),
             tls_handshake_failures: self.tls_handshake_failures.load(Ordering::Relaxed),
             no_available_server: self.no_available_server.load(Ordering::Relaxed),
@@ -135,6 +166,11 @@ impl Metrics {
             local_responses_served: self.local_responses_served.load(Ordering::Relaxed),
             redirects_served: self.redirects_served.load(Ordering::Relaxed),
             direct_responses_served: self.direct_responses_served.load(Ordering::Relaxed),
+            dns_resolutions_ok: self.dns_resolutions_ok.load(Ordering::Relaxed),
+            dns_resolution_failures: self.dns_resolution_failures.load(Ordering::Relaxed),
+            dns_address_updates: self.dns_address_updates.load(Ordering::Relaxed),
+            map_reloads: self.map_reloads.load(Ordering::Relaxed),
+            map_reload_failures: self.map_reload_failures.load(Ordering::Relaxed),
         }
     }
 
@@ -212,6 +248,21 @@ impl fmt::Display for MetricsSnapshot {
             self.config_reloads,
             self.config_reload_failures,
             self.config_reload_duration_us
+        )?;
+        write!(
+            f,
+            " auth[denied={} service_errors={}]",
+            self.auth_denied, self.auth_service_errors
+        )?;
+        write!(
+            f,
+            " dns[ok={} failures={} updates={}]",
+            self.dns_resolutions_ok, self.dns_resolution_failures, self.dns_address_updates
+        )?;
+        write!(
+            f,
+            " maps[reloads={} failures={}]",
+            self.map_reloads, self.map_reload_failures
         )
     }
 }

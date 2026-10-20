@@ -23,8 +23,9 @@
 //! (B11) and PROXY protocol v1 send (A9). With no servers available:
 //! HTTP → 503, TCP → close (counted in `no_available_server`).
 
+use std::collections::HashMap;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -35,7 +36,8 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use eqproxy_core::{Metrics, Shutdown, ShutdownHandle};
 
-use crate::balancer::{Balancer, ResolvedServer};
+use crate::balancer::{ActiveGuard, Balance, Balancer, ResolvedServer};
+use crate::dns::{self, DnsSettings, Resolving, SystemResolver};
 use crate::health::{self, HealthCheck};
 use crate::http1;
 use crate::pool::Pool;
@@ -78,16 +80,21 @@ pub struct ResolvedBackend {
     pub queue: Option<WaitQueue>,
     /// Connect-phase retry policy (B-H7).
     pub retries: RetryPolicy,
+    /// Session affinity (B-H8/B-N13/B-I8).
+    pub affinity: Option<ResolvedAffinity>,
+    /// DNS re-resolution settings (B-H13/B-N18/B-E15) for
+    /// `HOSTNAME:PORT` servers.
+    pub dns: DnsSettings,
 }
 
 impl ResolvedBackend {
     /// Single-server backend with default settings (compat 0.1.0).
     #[must_use]
-    pub fn single(name: impl Into<String>, server: SocketAddr) -> Self {
+    pub fn single(name: impl Into<String>, server: impl Into<crate::ServerAddr>) -> Self {
         Self::new(
             name,
             vec![ResolvedServer {
-                addr: server,
+                addr: server.into(),
                 weight: 1,
             }],
             3,
@@ -113,7 +120,33 @@ impl ResolvedBackend {
             pool: Pool::with_defaults(),
             queue: None,
             retries: RetryPolicy::default(),
+            affinity: None,
+            dns: DnsSettings::default(),
         }
+    }
+
+    /// Balancing algorithm and slow start (B-H5/B-N12/B-E6 + B14):
+    /// `leastconn` picks by `active / effective weight`, and after every
+    /// transition to operational the effective weight ramps linearly from
+    /// ~0 to `weight` over `slow_start` (dynamic weighting).
+    #[must_use]
+    pub fn with_balance(mut self, algorithm: Balance, slow_start: Duration) -> Self {
+        let (fall, rise) = self.balancer.thresholds();
+        self.balancer = Arc::new(Balancer::with_options(
+            self.servers.clone(),
+            fall,
+            rise,
+            algorithm,
+            slow_start,
+        ));
+        self
+    }
+
+    /// Session affinity (B-H8/B-N13/B-I8).
+    #[must_use]
+    pub fn with_affinity(mut self, affinity: ResolvedAffinity) -> Self {
+        self.affinity = Some(affinity);
+        self
     }
 
     /// PROXY protocol v1 send to the servers (A9).
@@ -134,6 +167,23 @@ impl ResolvedBackend {
     #[must_use]
     pub fn with_health_check(mut self, check: HealthCheck) -> Self {
         self.health_check = Some(check);
+        self
+    }
+
+    /// DNS re-resolution rate (B-H13/B-N18/B-E15): `Duration::ZERO`
+    /// resolves `HOSTNAME:PORT` servers once at startup; anything higher
+    /// re-resolves them periodically in the background.
+    #[must_use]
+    pub fn with_resolve_interval(mut self, interval: Duration) -> Self {
+        self.dns.interval = interval;
+        self
+    }
+
+    /// Bounded attempt per resolution (a hung DNS cannot stall the
+    /// cycle; default [`crate::dns::RESOLVE_TIMEOUT`]).
+    #[must_use]
+    pub fn with_resolve_timeout(mut self, timeout: Duration) -> Self {
+        self.dns.timeout = timeout;
         self
     }
 
@@ -163,13 +213,247 @@ pub struct ResolvedRewrite {
     pub host_rewrite: Option<String>,
 }
 
+/// CORS policy of a matched rule (B-I10): preflight `OPTIONS` answered
+/// locally, CORS headers on every response of the rule.
+#[derive(Debug, Clone)]
+pub struct ResolvedCors {
+    /// Exact allowed origin.
+    pub allow_origin: String,
+    /// `Access-Control-Allow-Methods`.
+    pub allow_methods: String,
+    /// `Access-Control-Allow-Headers` (omitted when `None`).
+    pub allow_headers: Option<String>,
+    /// `Access-Control-Expose-Headers` (omitted when `None`).
+    pub expose_headers: Option<String>,
+    /// Preflight cache time (omitted when zero).
+    pub max_age: Duration,
+    /// `Access-Control-Allow-Credentials: true`.
+    pub allow_credentials: bool,
+}
+
+/// Authentication of a matched rule (B-N9/B-I9): HTTP Basic against
+/// htpasswd users checked locally first, then the external subrequest
+/// (`auth-url`; nginx `auth_request`). Fail closed everywhere.
+#[derive(Debug, Clone)]
+pub struct ResolvedAuth {
+    /// External auth subrequest target (`http://HOST[:PORT][/PATH]`).
+    pub url: Option<eqproxy_core::auth::AuthUrl>,
+    /// htpasswd-format users (`type = "basic"`).
+    pub basic: Option<Arc<eqproxy_core::auth::BasicUsers>>,
+    /// `WWW-Authenticate` realm (default `"EQProxy"`).
+    pub realm: String,
+}
+
+/// Session affinity of a backend (B-H8/B-N13/B-I8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AffinityMode {
+    /// Sticky cookie inserted by the proxy (HAProxy `cookie insert`).
+    Cookie,
+    /// Hash of the client IP (nginx `ip_hash`).
+    Source,
+}
+
+/// Resolved session affinity: how a client is pinned to its server.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedAffinity {
+    pub mode: AffinityMode,
+    /// Cookie name (Cookie mode only).
+    pub cookie: String,
+}
+
+/// Token-bucket rate limiter (B-N8/B-I7/B-E16), shared by the requests
+/// of one rule: `burst` tokens of capacity, refilled `rate` per `per`
+/// window. Buckets are per client IP and in-memory only — no network in
+/// the hot path (Q6); over the limit the caller rejects explicitly.
+/// `ponytail:` plain map + lazy prune by idleness (60s) at 64k tracked
+/// IPs — a real LRU if per-IP limits ever need more.
+#[derive(Debug)]
+pub struct RateLimiter {
+    rate: u32,
+    per: Duration,
+    burst: u32,
+    per_second: f64,
+    capacity: f64,
+    buckets: std::sync::Mutex<HashMap<IpAddr, TokenBucket>>,
+}
+
+#[derive(Debug)]
+struct TokenBucket {
+    tokens: f64,
+    last: tokio::time::Instant,
+}
+
+const MAX_TRACKED_BUCKETS: usize = 65_536;
+const BUCKET_IDLE_PRUNE: Duration = Duration::from_secs(60);
+
+impl RateLimiter {
+    /// `rate` tokens per `per` window, `burst` capacity.
+    pub fn new(rate: u32, per: Duration, burst: u32) -> Self {
+        Self {
+            rate,
+            per,
+            burst,
+            per_second: f64::from(rate) / per.as_secs_f64(),
+            capacity: f64::from(burst),
+            buckets: std::sync::Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Consumes one token for `ip`; `false` = over the limit (429).
+    pub fn try_acquire(&self, ip: IpAddr) -> bool {
+        let now = tokio::time::Instant::now();
+        let mut buckets = self.buckets.lock().expect("rate limiter lock");
+        if buckets.len() >= MAX_TRACKED_BUCKETS {
+            buckets.retain(|_, bucket| now.duration_since(bucket.last) < BUCKET_IDLE_PRUNE);
+        }
+        let bucket = buckets.entry(ip).or_insert(TokenBucket {
+            tokens: self.capacity,
+            last: now,
+        });
+        let elapsed = now.duration_since(bucket.last).as_secs_f64();
+        bucket.tokens = (bucket.tokens + elapsed * self.per_second).min(self.capacity);
+        bucket.last = now;
+        if bucket.tokens >= 1.0 {
+            bucket.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One-line summary for `config explain`.
+    pub fn describe(&self) -> String {
+        format!(
+            "rate limit {}/{}s burst {}",
+            self.rate,
+            self.per.as_secs(),
+            self.burst
+        )
+    }
+}
+
+/// Header actions of a matched rule (B-N4/B-I4/B-E17): request-side
+/// `set`/`add`/`del` plus `response` additions. Values are templates
+/// (`$remote_addr`, `$host`, `$scheme`), rendered per request.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedHeaders {
+    /// Replace (or insert) these request headers.
+    pub set: Vec<(String, String)>,
+    /// Append these request headers, keeping the client's values.
+    pub add: Vec<(String, String)>,
+    /// Remove these request headers before forwarding.
+    pub del: Vec<String>,
+    /// Append these headers to the response the client sees.
+    pub response: Vec<(String, String)>,
+    /// CORS policy of the rule (B-I10).
+    pub cors: Option<ResolvedCors>,
+    /// Rate limit of the rule (B-N8/B-I7/B-E16), whatever the action.
+    pub rate_limit: Option<Arc<RateLimiter>>,
+    /// Authentication of the rule (B-N9/B-I9), whatever the action.
+    pub auth: Option<ResolvedAuth>,
+}
+
+impl<'a> RouteDecision<'a> {
+    /// The matched rule's rate limiter (B-N8), whatever the action.
+    pub fn rate_limiter(&self) -> Option<&Arc<RateLimiter>> {
+        match self {
+            RouteDecision::Proxy { headers, .. }
+            | RouteDecision::Redirect { headers, .. }
+            | RouteDecision::Direct { headers, .. } => headers
+                .as_ref()
+                .and_then(|actions| actions.rate_limit.as_ref()),
+        }
+    }
+
+    /// The matched rule's authentication gate (B-N9), whatever the action.
+    pub fn auth(&self) -> Option<&ResolvedAuth> {
+        match self {
+            RouteDecision::Proxy { headers, .. }
+            | RouteDecision::Redirect { headers, .. }
+            | RouteDecision::Direct { headers, .. } => {
+                headers.as_ref().and_then(|actions| actions.auth.as_ref())
+            }
+        }
+    }
+}
+
+/// One weighted target of a [`SplitTargets`] (B-I11).
+#[derive(Debug, Clone)]
+pub struct SplitTarget {
+    /// Backend receiving this share of the requests.
+    pub backend: Arc<ResolvedBackend>,
+    /// Share weight (0 = disabled; the config gate requires one > 0).
+    pub weight: u32,
+}
+
+/// Weighted traffic split across backends (B-I11; Envoy
+/// `weighted_clusters`, ingress-nginx `canary-weight`).
+///
+/// Selection is **smooth weighted round-robin** over the targets
+/// (nginx's algorithm): deterministic per request order, weights
+/// describe exact shares in rotation (3:1 = 3 of every 4 requests),
+/// and a `weight = 0` target is never picked (canary rollback without
+/// touching the rest). Invariant: at least one target has weight > 0
+/// (the config gate rejects an all-zero split; `pick` then serves the
+/// first target by construction, never a panic).
+#[derive(Debug)]
+pub struct SplitTargets {
+    targets: Vec<SplitTarget>,
+    /// Per-target current weight (SWRR state; same shape as the
+    /// balancer's, one lock per pick — no state in the request itself).
+    current: std::sync::Mutex<Vec<i64>>,
+}
+
+impl SplitTargets {
+    /// Builds the split (target order preserved = tie-break order).
+    #[must_use]
+    pub fn new(targets: Vec<SplitTarget>) -> Self {
+        let current = std::sync::Mutex::new(vec![0_i64; targets.len()]);
+        Self { targets, current }
+    }
+
+    /// Picks the backend for one request (smooth WRR).
+    #[must_use]
+    pub fn pick(&self) -> &Arc<ResolvedBackend> {
+        let mut current = self
+            .current
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert_eq!(current.len(), self.targets.len());
+        let mut total: i64 = 0;
+        for (i, target) in self.targets.iter().enumerate() {
+            current[i] += i64::from(target.weight);
+            total += i64::from(target.weight);
+        }
+        let chosen = current
+            .iter()
+            .enumerate()
+            .max_by_key(|(i, weight)| (*weight, std::cmp::Reverse(*i)))
+            .map_or(0, |(i, _)| i);
+        current[chosen] -= total;
+        &self.targets[chosen].backend
+    }
+
+    /// The configured targets (explain and `all_backends`).
+    #[must_use]
+    pub fn targets(&self) -> &[SplitTarget] {
+        &self.targets
+    }
+}
+
 /// Action of a matched routing rule (v0.6 slice 2): route to a backend
-/// (optionally rewriting the request), or answer locally.
+/// (optionally rewriting the request), split across backends (B-I11),
+/// or answer locally.
 #[derive(Debug, Clone)]
 pub enum RouteAction {
     /// Proxy the request to this backend.
     Backend {
         backend: Arc<ResolvedBackend>,
+        rewrite: Option<ResolvedRewrite>,
+    },
+    /// Proxy to the weighted target the split picks this request (B-I11).
+    Split {
+        targets: Arc<SplitTargets>,
         rewrite: Option<ResolvedRewrite>,
     },
     /// Answer locally: 3xx + `Location` (template rendered per request).
@@ -189,14 +473,20 @@ pub enum RouteDecision<'a> {
     Proxy {
         backend: &'a Arc<ResolvedBackend>,
         rewrite: Option<&'a ResolvedRewrite>,
+        headers: Option<&'a ResolvedHeaders>,
     },
     /// Serve a local 3xx with a `Location` template.
-    Redirect { status: u16, location: &'a str },
+    Redirect {
+        status: u16,
+        location: &'a str,
+        headers: Option<&'a ResolvedHeaders>,
+    },
     /// Serve a local response.
     Direct {
         status: u16,
         content_type: &'a str,
         body: &'a str,
+        headers: Option<&'a ResolvedHeaders>,
     },
 }
 
@@ -207,6 +497,8 @@ pub struct ResolvedRoute {
     pub rule: eqproxy_core::rules::Rule,
     /// What a matching request triggers.
     pub action: RouteAction,
+    /// Header actions of the matched rule (B-N4/B-I4/B-E17).
+    pub headers: Option<ResolvedHeaders>,
 }
 
 /// Resolved listener (already-validated config: parsed addresses, sound refs).
@@ -233,6 +525,9 @@ pub struct ResolvedListener {
     pub client_header_timeout: Duration,
     /// Server phase (`http` only): response head.
     pub server_header_timeout: Duration,
+    /// Total duration cap for one forwarded exchange (`http` only;
+    /// `ZERO` disables): `max_stream_duration` (B-H11/B-E12).
+    pub max_stream_duration: Duration,
     /// TLS termination at this listener (A11). `None` = plain TCP.
     pub server_tls: Option<tls::ServerTls>,
     /// PROXY v1 reception with origin allowlist (B-H9/B-E10): strict
@@ -243,6 +538,9 @@ pub struct ResolvedListener {
     pub forwarded_headers: ForwardedMode,
     /// Custom response for the "no server available" class (C9).
     pub local_response: Option<LocalResponse>,
+    /// Data maps in force (C10/PP-02): what `map` rule conditions
+    /// consult; the file watchers swap their data in hot.
+    pub maps: Arc<eqproxy_core::maps::MapRegistry>,
 }
 
 impl ResolvedListener {
@@ -255,7 +553,7 @@ impl ResolvedListener {
         name: impl Into<String>,
         listen: SocketAddr,
         backend_name: impl Into<String>,
-        server: SocketAddr,
+        server: impl Into<crate::ServerAddr>,
         mode: ProxyMode,
         maxconn: u32,
         connect_timeout: Duration,
@@ -267,7 +565,7 @@ impl ResolvedListener {
         Self {
             name: name.into(),
             listen,
-            backend: Arc::new(ResolvedBackend::single(backend_name.clone(), server)),
+            backend: Arc::new(ResolvedBackend::single(backend_name.clone(), server.into())),
             routes: Vec::new(),
             backend_name,
             mode,
@@ -276,10 +574,12 @@ impl ResolvedListener {
             idle_timeout,
             client_header_timeout,
             server_header_timeout,
+            max_stream_duration: Duration::ZERO,
             server_tls: None,
             proxy_receive: None,
             forwarded_headers: ForwardedMode::Off,
             local_response: None,
+            maps: Arc::new(eqproxy_core::maps::MapRegistry::new()),
         }
     }
 
@@ -310,37 +610,54 @@ impl ResolvedListener {
                 RouteDecision::Proxy {
                     backend: &self.backend,
                     rewrite: None,
+                    headers: None,
                 },
-                |route| match &route.action {
-                    RouteAction::Backend { backend, rewrite } => RouteDecision::Proxy {
-                        backend,
-                        rewrite: rewrite.as_ref(),
-                    },
-                    RouteAction::Redirect { status, location } => RouteDecision::Redirect {
-                        status: *status,
-                        location,
-                    },
-                    RouteAction::Direct {
-                        status,
-                        content_type,
-                        body,
-                    } => RouteDecision::Direct {
-                        status: *status,
-                        content_type,
-                        body,
-                    },
+                |route| {
+                    let headers = route.headers.as_ref();
+                    match &route.action {
+                        RouteAction::Backend { backend, rewrite } => RouteDecision::Proxy {
+                            backend,
+                            rewrite: rewrite.as_ref(),
+                            headers,
+                        },
+                        RouteAction::Split { targets, rewrite } => RouteDecision::Proxy {
+                            backend: targets.pick(),
+                            rewrite: rewrite.as_ref(),
+                            headers,
+                        },
+                        RouteAction::Redirect { status, location } => RouteDecision::Redirect {
+                            status: *status,
+                            location,
+                            headers,
+                        },
+                        RouteAction::Direct {
+                            status,
+                            content_type,
+                            body,
+                        } => RouteDecision::Direct {
+                            status: *status,
+                            content_type,
+                            body,
+                            headers,
+                        },
+                    }
                 },
             )
     }
 
-    /// Every distinct backend this listener can route to (default + rule
-    /// actions of the `use_backend` kind).
+    /// Every distinct backend this listener can route to (default +
+    /// rule actions of the forwarding kind: `use_backend` and `split`).
     pub fn all_backends(&self) -> impl Iterator<Item = &Arc<ResolvedBackend>> {
-        std::iter::once(&self.backend).chain(self.routes.iter().filter_map(|route| {
+        std::iter::once(&self.backend).chain(self.routes.iter().flat_map(|route| {
+            let mut backends: Vec<&Arc<ResolvedBackend>> = Vec::new();
             match &route.action {
-                RouteAction::Backend { backend, .. } => Some(backend),
-                _ => None,
+                RouteAction::Backend { backend, .. } => backends.push(backend),
+                RouteAction::Split { targets, .. } => {
+                    backends.extend(targets.targets().iter().map(|t| &t.backend));
+                }
+                RouteAction::Redirect { .. } | RouteAction::Direct { .. } => {}
             }
+            backends
         }))
     }
 
@@ -365,10 +682,24 @@ impl ResolvedListener {
         self
     }
 
+    /// Total duration cap for one forwarded exchange (`ZERO` disables).
+    #[must_use]
+    pub fn with_max_stream_duration(mut self, max_stream_duration: Duration) -> Self {
+        self.max_stream_duration = max_stream_duration;
+        self
+    }
+
     /// Custom "no server available" response (C9).
     #[must_use]
     pub fn with_local_response(mut self, local: LocalResponse) -> Self {
         self.local_response = Some(local);
+        self
+    }
+
+    /// Data maps consulted by `map` rule conditions (C10/PP-02).
+    #[must_use]
+    pub fn with_maps(mut self, maps: Arc<eqproxy_core::maps::MapRegistry>) -> Self {
+        self.maps = maps;
         self
     }
 }
@@ -558,8 +889,13 @@ impl std::fmt::Display for SwapSummary {
 pub struct BoundProxy {
     entries: Vec<Entry>,
     metrics: Arc<Metrics>,
-    health_tasks: JoinSet<()>,
-    health_stop: ShutdownHandle,
+    /// Background tasks: active health checks (B11) and the DNS
+    /// resolver (B-H13/B-N18/B-E15), restarted together on reload.
+    bg_tasks: JoinSet<()>,
+    bg_stop: ShutdownHandle,
+    /// DNS resolver seam: [`SystemResolver`] in production, injectable
+    /// in tests (never the request path: resolution is always async).
+    resolver: Arc<dyn Resolving>,
 }
 
 impl std::fmt::Debug for BoundProxy {
@@ -588,15 +924,27 @@ pub async fn bind(
             .map_err(|source| ProxyError::Bind { name, addr, source })?;
         entries.push(make_entry(cfg, listener, Arc::clone(&metrics)));
     }
-    let (health_stop, _health_shutdown) = eqproxy_core::shutdown::channel();
+    let (bg_stop, _bg_shutdown) = eqproxy_core::shutdown::channel();
     let mut proxy = BoundProxy {
         entries,
         metrics,
-        health_tasks: JoinSet::new(),
-        health_stop,
+        bg_tasks: JoinSet::new(),
+        bg_stop,
+        resolver: Arc::new(SystemResolver),
     };
-    proxy.spawn_health();
+    proxy.spawn_background();
     Ok(proxy)
+}
+
+impl BoundProxy {
+    /// Replaces the DNS resolver (B-H13 test seam): call before
+    /// [`serve`](Self::serve). Production keeps [`SystemResolver`].
+    #[must_use]
+    pub fn with_resolver(mut self, resolver: Arc<dyn Resolving>) -> Self {
+        self.resolver = resolver;
+        self.spawn_background();
+        self
+    }
 }
 
 /// One entry: socket + shared config + its accept loop task.
@@ -716,34 +1064,69 @@ impl BoundProxy {
                 }
             }
         }
-        self.spawn_health();
+        self.spawn_background();
         Ok(summary)
     }
 
-    /// (Re)starts the health tasks (B11) for the current config: one per
-    /// backend with configured checks, shared across listeners that share
-    /// the backend (same [`Balancer`] Arc).
-    fn spawn_health(&mut self) {
-        self.health_stop.trigger();
-        self.health_tasks.abort_all();
+    /// (Re)starts the background tasks for the current config, one per
+    /// unique backend (same [`Balancer`] Arc across listeners): the
+    /// active health checks (B11) and the non-blocking DNS resolver
+    /// (B-H13/B-N18/B-E15, only for `HOSTNAME:PORT` servers). Both run
+    /// after `bind`: no listener ever waits for health or DNS.
+    fn spawn_background(&mut self) {
+        self.bg_stop.trigger();
+        self.bg_tasks.abort_all();
         let (stop, shutdown) = eqproxy_core::shutdown::channel();
-        self.health_stop = stop;
+        self.bg_stop = stop;
         let mut seen: Vec<Arc<Balancer>> = Vec::new();
         for entry in &self.entries {
             let cfg = current_cfg(&entry.cfg);
             // Every backend the listener can route to (default + rule
             // targets): a rule-referenced backend keeps its checks.
             for backend in cfg.all_backends() {
-                let Some(check) = backend.health_check.clone() else {
-                    continue;
-                };
                 let balancer = Arc::clone(&backend.balancer);
                 if seen.iter().any(|s| Arc::ptr_eq(s, &balancer)) {
                     continue;
                 }
                 seen.push(Arc::clone(&balancer));
-                self.health_tasks
-                    .spawn(health::run(balancer, check, shutdown.clone()));
+                if let Some(check) = backend.health_check.clone() {
+                    self.bg_tasks.spawn(health::run(
+                        Arc::clone(&balancer),
+                        check,
+                        shutdown.clone(),
+                    ));
+                }
+                if !balancer.name_targets().is_empty() {
+                    self.bg_tasks.spawn(dns::run(
+                        balancer,
+                        backend.dns,
+                        Arc::clone(&self.metrics),
+                        Arc::clone(&self.resolver),
+                        shutdown.clone(),
+                    ));
+                }
+            }
+        }
+        // Hot map file watchers (C10/PP-02): one per unique map with a
+        // file source and a reload window. Restarted with the config
+        // generation, like health checks and DNS (a swap rebuilds the
+        // registry, so the new maps get their own watchers).
+        let mut seen_maps: Vec<Arc<eqproxy_core::maps::HotMap>> = Vec::new();
+        for entry in &self.entries {
+            let cfg = current_cfg(&entry.cfg);
+            for map in cfg.maps.iter() {
+                if map.file().is_none() || map.reload_interval().is_zero() {
+                    continue;
+                }
+                if seen_maps.iter().any(|seen| Arc::ptr_eq(seen, map)) {
+                    continue;
+                }
+                seen_maps.push(Arc::clone(map));
+                self.bg_tasks.spawn(crate::maps::run(
+                    Arc::clone(map),
+                    Arc::clone(&self.metrics),
+                    shutdown.clone(),
+                ));
             }
         }
     }
@@ -797,7 +1180,7 @@ impl BoundProxy {
         for entry in &self.entries {
             entry.stop.trigger();
         }
-        self.health_stop.trigger();
+        self.bg_stop.trigger();
         let _ = tokio::time::timeout(grace, async {
             for entry in &mut self.entries {
                 let _ = (&mut entry.task).await;
@@ -807,7 +1190,7 @@ impl BoundProxy {
         for entry in &mut self.entries {
             entry.task.abort();
         }
-        self.health_tasks.abort_all();
+        self.bg_tasks.abort_all();
 
         // Draining: live connections may finish within the window.
         let deadline = tokio::time::Instant::now() + grace;
@@ -895,16 +1278,27 @@ impl Drop for ConnectionGuard {
 /// Pure selection: `NoServer` when everything is down/drained or already
 /// tried. Counting `no_available_server` is the caller's job (once per
 /// rejected exchange, never per queue poll).
-fn select_server(
-    backend: &ResolvedBackend,
+fn select_server<'a>(
+    backend: &'a ResolvedBackend,
     exclude: &[SocketAddr],
-) -> Result<SocketAddr, OutboundError> {
-    if exclude.is_empty() {
-        backend.balancer.pick()
-    } else {
-        backend.balancer.pick_except(exclude)
-    }
-    .ok_or(OutboundError::NoServer)
+    preferred: Option<SocketAddr>,
+) -> Result<(SocketAddr, ActiveGuard<'a>), OutboundError> {
+    // `preferred = None` is the plain pick (roundrobin / leastconn); with
+    // affinity the pin wins and falls forward past down/excluded servers
+    // (B-H8). The pick holds one in-flight slot (B-H5 leastconn), taken
+    // atomically with the selection and released with the guard.
+    backend
+        .balancer
+        .pick_pinned_tracked(preferred, exclude)
+        .ok_or(OutboundError::NoServer)
+}
+
+/// Stable-enough hash of the client IP for source affinity (B-N13).
+fn affinity_hash(ip: IpAddr) -> usize {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    ip.hash(&mut hasher);
+    hasher.finish() as usize
 }
 
 /// Passive health (B12/B-N10): a connect-phase failure feeds the balancer's
@@ -934,16 +1328,47 @@ fn report_passive(backend: &ResolvedBackend, addr: SocketAddr) {
 /// `use_pool` enables A16 reuse (HTTP keep-alive); the pool checkout runs
 /// on the very pick that would be dialed — a separate pick would steal the
 /// round-robin turn of another server and silently starve it.
-async fn dial_with_retries(
+///
+/// Retry safety (B-H7), the affinity pin (B-H8) and pool reuse (A16) are
+/// per-exchange and travel together in [`DialOpts`].
+struct DialOpts<'a> {
+    ctx: RetryContext,
+    affinity_cookie: Option<&'a str>,
+    use_pool: bool,
+}
+
+async fn dial_with_retries<'a>(
     cfg: &ResolvedListener,
-    backend: &ResolvedBackend,
+    backend: &'a ResolvedBackend,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
-    ctx: RetryContext,
-    use_pool: bool,
-) -> Result<BackendConn, OutboundError> {
-    let max_attempts = if backend.retries.allows(ctx.idempotent) {
+    opts: DialOpts<'_>,
+) -> Result<(BackendConn, ActiveGuard<'a>), OutboundError> {
+    // Affinity (B-H8/B-N13/B-I8): the preferred server of this exchange,
+    // from the request's affinity cookie (cookie mode) or the client IP
+    // hash (source mode). Both fall forward past down servers.
+    let preferred = match backend.affinity.as_ref().map(|affinity| affinity.mode) {
+        // The token/hash maps to a **stable slot index** (B-H13: a DNS
+        // re-resolution must not reshuffle affinity); an unresolved slot
+        // simply has no preferred address and falls forward.
+        Some(AffinityMode::Cookie) => opts
+            .affinity_cookie
+            .and_then(|token| token.parse::<usize>().ok())
+            .and_then(|idx| backend.balancer.addr_of_slot(idx)),
+        Some(AffinityMode::Source) => {
+            let count = backend.balancer.slot_count();
+            (count > 0)
+                .then(|| {
+                    backend
+                        .balancer
+                        .addr_of_slot(affinity_hash(peer.ip()) % count)
+                })
+                .flatten()
+        }
+        None => None,
+    };
+    let max_attempts = if backend.retries.allows(opts.ctx.idempotent) {
         backend.retries.max
     } else {
         0
@@ -951,8 +1376,11 @@ async fn dial_with_retries(
     let mut tried: Vec<SocketAddr> = Vec::new();
     loop {
         // --- Server selection (B11 active state; B-H7 exclusion) ---
-        let addr = match select_server(backend, &tried) {
-            Ok(addr) => addr,
+        // The pick holds one in-flight slot (B-H5); it is released with
+        // the guard when the attempt fails and travels with the
+        // connection on success.
+        let (addr, active) = match select_server(backend, &tried, preferred) {
+            Ok(picked) => picked,
             Err(OutboundError::NoServer) if !tried.is_empty() => {
                 // Every candidate already failed this exchange: the class is
                 // "the chosen server failed" (HTTP → 502), not "nothing up".
@@ -972,14 +1400,14 @@ async fn dial_with_retries(
                 let result = tokio::time::timeout_at(deadline, async {
                     loop {
                         tokio::time::sleep(Duration::from_millis(50)).await;
-                        if let Ok(addr) = select_server(backend, &[]) {
-                            return addr;
+                        if let Ok(picked) = select_server(backend, &[], preferred) {
+                            return picked;
                         }
                     }
                 })
                 .await;
                 match result {
-                    Ok(addr) => addr,
+                    Ok(picked) => picked,
                     Err(_) => {
                         metrics.queue_timeout.fetch_add(1, Ordering::Relaxed);
                         return Err(OutboundError::QueueTimeout);
@@ -990,19 +1418,22 @@ async fn dial_with_retries(
         };
 
         // --- Pool reuse first (A16), first attempt only ---
-        if use_pool
+        if opts.use_pool
             && tried.is_empty()
             && let Some((read, write)) = backend.pool.checkout(&addr, Instant::now())
         {
             metrics
                 .backend_connections_reused
                 .fetch_add(1, Ordering::Relaxed);
-            return Ok(BackendConn {
-                addr,
-                read,
-                write,
-                reused: true,
-            });
+            return Ok((
+                BackendConn {
+                    addr,
+                    read,
+                    write,
+                    reused: true,
+                },
+                active,
+            ));
         }
 
         // --- Dial the chosen server ---
@@ -1011,12 +1442,15 @@ async fn dial_with_retries(
                 metrics
                     .backend_connections_opened
                     .fetch_add(1, Ordering::Relaxed);
-                return Ok(BackendConn {
-                    addr,
-                    read: BufReader::new(read),
-                    write,
-                    reused: false,
-                });
+                return Ok((
+                    BackendConn {
+                        addr,
+                        read: BufReader::new(read),
+                        write,
+                        reused: false,
+                    },
+                    active,
+                ));
             }
             Err(OutboundError::Connect) => {
                 tried.push(addr);
@@ -1034,26 +1468,29 @@ async fn dial_with_retries(
 }
 
 /// Connects to the balancer-chosen backend (TCP/TLS + PROXY send).
-pub async fn connect_backend(
-    cfg: &ResolvedListener,
+pub async fn connect_backend<'a>(
+    cfg: &'a ResolvedListener,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
-) -> Result<(BoxRead, BoxWrite), OutboundError> {
+) -> Result<(BoxRead, BoxWrite, ActiveGuard<'a>), OutboundError> {
     // TCP has no replay-safety knowledge: conservative non-idempotent,
     // and no pooling (streams have no message boundaries). TCP has no
     // routing rules: always the default backend.
-    let conn = dial_with_retries(
+    let (conn, active) = dial_with_retries(
         cfg,
         &cfg.backend,
         peer,
         local,
         metrics,
-        RetryContext::non_idempotent(),
-        false,
+        DialOpts {
+            ctx: RetryContext::non_idempotent(),
+            affinity_cookie: None,
+            use_pool: false,
+        },
     )
     .await?;
-    Ok((Box::new(conn.read), conn.write))
+    Ok((Box::new(conn.read), conn.write, active))
 }
 
 /// Stream to the backend with its origin: reused from the pool (A16) or
@@ -1073,17 +1510,32 @@ pub struct BackendConn {
 /// balancer-chosen server, with B-H7 retry/queue semantics.
 ///
 /// `ctx` decides retry safety (idempotent unless explicit opt-in).
-pub async fn checkout_or_connect(
+pub async fn checkout_or_connect<'a>(
     cfg: &ResolvedListener,
-    backend: &ResolvedBackend,
+    backend: &'a ResolvedBackend,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
     ctx: RetryContext,
-) -> Result<BackendConn, OutboundError> {
+    affinity_cookie: Option<&str>,
+) -> Result<(BackendConn, ActiveGuard<'a>), OutboundError> {
     // Pool checkout runs on the very pick that would be dialed (inside
     // `dial_with_retries`): one request, one pick, one connection (B-H7).
-    dial_with_retries(cfg, backend, peer, local, metrics, ctx, true).await
+    // The in-flight slot (B-H5) travels with the connection and is
+    // released when the caller's guard drops at exchange end.
+    dial_with_retries(
+        cfg,
+        backend,
+        peer,
+        local,
+        metrics,
+        DialOpts {
+            ctx,
+            affinity_cookie,
+            use_pool: true,
+        },
+    )
+    .await
 }
 
 /// Variant of [`connect_backend`] against an already-chosen server (the pool
@@ -1149,11 +1601,12 @@ async fn connect_backend_to(
                 return Err(OutboundError::Connect);
             }
         };
-        if backend.proxy_protocol == ProxyProtocolMode::V1
-            && proxy_proto::write_v1(&mut stream, peer, local)
-                .await
-                .is_err()
-        {
+        let proxy_header = match backend.proxy_protocol {
+            ProxyProtocolMode::None => Ok(()),
+            ProxyProtocolMode::V1 => proxy_proto::write_v1(&mut stream, peer, local).await,
+            ProxyProtocolMode::V2 => proxy_proto::write_v2(&mut stream, peer, local).await,
+        };
+        if proxy_header.is_err() {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             return Err(OutboundError::Connect);
         }
@@ -1161,11 +1614,12 @@ async fn connect_backend_to(
         Ok((Box::new(read), Box::new(write)))
     } else {
         let mut socket = socket;
-        if backend.proxy_protocol == ProxyProtocolMode::V1
-            && proxy_proto::write_v1(&mut socket, peer, local)
-                .await
-                .is_err()
-        {
+        let proxy_header = match backend.proxy_protocol {
+            ProxyProtocolMode::None => Ok(()),
+            ProxyProtocolMode::V1 => proxy_proto::write_v1(&mut socket, peer, local).await,
+            ProxyProtocolMode::V2 => proxy_proto::write_v2(&mut socket, peer, local).await,
+        };
+        if proxy_header.is_err() {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             return Err(OutboundError::Connect);
         }
@@ -1190,7 +1644,14 @@ async fn handle_connection(
     // allowlisted origins, only valid lines, always bounded. The claimed
     // address becomes the peer for XFF, logs and PROXY send.
     let peer = if let Some(allowlist) = &cfg.proxy_receive {
-        match proxy_proto::read_v1(&mut client, peer, allowlist, cfg.client_header_timeout).await {
+        match proxy_proto::read_proxy_header(
+            &mut client,
+            peer,
+            allowlist,
+            cfg.client_header_timeout,
+        )
+        .await
+        {
             Ok(claimed) => claimed,
             Err(err) => {
                 match err {
@@ -1199,7 +1660,7 @@ async fn handle_connection(
                             .proxy_protocol_denied
                             .fetch_add(1, Ordering::Relaxed);
                         eprintln!(
-                            "WARN [{}] PROXY v1 from non-allowlisted origin {peer}: connection rejected",
+                            "WARN [{}] PROXY header from non-allowlisted origin {peer}: connection rejected",
                             cfg.name
                         );
                     }
@@ -1208,7 +1669,7 @@ async fn handle_connection(
                             .proxy_protocol_invalid
                             .fetch_add(1, Ordering::Relaxed);
                         eprintln!(
-                            "WARN [{}] invalid PROXY v1 header from {peer}: connection rejected",
+                            "WARN [{}] invalid PROXY header from {peer}: connection rejected",
                             cfg.name
                         );
                     }
@@ -1217,7 +1678,7 @@ async fn handle_connection(
                             .proxy_protocol_invalid
                             .fetch_add(1, Ordering::Relaxed);
                         eprintln!(
-                            "WARN [{}] PROXY v1 header from {peer} timed out after {:?}: connection rejected",
+                            "WARN [{}] PROXY header from {peer} timed out after {:?}: connection rejected",
                             cfg.name, cfg.client_header_timeout
                         );
                     }
@@ -1272,7 +1733,9 @@ async fn handle_connection(
     }
 
     match connect_backend(&cfg, peer, local, &metrics).await {
-        Ok((server_read, server_write)) => {
+        Ok((server_read, server_write, _active)) => {
+            // `_active` (B-H5) holds the in-flight slot across the whole
+            // relay: a TCP stream counts as one load unit until EOF.
             pump(
                 (client_read, client_write),
                 (server_read, server_write),
@@ -1446,6 +1909,62 @@ mod tests {
         })
     }
 
+    // --- B-I11: weighted traffic split (smooth WRR across targets) ---
+
+    fn split_backend(name: &str) -> Arc<ResolvedBackend> {
+        Arc::new(ResolvedBackend::single(
+            name,
+            "127.0.0.1:9000"
+                .parse::<std::net::SocketAddr>()
+                .expect("server addr"),
+        ))
+    }
+
+    fn split(weights: &[(&str, u32)]) -> SplitTargets {
+        SplitTargets::new(
+            weights
+                .iter()
+                .map(|(name, weight)| SplitTarget {
+                    backend: split_backend(name),
+                    weight: *weight,
+                })
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn split_shares_requests_by_exact_weight() {
+        let targets = split(&[("stable", 3), ("canary", 1)]);
+        let mut counts = std::collections::BTreeMap::new();
+        for _ in 0..8 {
+            let picked = targets.pick().name.clone();
+            *counts.entry(picked).or_insert(0usize) += 1;
+        }
+        assert_eq!(
+            counts.get("stable"),
+            Some(&6),
+            "3:1 over 8 = 6:2: {counts:?}"
+        );
+        assert_eq!(counts.get("canary"), Some(&2), "{counts:?}");
+    }
+
+    #[test]
+    fn split_zero_weight_targets_are_never_picked() {
+        let targets = split(&[("off", 0), ("live", 2), ("also-off", 0)]);
+        for _ in 0..20 {
+            assert_eq!(targets.pick().name, "live");
+        }
+    }
+
+    #[test]
+    fn split_smoothly_interleaves_instead_of_bursting() {
+        let targets = split(&[("a", 3), ("b", 1)]);
+        let order: Vec<String> = (0..4).map(|_| targets.pick().name.clone()).collect();
+        // Smooth WRR: the minority target lands inside the window, not
+        // in a burst at the end of it (nginx's algorithm).
+        assert_eq!(order, ["a", "a", "b", "a"], "order: {order:?}");
+    }
+
     #[test]
     fn swap_summary_renders_the_three_counts() {
         let summary = SwapSummary {
@@ -1462,7 +1981,7 @@ mod tests {
             name,
             listen.parse().expect("listen"),
             "backend",
-            "127.0.0.1:9000".parse().expect("server"),
+            "127.0.0.1:9000".parse::<SocketAddr>().expect("server"),
             ProxyMode::Tcp,
             1,
             Duration::from_secs(1),

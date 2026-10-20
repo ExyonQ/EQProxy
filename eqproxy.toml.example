@@ -17,6 +17,10 @@ idle_timeout = "60s"        # inactivity per tunnel direction
 # mode = "http" only: per-message-phase timeouts
 client_header_timeout = "5s"   # request head (client → proxy)
 server_header_timeout = "30s"  # response head (backend → proxy)
+# Total duration cap for one forwarded exchange ("0s" disables): inactivity
+# (idle_timeout) ≠ duration (Q5). Fires with 504 before the response head,
+# or a truncated stream after it.
+max_stream_duration = "0s"
 
 # TLS termination (A11): optional. Without this section the listener is plain TCP.
 #[listener.web.tls]
@@ -34,6 +38,7 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 
 # Forwarded headers (B-N4, http mode): "off" (default), "append"
 # (keep the chain and grow it) or "replace" (drop spoofed hops).
+# Both also set X-Forwarded-Proto to the client-facing scheme.
 #forwarded_headers = "append"
 
 # Custom answer for the "no server available" class (C9).
@@ -46,8 +51,10 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 # wins; the listener's `backend` is the fallback when no rule matches.
 # Conditions AND together: host/host_prefix/host_regex (case-insensitive,
 # port-free), path/path_prefix/path_regex (literal, no normalization),
-# methods, headers (exact/regex/present), ip (CIDR blocks). Exactly one
-# action per rule: use_backend, redirect or direct_response (B-N5/B-I6).
+# methods, headers (exact/regex/present), cookies (exact/regex/present,
+# B-I11; RFC 6265 pair parsing, names case-insensitive), ip (CIDR
+# blocks) and map (C10 hot data maps, below). Exactly one action per
+# rule: use_backend, split, redirect or direct_response (B-N5/B-I6/B-I11).
 #[[listener.web.rules]]
 #name = "api-v1"
 #path_prefix = "/v1/"
@@ -56,6 +63,46 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 #[listener.web.rules.rewrite]
 #path_prefix_rewrite = "/api/"      # replaces the matched path_prefix ("" strips it)
 #host_rewrite = "api.internal"      # exact upstream Host
+#
+## Header actions (B-N4/B-I4/B-E17). Request-side ones only with
+## use_backend; values support $remote_addr, $host and $scheme (every
+## `$` must open one of them: a literal `$` has no escape). The
+## forwarded-headers policy above runs last and a rule can never
+## override it. content-length/transfer-encoding stay the proxy's job.
+#set_headers = [{ name = "x-beta", value = "on" }]          # replace (or insert)
+#add_headers = [{ name = "x-hint", value = "extra" }]       # append, keeping the client's
+#del_headers = ["x-gone"]                                   # remove before forwarding
+#response_headers = [{ name = "x-marker", value = "v06" }]  # on the way back to the client
+# HSTS is one such entry:
+#response_headers = [{ name = "strict-transport-security", value = "max-age=31536000" }]
+# Rate limit (B-N8/B-I7/B-E16): token bucket per client IP on this rule
+# (any action). Over the limit: explicit 429 + counter (rate_limited),
+# never a silent drop. In-memory: no network in the hot path (Q6).
+#rate_limit = { rate = 10, burst = 20 }        # 10 req/s, burst 20 (default burst = rate)
+#rate_limit = { rate = 10, per = "60s" }       # 10 req/min (rpm)
+# CORS (B-I10): the preflight OPTIONS is answered locally (the backend
+# never sees it) and every response of the rule carries the CORS headers.
+#[listener.web.rules.cors]
+#allow_origin = "https://app.example.com"  # "*" only without allow_credentials
+#allow_methods = "GET, HEAD, POST, OPTIONS"  # default
+#allow_headers = "content-type, authorization"  # omitted when absent
+#expose_headers = "x-marker"                # omitted when absent
+#max_age = "600s"                           # Access-Control-Max-Age ("0s" omits)
+#allow_credentials = false
+# Authentication (B-N9/B-I9; any action, runs before CORS preflight):
+# Basic locally and/or an external subrequest (nginx `auth_request` /
+# ingress `auth-url`); both = Basic first, then the subrequest. Fail
+# closed: 401/403 from the auth service reaches the client, any other
+# status is 500 and an unreachable auth service is 502 (counters
+# auth_denied / auth_service_errors). The subrequest is GET with the
+# client's headers plus X-Original-Method/X-Original-URL, bounded by
+# connect_timeout and server_header_timeout. `type = "basic"` verifies
+# htpasswd entries (`$apr1$…` or plain; generate: openssl passwd -apr1).
+#[listener.web.rules.auth]
+#url = "http://127.0.0.1:9000/verify"  # subrequest target (http:// only)
+#type = "basic"                        # ingress `auth-type` (only "basic")
+#realm = "EQProxy"                     # WWW-Authenticate realm (default)
+#users = ["alice:$apr1$L4W9UxwZ$…"]    # htpasswd entries (1-1024)
 #
 #[[listener.web.rules]]
 #name = "moved"
@@ -71,23 +118,102 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 #status = 200
 #content_type = "text/plain"
 #body = "pong"
+#
+## Canary y tráfico ponderado (B-I11):
+## canary-by-header / canary-by-cookie = a rule above with a `headers`
+## or `cookies` condition routing to the canary backend (100 % of the
+## matching requests); canary-by-weight = the `split` action below.
+#[[listener.web.rules]]
+#name = "canary-by-cookie"
+#cookies = [{ name = "canary", exact = "always" }]   # or regex / present = true
+#use_backend = "canary"
+#
+## Weighted traffic split (B-I11; Envoy `weighted_clusters`, ingress
+## `canary-weight`): one rule fans requests out across backends by
+## weight — smooth weighted round-robin, exact shares in rotation
+## (3:1 = 3 of every 4 requests). weight = 0 disables a target without
+## touching the rest (canary rollback). Mutually exclusive with the
+## other actions; rewrite and header actions apply to the forwarded
+## request whatever target wins.
+#[[listener.web.rules]]
+#name = "canary-split"
+#path_prefix = "/"
+#split = [
+#  { backend = "api", weight = 90 },
+#  { backend = "canary", weight = 10 },
+#]
+#
+## Hot data maps (C10/PP-02): named key → value tables that rules
+## consult with a `map` condition. `file` maps are watched and
+## re-read every `reload_interval`: new data swaps in atomically in hot
+## WITHOUT a config reload and without losing any other state (counters,
+## buckets, pools and live connections all survive). Update files
+## atomically (write + rename) so the watcher never sees a torn file;
+## a malformed update is rejected (counted in map_reload_failures) and
+## the last good data keeps serving.
+## File format: `key value` per line (whitespace-separated; the value
+## may contain spaces; a bare key maps to ""), `#` comments at line
+## start only, duplicate keys rejected. Keys match literally.
+#[maps.tiers]
+#file = "tiers.map"         # relative to this config file
+#default = "free"           # value for keys without an entry (like nginx `map` default)
+#reload_interval = "5s"     # "0s" = load once (static)
+## …or inline, static entries:
+#[maps.static_tiers]
+#entries = { acme = "vip", globex = "free" }
+#
+## A `map` condition: the key selected from the request (key = "ip" |
+## "host" | "path" | "method", or header = "name" for that header's
+## first value) must exist in the map and — when `equals` is set — map
+## to that exact value. Missing header = empty key = no entry.
+#[[listener.web.rules]]
+#name = "vip-tenants"
+#map = { name = "tiers", header = "x-tenant", equals = "vip" }
+#use_backend = "vip"
 
 [backend.api]
 # One server (compat 0.1.0) …
 server = "127.0.0.1:9000"
 # … or several with weights (B1/B7). `server` and `servers` are mutually exclusive.
+# Each `addr` is `IP:PORT` or `HOSTNAME:PORT` (B-H13/B-N18/B-E15): names
+# are resolved in the background — the listeners never block on DNS and a
+# name that is not resolved yet answers an explicit 503 (counted).
 #servers = [
 #  { addr = "10.0.0.1:9000", weight = 3 },   # weight 0..=256; 0 = drained
 #  { addr = "10.0.0.2:9000", weight = 1 },
+#  { addr = "api.internal:9000", weight = 1 },  # resolved in the background
 #]
-#balance = "roundrobin"        # Phase 2b: weighted round-robin only
-#proxy_protocol = "v1"         # send PROXY protocol v1 to the servers (A9)
+#balance = "roundrobin"        # or "leastconn" (B-H5/B-N12/B-E6; aliases:
+#                               # "least_conn", "least_request") — weighted
+#                               # least-connections: picks by active/weight
+#slow_start = "30s"            # B14: after UP (startup/recovery) the effective
+#                               # weight ramps 0..weight over the window
+#                               # ("0s" = off; maximum "1h")
+#resolve_interval = "30s"      # B-H13/B-N18/B-E15: re-resolve HOSTNAME:PORT
+#                               # servers at this rate and swap addresses in
+#                               # hot ("0s" = resolve once at startup;
+#                               # maximum "24h"). IP:PORT is unaffected.
+#proxy_protocol = "v1"         # "v1"/"v2": PROXY header to the servers (A9/A10)
 
 #maxqueue = 256            # bounded wait queue when no server is up (B-H7)
 #timeout_queue = "500ms"    # max wait in the queue; expired → explicit 503
 #retries = 1               # extra dials on connect failure (0..=5; B-H7)
 #retry_non_idempotent = true  # opt-in: allow redials for POST & co (off)
 
+# WebSockets / CONNECT (B-H15/B-I18/B-E11): in mode = "http" an Upgrade
+# handshake (websocket or any other) and CONNECT are routed like any
+# request; when the backend accepts (101 / 2xx) the exchange becomes a
+# raw bidirectional tunnel (idle_timeout is the inactivity cap). No
+# configuration needed. mode = "tcp" remains the passthrough alternative.
+# Session affinity (B-H8/B-N13/B-I8): pin a client to the server that
+# first served it. "cookie": the proxy inserts a sticky cookie (HAProxy
+# `cookie insert`; re-issued when missing or stale; the opaque value is
+# visible to the backend). "source": hash of the client IP (nginx
+# `ip_hash`). When the pinned server is down, the next eligible one in
+# config order serves.
+#affinity = { mode = "cookie" }                    # cookie name: "eqproxy_affinity"
+#affinity = { mode = "cookie", cookie = "srv" }
+#affinity = { mode = "source" }
 # Active health check (B11/B-H6). Absent = all servers operational.
 #[backend.api.health_check]
 #type = "tcp"      # "tcp" (default) or "http"

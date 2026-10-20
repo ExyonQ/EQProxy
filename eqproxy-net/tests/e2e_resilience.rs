@@ -226,7 +226,7 @@ fn http_listener(name: &str, backend: Arc<ResolvedBackend>) -> ResolvedListener 
         name,
         "127.0.0.1:0".parse().expect("addr"),
         backend.name.clone(),
-        backend.servers[0].addr,
+        backend.servers[0].addr.clone(),
         ProxyMode::Http,
         64,
         Duration::from_secs(2),
@@ -313,11 +313,11 @@ async fn retry_saves_idempotent_get_from_dead_server() {
         "api",
         vec![
             ResolvedServer {
-                addr: dead,
+                addr: dead.into(),
                 weight: 1,
             },
             ResolvedServer {
-                addr: live,
+                addr: live.into(),
                 weight: 1,
             },
         ],
@@ -366,11 +366,11 @@ async fn non_idempotent_post_is_never_retried_without_opt_in() {
         "api",
         vec![
             ResolvedServer {
-                addr: dead,
+                addr: dead.into(),
                 weight: 1,
             },
             ResolvedServer {
-                addr: live,
+                addr: live.into(),
                 weight: 1,
             },
         ],
@@ -424,11 +424,11 @@ async fn non_idempotent_opt_in_allows_post_retry() {
         "api",
         vec![
             ResolvedServer {
-                addr: dead,
+                addr: dead.into(),
                 weight: 1,
             },
             ResolvedServer {
-                addr: live,
+                addr: live.into(),
                 weight: 1,
             },
         ],
@@ -472,7 +472,7 @@ async fn full_queue_rejects_explicitly_and_waiters_time_out() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: drained,
+            addr: drained.into(),
             weight: 0,
         }],
         3,
@@ -539,7 +539,7 @@ async fn local_response_serves_the_configured_body() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: drained,
+            addr: drained.into(),
             weight: 0,
         }],
         3,
@@ -587,7 +587,7 @@ async fn proxy_receive_forwards_the_claimed_peer() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -632,6 +632,67 @@ async fn proxy_receive_forwards_the_claimed_peer() {
     stop_proxy(handle, serve).await;
 }
 
+/// B-H9/B-E10 (A10): the same reception journey with a PROXY v2 binary
+/// header — auto-detected by signature; the claimed source reaches the
+/// backend and no payload byte is consumed.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn proxy_receive_accepts_the_v2_header() {
+    let echo = start_echo().await;
+    let metrics = Arc::new(Metrics::default());
+    let backend = ResolvedBackend::new(
+        "api",
+        vec![ResolvedServer {
+            addr: echo.into(),
+            weight: 1,
+        }],
+        3,
+        2,
+    )
+    .with_proxy_protocol(ProxyProtocolMode::V1);
+    let cfg = tcp_listener("edge", Arc::new(backend))
+        .with_proxy_receive(IpAllowlist::parse(&["127.0.0.1".to_owned()]).expect("allowlist"));
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    let mut hello = eqproxy_net::proxy_proto::encode_v2(
+        "192.0.2.1:443".parse().expect("claimed"),
+        "192.0.2.2:8443".parse().expect("dest"),
+    );
+    hello.extend_from_slice(b"ping");
+    client.write_all(&hello).await.expect("write");
+    let mut echoed = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        let got = tokio::time::timeout(WAIT, client.read(&mut buf))
+            .await
+            .expect("echo in time")
+            .expect("read");
+        if got == 0 {
+            break;
+        }
+        echoed.extend_from_slice(&buf[..got]);
+        if echoed.windows(4).any(|w| w == b"ping") {
+            break;
+        }
+    }
+    let echoed = String::from_utf8_lossy(&echoed).into_owned();
+    assert!(
+        echoed.starts_with("PROXY TCP4 192.0.2.1 127.0.0.1 443 "),
+        "the v2-claimed source must reach the backend, got: {echoed:?}"
+    );
+    assert!(
+        echoed.ends_with("ping"),
+        "payload must pass, got: {echoed:?}"
+    );
+
+    drop(client);
+    stop_proxy(handle, serve).await;
+}
+
 #[cfg_attr(
     miri,
     ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
@@ -643,7 +704,7 @@ async fn proxy_receive_rejects_non_allowlisted_origin() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -692,7 +753,7 @@ async fn proxy_receive_rejects_invalid_header() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -708,11 +769,17 @@ async fn proxy_receive_rejects_invalid_header() {
         .await
         .expect("write");
     let mut buf = [0u8; 8];
+    // The reject path closes at the first non-matching byte without
+    // draining the request bytes, so TCP may reset instead of a clean
+    // EOF — both prove rejection (the deny path above documents the
+    // same artifact).
     let got = tokio::time::timeout(WAIT, client.read(&mut buf))
         .await
-        .expect("close in time")
-        .expect("read");
-    assert_eq!(got, 0, "an invalid PROXY line must be closed without data");
+        .expect("close in time");
+    assert!(
+        matches!(got, Ok(0) | Err(_)),
+        "an invalid PROXY header must be closed without data: {got:?}"
+    );
 
     drop(client);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -740,7 +807,7 @@ async fn forwarded_headers_append_and_replace() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -769,7 +836,7 @@ async fn forwarded_headers_append_and_replace() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -804,7 +871,7 @@ async fn forwarded_headers_append_and_replace() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -878,7 +945,7 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -906,7 +973,7 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,
@@ -964,11 +1031,11 @@ async fn passive_detection_marks_5xx_server_down() {
             "api",
             vec![
                 ResolvedServer {
-                    addr: failing,
+                    addr: failing.into(),
                     weight: 1,
                 },
                 ResolvedServer {
-                    addr: healthy,
+                    addr: healthy.into(),
                     weight: 1,
                 },
             ],
@@ -1040,11 +1107,11 @@ async fn http_expect_check_marks_5xx_server_down() {
             "api",
             vec![
                 ResolvedServer {
-                    addr: failing,
+                    addr: failing.into(),
                     weight: 1,
                 },
                 ResolvedServer {
-                    addr: healthy,
+                    addr: healthy.into(),
                     weight: 1,
                 },
             ],
@@ -1083,6 +1150,145 @@ async fn http_expect_check_marks_5xx_server_down() {
             metrics.snapshot()
         );
     }
+
+    stop_proxy(handle, serve).await;
+}
+
+// --------------------------- B-H6 interop: keep-alive origins --------------
+
+/// Keep-alive origin that **never** closes a connection — the interop
+/// hazard for any checker that reads its response to EOF. `/healthz`
+/// answers `200` with an `ok` body framed by `Content-Length` (chunked
+/// when `chunked_health`); any other path answers `200` with `marker`.
+/// `Connection: close` is ignored on purpose.
+async fn start_keepalive_origin(marker: &'static str, chunked_health: bool) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind keep-alive origin");
+    let addr = listener.local_addr().expect("addr keep-alive origin");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let mut total = 0usize;
+                    let head_end = loop {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                    let response = if head.starts_with("get /healthz ") {
+                        if chunked_health {
+                            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n"
+                                .to_owned()
+                        } else {
+                            "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok".to_owned()
+                        }
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{marker}",
+                            marker.len()
+                        )
+                    };
+                    if socket.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    // Never close: the socket stays open forever.
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// HTTP check interop (B-H6): the check completes at the HTTP message
+/// boundary (RFC 9112 §6) and never waits for the origin to close, so
+/// keep-alive origins stay UP across check cycles instead of flapping
+/// to DOWN on every check timeout.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_check_interops_with_keep_alive_origins() {
+    use eqproxy_core::expectation::{RegexMatcher, StatusExpectation};
+    use eqproxy_net::health::{HealthCheck, HttpCheck, HttpCheckMethod};
+
+    // Two keep-alive origins that never close a connection: one delimits
+    // its responses with Content-Length, the other with chunked framing.
+    // A checker that reads to EOF times out every cycle and flaps both
+    // DOWN even though they answer 200 + "ok" on time.
+    let cl = start_keepalive_origin("cl", false).await;
+    let chunked = start_keepalive_origin("ck", true).await;
+    let metrics = Arc::new(Metrics::default());
+    let backend = Arc::new(
+        ResolvedBackend::new(
+            "api",
+            vec![
+                ResolvedServer {
+                    addr: cl.into(),
+                    weight: 1,
+                },
+                ResolvedServer {
+                    addr: chunked.into(),
+                    weight: 1,
+                },
+            ],
+            1, // fall
+            1, // rise
+        )
+        .with_health_check(
+            HealthCheck::tcp(Duration::from_millis(100), Duration::from_millis(150)).with_http(
+                HttpCheck {
+                    method: HttpCheckMethod::Get,
+                    path: "/healthz".to_owned(),
+                    host: None,
+                    expect_status: StatusExpectation::parse("200").expect("status range"),
+                    expect_rstring: Some(RegexMatcher::parse("ok").expect("regex")),
+                },
+            ),
+        ),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(
+        http_listener("web", Arc::clone(&backend)),
+        Arc::clone(&metrics),
+    )
+    .await;
+
+    // Several check cycles pass (interval 100 ms): both origins stay
+    // operational — no flapping.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        backend.balancer.is_up(cl),
+        "the Content-Length keep-alive origin must stay UP"
+    );
+    assert!(
+        backend.balancer.is_up(chunked),
+        "the chunked keep-alive origin must stay UP"
+    );
+
+    // And live traffic still reaches both of them (round robin).
+    let mut bodies = Vec::new();
+    for _ in 0..6 {
+        let response = http_exchange(proxy_addr, get_request()).await;
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "traffic must flow while the checks pass: {response:?}"
+        );
+        bodies.push(response_body(&response).to_owned());
+    }
+    assert!(
+        bodies.iter().any(|b| b == "cl") && bodies.iter().any(|b| b == "ck"),
+        "both keep-alive origins must serve: {bodies:?}"
+    );
 
     stop_proxy(handle, serve).await;
 }
@@ -1175,7 +1381,7 @@ async fn mtls_requires_a_certificate_issued_by_the_client_ca() {
     let backend = ResolvedBackend::new(
         "api",
         vec![ResolvedServer {
-            addr: echo,
+            addr: echo.into(),
             weight: 1,
         }],
         3,

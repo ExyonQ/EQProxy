@@ -858,6 +858,232 @@ fn run_routes_by_rules_first_match_wins_with_default_fallback() {
     assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
 }
 
+/// Auth service for the subrequest gate (real socket): 401 + body for
+/// `/ext/bad`, 200 otherwise.
+fn start_auth_service() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind auth service");
+    let addr = listener.local_addr().expect("addr auth service");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf[..total]).into_owned();
+                let denied = head.contains("x-original-url: /ext/bad");
+                let response = if denied {
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"ext\"\r\nContent-Length: 14\r\nConnection: close\r\n\r\ndenied-by-auth"
+                        .to_owned()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_owned()
+                };
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    addr
+}
+
+/// Authentication through the **real** binary (B-N9/B-I9): Basic
+/// htpasswd entries (`type = "basic"`) and the external subrequest
+/// (`auth-url`) gate the requests of their rules — explicit 401s with
+/// `WWW-Authenticate`/auth body, good credentials reach the backend, and
+/// `config explain` names the gate offline.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_auth_basic_and_subrequest_gate_requests() {
+    let backend = start_identity_backend("api");
+    let auth = start_auth_service();
+    let config = temp_config(
+        "auth",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"private\"\n\
+             path_prefix = \"/private/\"\n\
+             use_backend = \"api\"\n\
+             [listener.web.rules.auth]\n\
+             type = \"basic\"\n\
+             realm = \"test\"\n\
+             users = [\"alice:$apr1$eqpr0xyS$DDjQzF4.2qDil6v9iW4Xo1\"]\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"ext\"\n\
+             path_prefix = \"/ext/\"\n\
+             use_backend = \"api\"\n\
+             [listener.web.rules.auth]\n\
+             url = \"http://{auth}/verify\"\n\
+             \n\
+             [backend.api]\n\
+             server = \"{backend}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (auth)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    // Basic: no credentials -> explicit 401 + WWW-Authenticate.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /private/x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+    assert!(
+        response.contains("www-authenticate: Basic realm=\"test\""),
+        "{response}"
+    );
+    // Wrong password -> 401 again.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /private/x HTTP/1.1\r\nHost: x\r\nAuthorization: Basic YWxpY2U6d3Jvbmc=\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+    // `alice:secret` (apr1 htpasswd entry) -> proxied to the backend.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /private/x HTTP/1.1\r\nHost: x\r\nAuthorization: Basic YWxpY2U6c2VjcmV0\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    assert_eq!(body_of(&response), "api");
+
+    // Subrequest: the auth service allows and the backend answers.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /ext/good HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    assert_eq!(body_of(&response), "api");
+    // Subrequest: the auth service denies and its response reaches the
+    // client (status, WWW-Authenticate and body).
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /ext/bad HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 401 "), "{response}");
+    assert!(
+        response.contains("www-authenticate: Basic realm=\"ext\""),
+        "{response}"
+    );
+    assert_eq!(body_of(&response), "denied-by-auth");
+
+    // `config explain` names the gate offline (H4).
+    let explain = |path: &str| {
+        let out = bin()
+            .args(["config", "explain", "--config"])
+            .arg(&config)
+            .args(["--host", "x", "--path", path])
+            .output()
+            .expect("run eqproxy config explain");
+        assert!(out.status.success(), "explain exits 0: {:?}", out);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let report = explain("/private/x");
+    assert!(report.contains("auth basic realm \"test\""), "{report}");
+    let report = explain("/ext/good");
+    assert!(
+        report.contains(&format!("auth subrequest http://{auth}/verify")),
+        "{report}"
+    );
+
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success(), "kill -INT must be accepted");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+}
+
+/// The config gate rejects an `https://` auth-url naming the gap (the
+/// subrequest is plain http) instead of failing at request time.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_rejects_https_auth_url_naming_the_gap() {
+    let config = temp_config(
+        "auth-https",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         mode = \"http\"\n\
+         [[listener.web.rules]]\n\
+         path = \"/x\"\n\
+         use_backend = \"api\"\n\
+         [listener.web.rules.auth]\n\
+         url = \"https://auth.example/verify\"\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9000\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "must fail with code 1; stderr: {stderr}"
+    );
+    assert!(stderr.contains("auth.url"), "stderr: {stderr}");
+    assert!(stderr.contains("http:// only"), "stderr: {stderr}");
+}
+
 /// Rule errors through the real binary name the field and show an example
 /// (Q1: actionable errors, never opaque).
 #[cfg_attr(
@@ -974,6 +1200,8 @@ mode = "http"
 name = "rewrite-v1"
 path_prefix = "/v1/"
 use_backend = "api"
+set_headers = [{{ name = "x-beta", value = "on" }}]
+response_headers = [{{ name = "x-marker", value = "v06" }}]
 [listener.web.rules.rewrite]
 path_prefix_rewrite = "/api/"
 
@@ -1063,6 +1291,8 @@ server = "{api}"
         ["GET /api/users HTTP/1.1"],
         "the forwarded request must carry the rewritten path"
     );
+    // The rule's response header actions reach the client (B-N4/B-I4/B-E17).
+    assert!(response.contains("x-marker: v06\r\n"), "{response}");
 
     // `config explain` reproduces the actions offline.
     let explain = |args: &[&str]| {
@@ -1081,6 +1311,10 @@ server = "{api}"
         report.contains(
             "rule[0] \"rewrite-v1\": match -> use_backend \"api\" (rewrite: path_prefix \"/v1/\" -> \"/api/\")"
         ),
+        "{report}"
+    );
+    assert!(
+        report.contains("[headers: set x-beta -> \"on\", response set x-marker -> \"v06\"]"),
         "{report}"
     );
     assert!(
@@ -1220,7 +1454,62 @@ use_backend = "api"
 [listener.web.rules.redirect]
 location = "/y""#,
         "rules[0]",
-        "set exactly one of use_backend, redirect or direct_response",
+        "set exactly one of use_backend, split, redirect or direct_response",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+set_headers = [{ name = "x-beta", value = "on" }]"#,
+        "rules[0].set_headers",
+        "only apply to forwarding rules (use_backend or split)",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+use_backend = "api"
+set_headers = [{ name = "x-beta", value = "$request_uri" }]"#,
+        "rules[0].set_headers[0].value",
+        "unknown placeholder in value",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+use_backend = "api"
+del_headers = ["content-length"]"#,
+        "rules[0].del_headers[0]",
+        "framing header the proxy owns",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+use_backend = "api"
+[listener.web.rules.cors]
+allow_origin = "*"
+allow_credentials = true"#,
+        "rules[0].cors.allow_origin",
+        "cannot be combined with allow_credentials",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+[listener.web.rules.cors]
+allow_origin = "https://app.example""#,
+        "rules[0].cors",
+        "only applies to forwarding rules (use_backend or split)",
+    );
+    reject(
+        r#"[[listener.web.rules]]
+name = "r"
+path = "/x"
+use_backend = "api"
+rate_limit = { rate = 0 }"#,
+        "rules[0].rate_limit.rate",
+        "rate must be at least 1",
     );
 }
 
@@ -1398,6 +1687,36 @@ fn validate_rejects_server_and_servers_together() {
         "stderr: {stderr}"
     );
     assert!(stderr.contains("mutually exclusive"), "stderr: {stderr}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_rejects_invalid_affinity_mode() {
+    let config = temp_config(
+        "affinity-bad",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:9\"\naffinity = { mode = \"sticky\" }\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unknown affinity mode must be rejected; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("backend.api.affinity.mode"),
+        "stderr: {stderr}"
+    );
+    assert!(stderr.contains("mode must be"), "stderr: {stderr}");
 }
 
 #[cfg_attr(
@@ -2144,4 +2463,1200 @@ fn doctor_without_config_checks_the_environment() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("doctor: PASS"), "stdout: {stdout}");
+}
+
+// --- Advanced balancing through the real binary (B-H5/B-N12/B-E6 + B14) ---
+
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+/// Real HTTP origin on a thread: `200` with `marker` as body (keep-alive),
+/// `/healthz` answers `200`/`500` per `healthy` and closes (courtesy:
+/// the checker completes at the message boundary, not at EOF). With
+/// `release` set, every response waits
+/// for the flag — a held exchange keeps the server loaded on purpose.
+fn start_balancer_origin(
+    marker: &'static str,
+    healthy: std::sync::Arc<AtomicBool>,
+    served: std::sync::Arc<AtomicUsize>,
+    release: Option<std::sync::Arc<AtomicBool>>,
+) -> std::net::SocketAddr {
+    use std::sync::atomic::Ordering;
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind balancer origin");
+    let addr = listener.local_addr().expect("addr balancer origin");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let healthy = std::sync::Arc::clone(&healthy);
+            let served = std::sync::Arc::clone(&served);
+            let release = release.clone();
+            std::thread::spawn(move || {
+                loop {
+                    use std::io::Read;
+                    let mut buf = [0u8; 8192];
+                    let mut total = 0usize;
+                    let head_end = loop {
+                        match stream.read(&mut buf[total..]) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                    let close = head.contains("connection: close");
+                    if head.starts_with("get /healthz ") {
+                        let ok = healthy.load(Ordering::SeqCst);
+                        let response = if ok {
+                            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
+                                .to_owned()
+                        } else {
+                            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                                .to_owned()
+                        };
+                        let _ = stream.write_all(response.as_bytes());
+                        return;
+                    }
+                    served.fetch_add(1, Ordering::SeqCst);
+                    if let Some(flag) = &release {
+                        while !flag.load(Ordering::SeqCst) {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n{marker}",
+                        marker.len(),
+                        if close { "close" } else { "keep-alive" }
+                    );
+                    if stream.write_all(response.as_bytes()).is_err() {
+                        return;
+                    }
+                    if close {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// One request through the real binary; the origin marker as body.
+fn marker_body(proxy: &str) -> String {
+    body_of(&proxied(
+        proxy,
+        b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    ))
+    .to_owned()
+}
+
+/// leastconn (B-H5/B-N12/B-E6) through the **real** binary: while one
+/// server holds an exchange open, every new request lands on the other.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_leastconn_sends_new_requests_to_the_idle_server() {
+    use std::sync::atomic::Ordering;
+    let served_a = std::sync::Arc::new(AtomicUsize::new(0));
+    let served_b = std::sync::Arc::new(AtomicUsize::new(0));
+    let healthy = std::sync::Arc::new(AtomicBool::new(true));
+    let release = std::sync::Arc::new(AtomicBool::new(false));
+    let a = start_balancer_origin(
+        "a",
+        std::sync::Arc::clone(&healthy),
+        std::sync::Arc::clone(&served_a),
+        Some(std::sync::Arc::clone(&release)),
+    );
+    let b = start_balancer_origin(
+        "b",
+        std::sync::Arc::clone(&healthy),
+        std::sync::Arc::clone(&served_b),
+        None,
+    );
+    let config = temp_config(
+        "leastconn",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             balance = \"leastconn\"\n\
+             servers = [{{ addr = \"{a}\" }}, {{ addr = \"{b}\" }}]\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (leastconn)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // First request: both servers idle (tie) -> A (config order), held.
+    let held_proxy = proxy_addr.clone();
+    let held = std::thread::spawn(move || marker_body(&held_proxy));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while served_a.load(Ordering::SeqCst) != 1 {
+        assert!(
+            Instant::now() < deadline,
+            "the first request never reached A"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    // Sequential requests: A is loaded (1), B is idle (0) -> all to B.
+    for round in 0..3 {
+        assert_eq!(
+            marker_body(&proxy_addr),
+            "b",
+            "request {} must go to the idle server",
+            round + 1
+        );
+    }
+    assert_eq!(served_a.load(Ordering::SeqCst), 1, "A got no new request");
+    assert_eq!(served_b.load(Ordering::SeqCst), 3);
+
+    // Release A: its exchange completes and the load slot frees up.
+    release.store(true, Ordering::SeqCst);
+    let body = held.join().expect("held exchange thread");
+    assert_eq!(body, "a", "the held exchange was served by A");
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// Slow start (B14, dynamic weighting) through the **real** binary: a
+/// server that returns from DOWN gets almost no traffic at first and
+/// exactly its fair share once the window is over.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_slow_start_ramps_the_recovered_server_up() {
+    use std::sync::atomic::Ordering;
+    let served_a = std::sync::Arc::new(AtomicUsize::new(0));
+    let served_b = std::sync::Arc::new(AtomicUsize::new(0));
+    let healthy_a = std::sync::Arc::new(AtomicBool::new(true));
+    let healthy_b = std::sync::Arc::new(AtomicBool::new(false));
+    let a = start_balancer_origin("a", healthy_a, served_a, None);
+    let b = start_balancer_origin("b", std::sync::Arc::clone(&healthy_b), served_b, None);
+    let config = temp_config(
+        "slowstart",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             balance = \"roundrobin\"\n\
+             slow_start = \"2s\"\n\
+             servers = [{{ addr = \"{a}\" }}, {{ addr = \"{b}\" }}]\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"150ms\"\n\
+             timeout = \"100ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (slow start)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // Phase 1: the health check drops the unhealthy server (fall = 1).
+    // Observable through traffic: 5 consecutive responses from A mean B
+    // is out of rotation (with both up, round-robin alternates).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 5 {
+        assert!(Instant::now() < deadline, "B was never marked DOWN");
+        if marker_body(&proxy_addr) == "a" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+    }
+
+    // Phase 2: recover B and watch the ramp — the recovered server is
+    // nearly invisible next to the fully ramped one.
+    healthy_b.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut early = (0usize, 0usize);
+    for _ in 0..10 {
+        match marker_body(&proxy_addr).as_str() {
+            "a" => early.0 += 1,
+            "b" => early.1 += 1,
+            other => panic!("unexpected origin body {other:?}"),
+        }
+    }
+    assert!(
+        early.1 < 5,
+        "during the ramp the recovered server gets less than its fair share: {early:?}"
+    );
+
+    // Phase 3: the ramp is over — the split is exactly fair.
+    std::thread::sleep(Duration::from_millis(2500));
+    let mut late = (0usize, 0usize);
+    for _ in 0..10 {
+        match marker_body(&proxy_addr).as_str() {
+            "a" => late.0 += 1,
+            "b" => late.1 += 1,
+            other => panic!("unexpected origin body {other:?}"),
+        }
+    }
+    assert_eq!(late, (5, 5), "after the window the split is exactly 1:1");
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// Keep-alive origin on a thread that **never** closes a connection —
+/// the interop hazard for a checker that reads its response to EOF.
+/// `/healthz` answers `200` + `ok` (Content-Length framed); any other
+/// path answers `200` with `marker`. `Connection: close` is ignored.
+fn start_keepalive_origin(marker: &'static str) -> std::net::SocketAddr {
+    use std::io::{Read, Write};
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keep-alive origin");
+    let addr = listener.local_addr().expect("addr keep-alive origin");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 8192];
+                loop {
+                    let mut total = 0usize;
+                    let head_end = loop {
+                        match stream.read(&mut buf[total..]) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                    let response = if head.starts_with("get /healthz ") {
+                        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_owned()
+                    } else {
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{marker}",
+                            marker.len()
+                        )
+                    };
+                    if stream.write_all(response.as_bytes()).is_err() {
+                        return;
+                    }
+                    // Never close: keep serving on the same connection.
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// HTTP health-check interop (B-H6) through the **real** binary: an
+/// origin that never closes its connections must stay in rotation
+/// across check cycles. The check completes at the Content-Length
+/// boundary; a checker waiting for EOF times out every cycle and flaps
+/// the server DOWN (503 after the first cycle).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_http_check_interops_with_keep_alive_origin() {
+    let origin = start_keepalive_origin("k");
+    let config = temp_config(
+        "health-keepalive",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             servers = [{{ addr = \"{origin}\" }}]\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"100ms\"\n\
+             timeout = \"150ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n\
+             expect_rstring = \"ok\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (health keep-alive)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // Journey: many check cycles pass against the keep-alive origin and
+    // it stays in rotation the whole time (no flapping to DOWN).
+    assert_eq!(
+        marker_body(&proxy_addr),
+        "k",
+        "the first request must be proxied"
+    );
+    std::thread::sleep(Duration::from_millis(1000)); // >= 6 check cycles
+    for round in 0..3 {
+        assert_eq!(
+            marker_body(&proxy_addr),
+            "k",
+            "the server must stay UP after check cycle {}",
+            round + 1
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+// --- Non-blocking dynamic DNS through the real binary (B-H13·B-N18·B-E15) ---
+
+/// Value of `key` (e.g. `"failures="`) inside the last `cluster`
+/// (e.g. `"dns["`) of the METRICS output.
+fn metric_value(rest: &str, cluster: &str, key: &str) -> u64 {
+    let Some(at) = rest.rfind(cluster) else {
+        return 0;
+    };
+    rest[at + cluster.len()..]
+        .split([']', ' '])
+        .find(|token| token.starts_with(key))
+        .and_then(|token| token[key.len()..].parse().ok())
+        .unwrap_or(0)
+}
+
+/// Accept loop for one bound listener: `200` + `marker` (keep-alive).
+fn serve_origin_loop(listener: std::net::TcpListener, marker: &'static str) {
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { break };
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let mut buf = [0u8; 8192];
+            loop {
+                let mut total = 0usize;
+                let head_end = loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                    if total == buf.len() {
+                        return;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                let close = head.contains("connection: close");
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: {}\r\n\r\n{marker}",
+                    marker.len(),
+                    if close { "close" } else { "keep-alive" }
+                );
+                if stream.write_all(response.as_bytes()).is_err() {
+                    return;
+                }
+                if close {
+                    return;
+                }
+            }
+        });
+    }
+}
+
+/// Real origin on ONE port bound on both loopback families: the OS
+/// resolver may hand `localhost` as 127.0.0.1 or ::1 (multi-A reality),
+/// and the origin must answer whatever comes.
+fn start_dual_stack_origin(marker: &'static str) -> u16 {
+    let v4 = std::net::TcpListener::bind("127.0.0.1:0").expect("bind v4 origin");
+    let port = v4.local_addr().expect("addr v4 origin").port();
+    let v6_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+    let v6 = std::net::TcpListener::bind(v6_addr).expect("bind v6 origin");
+    std::thread::spawn(move || serve_origin_loop(v4, marker));
+    std::thread::spawn(move || serve_origin_loop(v6, marker));
+    port
+}
+
+/// Startup with broken DNS (CE7) through the **real** binary: the
+/// listener is announced immediately and answers an explicit, counted
+/// 503 — never a silent block. The name is RFC 6761 `.invalid` (the OS
+/// resolver answers NXDOMAIN; the background resolver keeps retrying at
+/// `resolve_interval`). The hung-resolver variant is covered at the
+/// dataplane level in `eqproxy-net/tests/e2e_dns.rs`.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_startup_with_broken_dns_serves_immediately_with_explicit_503() {
+    let config = temp_config(
+        "dns-broken",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         backend = \"api\"\n\
+         mode = \"http\"\n\
+         [backend.api]\n\
+         servers = [{ addr = \"cold-start.invalid:8080\" }]\n\
+         resolve_interval = \"100ms\"\n",
+    );
+
+    let started = Instant::now();
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (broken dns)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    assert!(
+        started.elapsed() < Duration::from_secs(3),
+        "the listener must not wait for DNS (took {:?})",
+        started.elapsed()
+    );
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // Explicit 503, promptly: the request never waits for DNS.
+    let response = proxied(
+        &proxy_addr,
+        b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 503"),
+        "unresolved backend = explicit 503: {response:?}"
+    );
+
+    // Bounded wait for the background resolver to complete several
+    // rounds (the first OS lookup lands a few hundred ms after startup;
+    // measured: ~400 ms on the maintainer's host).
+    std::thread::sleep(Duration::from_millis(1500));
+
+    wait_for_sigint_shutdown(&mut child, &config);
+    let mut rest = String::new();
+    let _ = stderr.read_to_string(&mut rest);
+    assert!(
+        metric_value(&rest, "proxy[", "no_server=") >= 1,
+        "the 503 must be counted in no_available_server: {rest}"
+    );
+    assert!(
+        metric_value(&rest, "dns[", "failures=") >= 1,
+        "the broken resolution rounds must be counted: {rest}"
+    );
+}
+
+/// A `HOSTNAME:PORT` backend through the **real** binary with the OS
+/// resolver (B-H13/B-N18/B-E15): traffic flows to the origin through
+/// the name and the periodic re-resolution runs against real DNS
+/// (counted in METRICS) — no restart anywhere.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_hostname_backend_resolves_with_the_os_resolver() {
+    let port = start_dual_stack_origin("k");
+    let config = temp_config(
+        "dns-name",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             servers = [{{ addr = \"localhost:{port}\" }}]\n\
+             resolve_interval = \"100ms\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (hostname backend)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // The resolved name serves real traffic.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while marker_body(&proxy_addr) != "k" {
+        assert!(
+            Instant::now() < deadline,
+            "traffic never reached the origin through the hostname"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    // Several periodic rounds against the real resolver.
+    std::thread::sleep(Duration::from_millis(400));
+
+    wait_for_sigint_shutdown(&mut child, &config);
+    let mut rest = String::new();
+    let _ = stderr.read_to_string(&mut rest);
+    assert!(
+        metric_value(&rest, "dns[", "ok=") >= 2,
+        "initial + periodic resolutions against real DNS: {rest}"
+    );
+    assert!(
+        metric_value(&rest, "dns[", "updates=") >= 1,
+        "the resolved address must reach the balancer: {rest}"
+    );
+}
+
+/// The config gate through the **real** binary (Q1: actionable errors):
+/// the reference aliases of `leastconn` are accepted, `slow_start` is
+/// bounded, and an unknown algorithm is rejected by name.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_maps_leastconn_aliases_and_bounds_slow_start() {
+    // nginx's `least_conn` name + slow start in range: accepted.
+    let ok = temp_config(
+        "balance-ok",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         balance = \"least_conn\"\n\
+         slow_start = \"30s\"\n\
+         servers = [{ addr = \"127.0.0.1:9000\", weight = 2 }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&ok)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&ok);
+    assert!(
+        output.status.success(),
+        "least_conn alias + slow_start must validate; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Envoy's `least_request` name: accepted too.
+    let ok = temp_config(
+        "balance-alias",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         balance = \"least_request\"\n\
+         servers = [{ addr = \"127.0.0.1:9000\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&ok)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&ok);
+    assert!(
+        output.status.success(),
+        "least_request alias must validate; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // slow_start out of range: named field + bounded example.
+    let bad = temp_config(
+        "balance-slow",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         slow_start = \"2h\"\n\
+         servers = [{ addr = \"127.0.0.1:9000\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&bad)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&bad);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "out-of-range slow_start must fail; stderr: {stderr}"
+    );
+    for expected in ["slow_start", "maximum 1h", "example:"] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in:\n{stderr}"
+        );
+    }
+
+    // Unknown algorithm: rejected by name, never silently defaulted.
+    let bad = temp_config(
+        "balance-unknown",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         balance = \"maglev\"\n\
+         servers = [{ addr = \"127.0.0.1:9000\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&bad)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&bad);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("maglev"),
+        "the error must name the rejected value: {stderr}"
+    );
+}
+
+// --- B-I11 (canary y tráfico ponderado) + C10 (hot maps) ---
+
+/// Identity backend that keeps connections alive (answers every
+/// request on the same connection until the client closes): the
+/// hot-map test holds one client connection open across data swaps.
+fn start_keepalive_identity_backend(body: &'static str) -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind keepalive identity");
+    let addr = listener.local_addr().expect("addr keepalive identity");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = [0u8; 8192];
+                loop {
+                    // Read one full request head, then answer it.
+                    let mut total = 0usize;
+                    loop {
+                        match stream.read(&mut buf[total..]) {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    if stream.write_all(response.as_bytes()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+/// One request on a keep-alive connection: writes the head and reads
+/// exactly one Content-Length-framed response, leaving the connection
+/// open (the hot-map test holds one across data swaps).
+fn keepalive_roundtrip(stream: &mut TcpStream, head: &str) -> String {
+    stream.write_all(head.as_bytes()).expect("write head");
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        let read = stream.read(&mut chunk).expect("read response");
+        assert!(read > 0, "the keep-alive connection closed unexpectedly");
+        buf.extend_from_slice(&chunk[..read]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head_text = String::from_utf8_lossy(&buf[..pos]).to_ascii_lowercase();
+            let len: usize = head_text
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .map(|value| value.trim().parse().expect("content-length"))
+                .unwrap_or(0);
+            if buf.len() >= pos + 4 + len {
+                return String::from_utf8_lossy(&buf).into_owned();
+            }
+        }
+    }
+}
+
+/// Canary y tráfico ponderado through the **real** binary (B-I11): a
+/// `split` rule fans requests out across backends by weight (exact
+/// shares in rotation), `canary-by-header` and `canary-by-cookie`
+/// overrides route 100 % to the canary, and `config explain` shows both
+/// offline (H4).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_canary_split_routes_by_weight_with_header_and_cookie_overrides() {
+    let stable = start_identity_backend("stable");
+    let canary = start_identity_backend("canary");
+    let config = temp_config(
+        "canary",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"stable\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"by-header\"\n\
+             path_prefix = \"/h\"\n\
+             headers = [{{ name = \"x-canary\", exact = \"always\" }}]\n\
+             use_backend = \"canary\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"by-cookie\"\n\
+             path_prefix = \"/c\"\n\
+             cookies = [{{ name = \"canary\", exact = \"always\" }}]\n\
+             use_backend = \"canary\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"split\"\n\
+             path_prefix = \"/s\"\n\
+             split = [\
+               {{ backend = \"stable\", weight = 3 }},\
+               {{ backend = \"canary\", weight = 1 }},\
+             ]\n\
+             \n\
+             [backend.stable]\n\
+             server = \"{stable}\"\n\
+             [backend.canary]\n\
+             server = \"{canary}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (canary)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    // Weighted split: 8 requests over a 3:1 split = 6 stable + 2 canary.
+    let mut counts = std::collections::BTreeMap::new();
+    for _ in 0..8 {
+        let response = proxied(
+            proxy_addr.as_str(),
+            b"GET /s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        );
+        assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+        *counts
+            .entry(body_of(&response).to_owned())
+            .or_insert(0usize) += 1;
+    }
+    assert_eq!(
+        counts.get("stable"),
+        Some(&6),
+        "3:1 over 8 requests: {counts:?}"
+    );
+    assert_eq!(counts.get("canary"), Some(&2), "3:1 over 8: {counts:?}");
+
+    // Canary-by-header: 100 % to the canary when the header matches.
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /h HTTP/1.1\r\nHost: x\r\nx-canary: always\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "canary", "{response}");
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /h HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "stable", "{response}");
+
+    // Canary-by-cookie: same, via the Cookie header (RFC 6265 pairs).
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /c HTTP/1.1\r\nHost: x\r\nCookie: sid=1; canary=always\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "canary", "{response}");
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"GET /c HTTP/1.1\r\nHost: x\r\nCookie: canary=never\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "stable", "{response}");
+
+    // `config explain` shows the split and the cookie gate offline (H4).
+    let explain = |args: &[&str]| {
+        let out = bin()
+            .args(["config", "explain", "--config"])
+            .arg(&config)
+            .args(args)
+            .output()
+            .expect("run eqproxy config explain");
+        assert!(out.status.success(), "explain exits 0: {:?}", out);
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let report = explain(&["--path", "/s"]);
+    assert!(
+        report.contains("split [stable w=3, canary w=1] (smooth weighted round-robin per request)"),
+        "{report}"
+    );
+    let report = explain(&["--path", "/c"]);
+    assert!(
+        report.contains("no match (cookie \"canary\": not present)"),
+        "{report}"
+    );
+    let report = explain(&["--path", "/c", "--header", "cookie=canary=always"]);
+    assert!(
+        report.contains("match -> use_backend \"canary\""),
+        "{report}"
+    );
+
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success(), "kill -INT must be accepted");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+}
+
+/// Hot data maps through the **real** binary (C10 / PP-02): a 100 000
+/// entry map updates under traffic **without a config reload** and
+/// without losing any other state — the modified entries change, the
+/// untouched ones keep working and a held keep-alive connection
+/// survives the swap. A malformed update is rejected once (counted) and
+/// the last good data keeps serving.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_hot_maps_swap_under_traffic_without_config_reload() {
+    fn map_file(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("eqproxy-cli-e2e-{}-{name}", std::process::id()))
+    }
+    fn write_entries(path: &Path, lines: &[String]) {
+        // Atomic replace (write + rename): the watcher never sees a
+        // torn file (documented operational rule for map updates).
+        let staging = path.with_extension("staging");
+        std::fs::write(&staging, lines.join("\n") + "\n").expect("write map file");
+        std::fs::rename(&staging, path).expect("replace map file");
+    }
+
+    let mapfile = map_file("tiers.map");
+    let initial: Vec<String> = (0..100_000).map(|i| format!("user-{i} vip")).collect();
+    write_entries(&mapfile, &initial);
+
+    let vip = start_keepalive_identity_backend("vip");
+    let free = start_keepalive_identity_backend("free");
+    let config = temp_config(
+        "hotmaps",
+        &format!(
+            "schema_version = 1\n\
+             [maps.tiers]\n\
+             file = \"{}\"\n\
+             reload_interval = \"250ms\"\n\
+             \n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"free\"\n\
+             \n\
+             [[listener.web.rules]]\n\
+             name = \"vip\"\n\
+             map = {{ name = \"tiers\", header = \"x-user\", equals = \"vip\" }}\n\
+             use_backend = \"vip\"\n\
+             \n\
+             [backend.free]\n\
+             server = \"{free}\"\n\
+             [backend.vip]\n\
+             server = \"{vip}\"\n",
+            mapfile.display()
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (hot maps)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    let as_user = |user: &str| {
+        format!("GET / HTTP/1.1\r\nHost: x\r\nx-user: {user}\r\nConnection: close\r\n\r\n")
+    };
+    // Baseline: the mapped user is vip, the unknown one is not.
+    let response = proxied(proxy_addr.as_str(), as_user("user-99999").as_bytes());
+    assert_eq!(body_of(&response), "vip", "{response}");
+    let response = proxied(proxy_addr.as_str(), as_user("nobody").as_bytes());
+    assert_eq!(body_of(&response), "free", "{response}");
+
+    // One keep-alive connection held across the whole update (PP-02:
+    // live state survives the data swap).
+    let mut held = TcpStream::connect(proxy_addr.as_str()).expect("connect keepalive");
+    let response = keepalive_roundtrip(
+        &mut held,
+        "GET / HTTP/1.1\r\nHost: x\r\nx-user: user-99999\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "vip", "{response}");
+
+    // Hot update: one entry downgraded, one added, 99 999 untouched.
+    let mut updated: Vec<String> = (0..100_000)
+        .map(|i| {
+            if i == 50_000 {
+                "user-50000 downgraded".to_owned()
+            } else {
+                format!("user-{i} vip")
+            }
+        })
+        .collect();
+    updated.push("newcomer vip".to_owned());
+    write_entries(&mapfile, &updated);
+
+    // The swap lands within a reload window (poll, never a fixed sleep).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = proxied(proxy_addr.as_str(), as_user("newcomer").as_bytes());
+        if body_of(&response) == "vip" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the map reload did not land in time"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    // The modified entry changed…
+    let response = proxied(proxy_addr.as_str(), as_user("user-50000").as_bytes());
+    assert_eq!(body_of(&response), "free", "{response}");
+    // …and the untouched entries kept working (before/after identical
+    // except the modified entries: the PP-02 success criterion).
+    let response = proxied(proxy_addr.as_str(), as_user("user-99999").as_bytes());
+    assert_eq!(body_of(&response), "vip", "{response}");
+    // The held connection survived the swap and still routes.
+    let response = keepalive_roundtrip(
+        &mut held,
+        "GET / HTTP/1.1\r\nHost: x\r\nx-user: user-77777\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "vip", "{response}");
+
+    // A malformed update (duplicate key) is rejected once and counted;
+    // the last good data keeps serving.
+    write_entries(&mapfile, &["dup 1".to_owned(), "dup 2".to_owned()]);
+    std::thread::sleep(Duration::from_secs(1));
+    let response = proxied(proxy_addr.as_str(), as_user("user-99999").as_bytes());
+    assert_eq!(
+        body_of(&response),
+        "vip",
+        "a bad update must keep the last good data"
+    );
+
+    // Close the held connection so the drain is immediate, then stop.
+    drop(held);
+    let pid = child.id();
+    let kill = Command::new("kill")
+        .args(["-INT", &pid.to_string()])
+        .status()
+        .expect("run kill");
+    assert!(kill.success(), "kill -INT must be accepted");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    // The process has exited: drain the log lines it left in the pipe.
+    let mut log = String::new();
+    loop {
+        line.clear();
+        if stderr.read_line(&mut line).expect("read stderr") == 0 {
+            break;
+        }
+        log.push_str(&line);
+    }
+    remove_temp(&config);
+    let _ = std::fs::remove_file(&mapfile);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+
+    // The final METRICS line is the observable of PP-02: data updated
+    // in hot (`map_reloads`) with **zero** config reloads (no state was
+    // rebuilt) and exactly one rejected bad update (counted once).
+    assert!(
+        log.contains("map \"tiers\" reloaded: 100001 entries"),
+        "the hot reload must be logged: {log}"
+    );
+    assert!(
+        log.contains("maps[reloads=1 failures=1]"),
+        "one good swap and one rejected bad update: {log}"
+    );
+    assert!(
+        log.contains("cfg[reloads=0"),
+        "no config reload may happen (PP-02: no state rebuilt): {log}"
+    );
+}
+
+/// The config gate rejects misconfigured splits and maps with field,
+/// cause and example — and a missing map file fails at load with the
+/// map name (never at request time).
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_rejects_misconfigured_splits_maps_and_missing_files() {
+    let reject = |body: &str, want_field: &str, want_why: &str| {
+        let config = temp_config("split-map-bad", &format!("schema_version = 1\n{body}"));
+        let out = bin()
+            .args(["config", "validate", "--config"])
+            .arg(&config)
+            .output()
+            .expect("run eqproxy config validate");
+        remove_temp(&config);
+        assert!(!out.status.success(), "must be rejected: {body}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains(want_field), "must name {want_field}: {err}");
+        assert!(err.contains(want_why), "must say why ({want_why}): {err}");
+    };
+
+    // A split naming a ghost backend.
+    reject(
+        "[listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"http\"\n\
+         backend = \"stable\"\n\
+         [[listener.web.rules]]\n\
+         name = \"s\"\n\
+         path_prefix = \"/\"\n\
+         split = [{ backend = \"stable\", weight = 1 }, { backend = \"ghost\", weight = 1 }]\n\
+         [backend.stable]\n\
+         server = \"127.0.0.1:9\"\n",
+        "rules[0].split[1].backend",
+        "does not exist",
+    );
+    // A map with both sources (exactly one is required).
+    reject(
+        "[maps.t]\n\
+         file = \"t.map\"\n\
+         entries = { a = \"1\" }\n",
+        "maps.t",
+        "set exactly one of file or entries",
+    );
+    // A map with an unreadable file fails at load (not at request time).
+    reject(
+        "[maps.t]\n\
+         file = \"/nonexistent/eqproxy-missing.map\"\n",
+        "maps.t.file",
+        "cannot be read",
+    );
 }

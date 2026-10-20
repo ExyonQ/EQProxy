@@ -139,7 +139,8 @@ fn example_for(field_path: &str, cause: &str) -> String {
         | "idle_timeout"
         | "shutdown_grace"
         | "client_header_timeout"
-        | "server_header_timeout" => {
+        | "server_header_timeout"
+        | "max_stream_duration" => {
             format!("{last} = \"5s\" (valid suffixes: ms, s, m, h)")
         }
         "maxconn" => "maxconn = 1024".to_owned(),

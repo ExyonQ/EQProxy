@@ -3,7 +3,7 @@ resolver = "2"
 members = ["eqproxy-core", "eqproxy-config", "eqproxy-net", "eqproxy-cli"]
 
 [workspace.package]
-version = "0.6.0-alpha"
+version = "0.6.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["The EQProxy Authors"]
@@ -24,6 +24,8 @@ serde_path_to_error = "0.1"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 rlimit = "0.10"
+md5 = { package = "md-5", version = "0.10" }
+base64 = "0.22"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

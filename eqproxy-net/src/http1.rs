@@ -9,13 +9,14 @@
 //! - `Transfer-Encoding` other than exact `chunked` → 400 (T01).
 //! - obs-fold, spaces in names, bare CR/LF, control characters → 400 (T02).
 //! - Per-message limits: header count, header and line size → 431 (T03).
-//! - `CONNECT` and `Upgrade` (A7/A8, Phase 4) → explicit 501, never faked.
+//! - `CONNECT` and `Upgrade` (A7/A8): the handshake is forwarded and on
+//!   backend acceptance (101 / 2xx) the exchange becomes a raw
+//!   bidirectional tunnel; an unsolicited `101` is refused with 502.
 //! - `Expect` other than `100-continue` → 417; `Expect: 100-continue`
 //!   releases the client with a real interim `100` (RFC 9112 §10.1.2).
 //! - Interim (1xx) responses are never final: they are forwarded (RFC 9112
 //!   §6.2) and the loop keeps reading until the final response, so a stale
-//!   message is never left queued on a pooled connection. `101` → 502
-//!   (upgrade tunneling unsupported).
+//!   message is never left queued on a pooled connection.
 //!
 //! Connection semantics: one backend connection per exchange, reused
 //! through the bounded pool when the exchange was clean (A16); client
@@ -38,8 +39,8 @@ use tokio::io::{
 use eqproxy_core::Metrics;
 
 use crate::proxy::{
-    ForwardedMode, OutboundError, READ_BUF, ResolvedListener, ResolvedRewrite, RetryContext,
-    RouteDecision, checkout_or_connect,
+    AffinityMode, ForwardedMode, OutboundError, READ_BUF, ResolvedCors, ResolvedHeaders,
+    ResolvedListener, ResolvedRewrite, RetryContext, RouteDecision, checkout_or_connect,
 };
 
 /// Maximum message-head size (final line included) (T03).
@@ -99,6 +100,9 @@ pub struct RequestHead {
     /// The client asked for a `100 Continue` before the body (HTTP/1.1
     /// only; ignored in HTTP/1.0 per RFC 9112 §10.1.2).
     pub expect_continue: bool,
+    /// The client asked for a protocol upgrade (`Upgrade` +
+    /// `Connection: upgrade`, A7); a backend `101` opens the tunnel.
+    pub wants_upgrade: bool,
     /// Host header value as received (may carry `:port`; empty when
     /// absent). Kept for routing rules (B-H3).
     pub host: String,
@@ -323,18 +327,14 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
             reason: "invalid method",
         });
     }
-    if method == b"CONNECT" {
-        // A8 (Phase 4): never faked; explicit rejection.
-        return Err(Reject {
-            status: 501,
-            reason: "connect is not implemented (planned for phase 4)",
-        });
-    }
+    // CONNECT (A8) uses authority-form ("host:port"): the tunnel's
+    // routing host. Everything else is origin-form (absolute-form is
+    // rejected: this proxy is an origin, not a client).
+    let is_connect = method == b"CONNECT";
     if target.is_empty()
         || target.iter().any(|b| *b <= 0x20 || *b == 0x7f)
-        || (!target.starts_with(b"/") && target != b"*")
+        || (!is_connect && !target.starts_with(b"/") && target != b"*")
     {
-        // Rejects absolute-form ("http://…"): this proxy is an origin, not a client.
         return Err(Reject {
             status: 400,
             reason: "invalid request target",
@@ -369,13 +369,6 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
     }
 
     let (framing, wants_close, wants_upgrade) = request_framing(&headers, version)?;
-    if wants_upgrade {
-        // A7 (Phase 4): never faked; explicit rejection.
-        return Err(Reject {
-            status: 501,
-            reason: "upgrade is not implemented (planned for phase 4)",
-        });
-    }
 
     // `Expect` (RFC 9112 §10.1.2): only `100-continue` is understood and
     // only in HTTP/1.1 (HTTP/1.0 ignores it). Any other expectation is
@@ -399,6 +392,13 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         .iter()
         .find(|(name, _)| name == "host")
         .map_or_else(String::new, |(_, value)| value.clone());
+    // CONNECT (A8): with no Host header the authority-form target is the
+    // routing host of the tunnel.
+    let host = if is_connect && host.is_empty() {
+        String::from_utf8_lossy(target).into_owned()
+    } else {
+        host
+    };
     Ok(RequestHead {
         method: String::from_utf8_lossy(method).into_owned(),
         target: String::from_utf8_lossy(target).into_owned(),
@@ -406,6 +406,7 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         framing,
         wants_close,
         expect_continue,
+        wants_upgrade,
         host,
         headers,
     })
@@ -723,14 +724,14 @@ impl<R: AsyncRead + Unpin> AsyncRead for Prefixed<R> {
 }
 
 /// Reads a full head: returns (head without terminator, extra bytes read).
-enum HeadError {
+pub(crate) enum HeadError {
     Eof,
     Timeout,
     TooLarge,
     Io,
 }
 
-async fn read_head<R: AsyncRead + Unpin>(
+pub(crate) async fn read_head<R: AsyncRead + Unpin>(
     reader: &mut R,
     timeout: Duration,
 ) -> Result<(Vec<u8>, Vec<u8>), HeadError> {
@@ -776,6 +777,7 @@ fn phrase(status: u16) -> &'static str {
         201 => "created",
         202 => "accepted",
         204 => "no content",
+        401 => "unauthorized",
         301 => "moved permanently",
         302 => "found",
         303 => "see other",
@@ -827,25 +829,45 @@ async fn write_no_server<W: AsyncWrite + Unpin>(
     write_error(writer, status, reason).await;
 }
 
+/// Caps one exchange phase at `deadline` (B-H11/B-E12
+/// `max_stream_duration`; Q5: duration ≠ inactivity). `None` = no cap;
+/// `Err(())` = the cap fired and the exchange must end.
+async fn until_deadline<T>(
+    deadline: Option<tokio::time::Instant>,
+    phase: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, phase)
+            .await
+            .map_err(|_| ()),
+        None => Ok(phase.await),
+    }
+}
+
 /// Locally-served rule response (v0.6 slice 2: `redirect` and
 /// `direct_response`). Keep-alive only when the exchange stayed aligned
 /// (the request body was drained); otherwise `connection: close`.
 async fn write_rule_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
     status: u16,
-    reason: &str,
     location: Option<&str>,
     content_type: Option<&str>,
     body: &str,
+    extra_headers: &[String],
     close: bool,
 ) {
     let mut response = format!(
-        "HTTP/1.1 {status} {reason}\r\nconnection: {}\r\n",
+        "HTTP/1.1 {status} {}\r\nconnection: {}\r\n",
+        phrase(status),
         if close { "close" } else { "keep-alive" }
     );
     if let Some(location) = location {
         response.push_str("location: ");
         response.push_str(location);
+        response.push_str("\r\n");
+    }
+    for line in extra_headers {
+        response.push_str(line);
         response.push_str("\r\n");
     }
     response.push_str("content-type: ");
@@ -860,6 +882,34 @@ async fn write_rule_response<W: AsyncWrite + Unpin>(
         writer.write_all(response.as_bytes()),
     )
     .await;
+}
+
+/// Auth rejection or auth-service error (B-N9/B-I9): the deny response
+/// replaces the request and the connection closes (the request body was
+/// never read, so the stream cannot stay aligned).
+async fn write_deny<W: AsyncWrite + Unpin>(writer: &mut W, deny: &crate::auth::DenyResponse) {
+    let mut response = format!(
+        "HTTP/1.1 {} {}\r\nconnection: close\r\n",
+        deny.status,
+        phrase(deny.status)
+    );
+    for (name, value) in &deny.headers {
+        response.push_str(name);
+        response.push_str(": ");
+        response.push_str(value);
+        response.push_str("\r\n");
+    }
+    response.push_str(&format!(
+        "content-length: {}\r\n\r\n{}",
+        deny.body.len(),
+        deny.body
+    ));
+    let _ = tokio::time::timeout(
+        Duration::from_secs(5),
+        writer.write_all(response.as_bytes()),
+    )
+    .await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), writer.shutdown()).await;
 }
 
 /// Reads and discards a request body so a locally-served exchange keeps
@@ -1002,13 +1052,29 @@ pub fn method_is_idempotent(method: &str) -> bool {
     )
 }
 
-/// Applies `X-Forwarded-For`/`X-Real-IP` per listener policy (B-N4) to the
-/// forwarded copy of the head — the client's bytes are never mutated.
+/// Joins head lines with CRLF (no trailing terminator: the caller
+/// writes [`HEAD_END`] separately).
+fn join_head_lines(lines: &[Vec<u8>], capacity: usize) -> Vec<u8> {
+    let mut joined = Vec::with_capacity(capacity);
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            joined.extend_from_slice(CRLF);
+        }
+        joined.extend_from_slice(line);
+    }
+    joined
+}
+
+/// Applies `X-Forwarded-For`/`X-Real-IP`/`X-Forwarded-Proto` per
+/// listener policy (B-N4) to the forwarded copy of the head — the
+/// client's bytes are never mutated.
 ///
 /// - `Append`: `X-Forwarded-For` grows with the client address (header
 ///   created when absent); `X-Real-IP` only when absent.
 /// - `Replace`: both headers reflect the real client address only.
-fn apply_forwarded(head: &[u8], peer: SocketAddr, mode: ForwardedMode) -> Vec<u8> {
+/// - Both: `X-Forwarded-Proto` is the client-facing scheme (a
+///   single-value header: the client's is replaced, never chained).
+fn apply_forwarded(head: &[u8], peer: SocketAddr, mode: ForwardedMode, scheme: &str) -> Vec<u8> {
     if matches!(mode, ForwardedMode::Off) {
         return head.to_vec();
     }
@@ -1049,6 +1115,7 @@ fn apply_forwarded(head: &[u8], peer: SocketAddr, mode: ForwardedMode) -> Vec<u8
                 ForwardedMode::Off => {}
             },
             b"x-real-ip" if matches!(mode, ForwardedMode::Replace) => {} // dropped
+            b"x-forwarded-proto" => {}                                   // dropped; rewritten below
             _ => out.push(line.to_vec()),
         }
     }
@@ -1058,15 +1125,178 @@ fn apply_forwarded(head: &[u8], peer: SocketAddr, mode: ForwardedMode) -> Vec<u8
     if matches!(mode, ForwardedMode::Replace) {
         out.push(format!("x-real-ip: {client_ip}").into_bytes());
     }
+    out.push(format!("x-forwarded-proto: {scheme}").into_bytes());
+    join_head_lines(&out, head.len() + 64)
+}
 
-    let mut joined = Vec::with_capacity(head.len() + 64);
-    for (i, line) in out.iter().enumerate() {
-        if i > 0 {
-            joined.extend_from_slice(CRLF);
-        }
-        joined.extend_from_slice(line);
+/// Renders a rule's header action values for one request (B-E17).
+/// The CORS response headers of a policy (B-I10). `preflight` adds the
+/// allow-methods/allow-headers/max-age trio the preflight needs.
+fn cors_response_lines(cors: &ResolvedCors, preflight: bool) -> Vec<String> {
+    let mut lines = vec![format!(
+        "access-control-allow-origin: {}",
+        cors.allow_origin
+    )];
+    if cors.allow_credentials {
+        lines.push("access-control-allow-credentials: true".to_owned());
     }
-    joined
+    if preflight {
+        lines.push(format!(
+            "access-control-allow-methods: {}",
+            cors.allow_methods
+        ));
+        if let Some(headers) = &cors.allow_headers {
+            lines.push(format!("access-control-allow-headers: {headers}"));
+        }
+        if !cors.max_age.is_zero() {
+            lines.push(format!(
+                "access-control-max-age: {}",
+                cors.max_age.as_secs()
+            ));
+        }
+    } else if let Some(expose) = &cors.expose_headers {
+        lines.push(format!("access-control-expose-headers: {expose}"));
+    }
+    lines.push("vary: origin".to_owned());
+    lines
+}
+
+/// A CORS preflight (B-I10): `OPTIONS` carrying both `Origin` and
+/// `Access-Control-Request-Method`.
+fn is_cors_preflight(request: &RequestHead) -> bool {
+    request.method == "OPTIONS"
+        && request.headers.iter().any(|(name, _)| name == "origin")
+        && request
+            .headers
+            .iter()
+            .any(|(name, _)| name == "access-control-request-method")
+}
+
+/// Pumps both directions of an upgrade tunnel (A7/A8) until either side
+/// closes or goes idle. The connection is consumed by the tunnel.
+async fn run_tunnel<CR, CW, BR, BW>(
+    from_client: &mut Prefixed<CR>,
+    client_write: &mut CW,
+    from_backend: &mut Prefixed<BR>,
+    backend_write: &mut BW,
+    idle: Duration,
+) where
+    CR: tokio::io::AsyncRead + Unpin,
+    CW: tokio::io::AsyncWrite + Unpin,
+    BR: tokio::io::AsyncRead + Unpin,
+    BW: tokio::io::AsyncWrite + Unpin,
+{
+    let _ = tokio::join!(
+        tunnel_pump(from_client, backend_write, idle),
+        tunnel_pump(from_backend, client_write, idle),
+    );
+}
+
+/// One direction of an upgrade tunnel (A7/A8): raw bytes until EOF, an
+/// error, or inactivity — `idle_timeout` is the tunnel's inactivity cap.
+async fn tunnel_pump<R, W>(from: &mut R, to: &mut W, idle: Duration)
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut buf = vec![0u8; READ_BUF];
+    loop {
+        let n = match tokio::time::timeout(idle, from.read(&mut buf)).await {
+            Ok(Ok(n)) if n > 0 => n,
+            _ => break,
+        };
+        match tokio::time::timeout(idle, to.write_all(&buf[..n])).await {
+            Ok(Ok(())) => {}
+            _ => break,
+        }
+    }
+    let _ = to.shutdown().await;
+}
+
+/// The value of cookie `name` in the request's `Cookie` headers (B-H8).
+fn cookie_value(headers: &[(String, String)], name: &str) -> Option<String> {
+    headers
+        .iter()
+        .filter(|(header, _)| header == "cookie")
+        .flat_map(|(_, value)| value.split(';'))
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(key, _)| key.trim() == name)
+        .map(|(_, value)| value.trim().to_owned())
+}
+
+fn render_header_lines(
+    ops: &[(String, String)],
+    peer: SocketAddr,
+    host: &str,
+    scheme: &str,
+) -> Vec<String> {
+    let remote_addr = peer.ip().to_string();
+    ops.iter()
+        .filter_map(|(name, value)| {
+            eqproxy_core::rules::render_header_value(value, &remote_addr, host, scheme)
+                .ok()
+                .map(|value| format!("{name}: {value}"))
+        })
+        .collect()
+}
+
+/// Applies a matched rule's request header actions (B-N4/B-I4/B-E17) to
+/// the forwarded copy of the head: `del` drops every line with the name,
+/// `set` drops the client's and appends the new value, `add` keeps the
+/// client's and appends another line. Runs before the forwarded-headers
+/// policy, which a rule can never override.
+fn apply_header_actions(
+    head: &[u8],
+    actions: &ResolvedHeaders,
+    peer: SocketAddr,
+    host: &str,
+    scheme: &str,
+) -> Vec<u8> {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut rest = head;
+    while let Some(pos) = rest.windows(2).position(|w| w == b"\r\n") {
+        lines.push(&rest[..pos]);
+        rest = &rest[pos + 2..];
+    }
+    lines.push(rest);
+
+    let mut out: Vec<Vec<u8>> =
+        Vec::with_capacity(lines.len() + actions.set.len() + actions.add.len());
+    for line in lines {
+        let name_end = line.iter().position(|&b| b == b':').unwrap_or(line.len());
+        let name = &line[..name_end];
+        let replaced = actions
+            .del
+            .iter()
+            .chain(actions.set.iter().map(|(name, _)| name))
+            .any(|candidate| candidate.as_bytes().eq_ignore_ascii_case(name));
+        if !replaced {
+            out.push(line.to_vec());
+        }
+    }
+    for line in render_header_lines(&actions.set, peer, host, scheme)
+        .into_iter()
+        .chain(render_header_lines(&actions.add, peer, host, scheme))
+    {
+        out.push(line.into_bytes());
+    }
+    join_head_lines(&out, head.len() + 64)
+}
+
+/// Appends the rendered `response` header actions to the response head
+/// the client sees (B-N4/B-I4/B-E17).
+fn append_response_headers(head: &[u8], lines: &[String]) -> Vec<u8> {
+    let mut split: Vec<Vec<u8>> = Vec::new();
+    let mut rest = head;
+    while let Some(pos) = rest.windows(2).position(|w| w == b"\r\n") {
+        split.push(rest[..pos].to_vec());
+        rest = &rest[pos + 2..];
+    }
+    split.push(rest.to_vec());
+    for line in lines {
+        split.push(line.as_bytes().to_vec());
+    }
+    join_head_lines(&split, head.len() + lines.len() * 32)
 }
 
 /// Serves a full HTTP/1.1 client connection (keep-alive included).
@@ -1148,19 +1378,77 @@ pub async fn serve_http<CR, CW>(
         let facts = eqproxy_core::rules::RequestFacts {
             method: &request.method,
             host: &request.host,
-            path: eqproxy_core::rules::path_of(&request.target),
+            // CONNECT (A8) routes on host only: there is no path in an
+            // authority-form target.
+            path: if request.method == "CONNECT" {
+                "/"
+            } else {
+                eqproxy_core::rules::path_of(&request.target)
+            },
             headers: &request.headers,
             peer: peer.ip(),
+            maps: cfg.maps.as_ref(),
         };
         let decision = cfg.decide(&facts);
+        // Rate limit (B-N8/B-I7/B-E16): a token bucket per client IP and
+        // rule, in-memory (no network in the hot path, Q6). Over the
+        // limit the request is rejected explicitly (429 + counter) and
+        // the connection closes — never silently dropped or queued.
+        if let Some(limiter) = decision.rate_limiter()
+            && !limiter.try_acquire(peer.ip())
+        {
+            metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+            write_error(&mut client_write, 429, "too many requests").await;
+            return;
+        }
+        // Authentication (B-N9/B-I9): Basic first (local), then the
+        // external auth subrequest — before any action runs, preflight
+        // included (nginx parity). Fail closed: an auth service that
+        // cannot decide rejects the request explicitly (502/500), never
+        // forwards it.
+        if let Some(auth) = decision.auth() {
+            match crate::auth::check(
+                auth,
+                &request,
+                cfg.connect_timeout,
+                cfg.server_header_timeout,
+            )
+            .await
+            {
+                crate::auth::AuthOutcome::Allow => {}
+                crate::auth::AuthOutcome::Deny(deny) => {
+                    metrics.auth_denied.fetch_add(1, Ordering::Relaxed);
+                    write_deny(&mut client_write, &deny).await;
+                    return;
+                }
+                crate::auth::AuthOutcome::Error(deny) => {
+                    metrics.auth_service_errors.fetch_add(1, Ordering::Relaxed);
+                    write_deny(&mut client_write, &deny).await;
+                    return;
+                }
+            }
+        }
         let mut from_client = Prefixed {
             prefix: carry,
             pos: 0,
             inner: &mut client_read,
         };
-        let (backend, rewrite) = match decision {
-            RouteDecision::Proxy { backend, rewrite } => (backend, rewrite),
-            RouteDecision::Redirect { status, location } => {
+        let scheme: &str = if cfg.server_tls.is_some() {
+            "https"
+        } else {
+            "http"
+        };
+        let (backend, rewrite, rule_headers) = match decision {
+            RouteDecision::Proxy {
+                backend,
+                rewrite,
+                headers,
+            } => (backend, rewrite, headers),
+            RouteDecision::Redirect {
+                status,
+                location,
+                headers,
+            } => {
                 // Templates are validated at the config gate; a failure
                 // here means a corrupted config (fail closed).
                 let location =
@@ -1182,13 +1470,21 @@ pub async fn serve_http<CR, CW>(
                     )
                     .await;
                 let close = !aligned || request.wants_close;
+                let mut extra_headers = headers
+                    .map(|actions| {
+                        render_header_lines(&actions.response, peer, &request.host, scheme)
+                    })
+                    .unwrap_or_default();
+                if let Some(cors) = headers.and_then(|actions| actions.cors.as_ref()) {
+                    extra_headers.extend(cors_response_lines(cors, false));
+                }
                 write_rule_response(
                     &mut client_write,
                     status,
-                    phrase(status),
                     Some(&location),
                     None,
                     "",
+                    &extra_headers,
                     close,
                 )
                 .await;
@@ -1204,6 +1500,7 @@ pub async fn serve_http<CR, CW>(
                 status,
                 content_type,
                 body,
+                headers,
             } => {
                 metrics
                     .direct_responses_served
@@ -1218,13 +1515,21 @@ pub async fn serve_http<CR, CW>(
                     )
                     .await;
                 let close = !aligned || request.wants_close;
+                let mut extra_headers = headers
+                    .map(|actions| {
+                        render_header_lines(&actions.response, peer, &request.host, scheme)
+                    })
+                    .unwrap_or_default();
+                if let Some(cors) = headers.and_then(|actions| actions.cors.as_ref()) {
+                    extra_headers.extend(cors_response_lines(cors, false));
+                }
                 write_rule_response(
                     &mut client_write,
                     status,
-                    phrase(status),
                     None,
                     Some(content_type),
                     body,
+                    &extra_headers,
                     close,
                 )
                 .await;
@@ -1238,6 +1543,53 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
+        // CORS preflight (B-I10): a matched rule with a CORS policy
+        // answers OPTIONS locally — the backend never sees the preflight.
+        if is_cors_preflight(&request)
+            && let Some(cors) = rule_headers.and_then(|actions| actions.cors.as_ref())
+        {
+            let aligned = !request.expect_continue
+                && !matches!(request.framing, BodyFraming::UntilEof)
+                && drain_body(
+                    &mut from_client,
+                    &request.framing,
+                    cfg.idle_timeout,
+                    &metrics,
+                )
+                .await;
+            let close = !aligned || request.wants_close;
+            let mut extra_headers = cors_response_lines(cors, true);
+            extra_headers.extend(
+                rule_headers
+                    .map(|actions| {
+                        render_header_lines(&actions.response, peer, &request.host, scheme)
+                    })
+                    .unwrap_or_default(),
+            );
+            write_rule_response(
+                &mut client_write,
+                204,
+                None,
+                None,
+                "",
+                &extra_headers,
+                close,
+            )
+            .await;
+            if close {
+                let _ = tokio::time::timeout(Duration::from_secs(5), client_write.shutdown()).await;
+                return;
+            }
+            client_carry = from_client.prefix.split_off(from_client.pos);
+            continue;
+        }
+
+        // B-H11/B-E12 (`max_stream_duration`, Q5): one total cap for the
+        // forwarded exchange — request body, response head and response
+        // body — on top of the per-phase timeouts. `ZERO` disables it.
+        let stream_deadline = (cfg.max_stream_duration > Duration::ZERO)
+            .then(|| tokio::time::Instant::now() + cfg.max_stream_duration);
+
         // --- Backend: reuse from the pool (A16) or dial again ---
         // Retry safety (B-H7): only idempotent requests are replayed
         // unless the backend opts in explicitly.
@@ -1246,8 +1598,27 @@ pub async fn serve_http<CR, CW>(
         } else {
             RetryContext::non_idempotent()
         };
-        let conn = match checkout_or_connect(cfg, backend, peer, local, &metrics, ctx).await {
-            Ok(conn) => conn,
+        // Affinity (B-H8/B-N13/B-I8): pin from the request's sticky
+        // cookie (cookie mode); source mode hashes the IP in the balancer.
+        let affinity_cookie = backend.affinity.as_ref().and_then(|affinity| {
+            (affinity.mode == AffinityMode::Cookie)
+                .then(|| cookie_value(&request.headers, &affinity.cookie))
+                .flatten()
+        });
+        // `_active` (B-H5 leastconn) holds the in-flight slot from the
+        // pick to the end of this exchange (released on drop).
+        let (conn, _active) = match checkout_or_connect(
+            cfg,
+            backend,
+            peer,
+            local,
+            &metrics,
+            ctx,
+            affinity_cookie.as_deref(),
+        )
+        .await
+        {
+            Ok(picked) => picked,
             Err(OutboundError::NoServer) => {
                 // All servers down/drained (B11): explicit 503 (C9 custom).
                 write_no_server(&mut client_write, cfg, &metrics, 503, "service unavailable").await;
@@ -1263,13 +1634,20 @@ pub async fn serve_http<CR, CW>(
                 return;
             }
         };
+        let served_addr = conn.addr;
         let mut backend_read = conn.read;
         let mut backend_write = conn.write;
 
         // --- Head + request body forwarding ---
         // Forwarded headers (B-N4) and rule rewrites (v0.6 slice 2):
         // applied to the forwarded copy only, never to the client's bytes.
-        let forwarded_head = apply_forwarded(&head_bytes, peer, cfg.forwarded_headers);
+        // Rule header actions (B-N4/B-I4/B-E17) run first; the
+        // forwarded-headers policy is applied last, so `replace` cannot
+        // be undone by a rule.
+        let acted = rule_headers
+            .map(|actions| apply_header_actions(&head_bytes, actions, peer, &request.host, scheme));
+        let base: &[u8] = acted.as_deref().unwrap_or(&head_bytes);
+        let forwarded_head = apply_forwarded(base, peer, cfg.forwarded_headers, scheme);
         let forwarded_head = match rewrite {
             Some(rewrite) => apply_rewrite(&forwarded_head, rewrite, &request.target),
             None => forwarded_head,
@@ -1301,30 +1679,42 @@ pub async fn serve_http<CR, CW>(
             return;
         }
 
-        let request_body = match request.framing {
-            BodyFraming::None => Ok(()),
-            BodyFraming::ContentLength(len) => {
-                copy_exact(
-                    &mut from_client,
-                    &mut backend_write,
-                    len,
-                    cfg.idle_timeout,
-                    &metrics.bytes_client_to_backend,
-                    &metrics.idle_timeouts,
-                )
-                .await
+        let request_body = match until_deadline(stream_deadline, async {
+            match request.framing {
+                BodyFraming::None => Ok(()),
+                BodyFraming::ContentLength(len) => {
+                    copy_exact(
+                        &mut from_client,
+                        &mut backend_write,
+                        len,
+                        cfg.idle_timeout,
+                        &metrics.bytes_client_to_backend,
+                        &metrics.idle_timeouts,
+                    )
+                    .await
+                }
+                BodyFraming::Chunked => {
+                    copy_chunked(
+                        &mut from_client,
+                        &mut backend_write,
+                        cfg.idle_timeout,
+                        &metrics.bytes_client_to_backend,
+                        &metrics.idle_timeouts,
+                    )
+                    .await
+                }
+                BodyFraming::UntilEof => Ok(()),
             }
-            BodyFraming::Chunked => {
-                copy_chunked(
-                    &mut from_client,
-                    &mut backend_write,
-                    cfg.idle_timeout,
-                    &metrics.bytes_client_to_backend,
-                    &metrics.idle_timeouts,
-                )
-                .await
+        })
+        .await
+        {
+            Ok(body) => body,
+            // max_stream_duration fired mid-request: the forwarded
+            // exchange is over (504 + close, never a silent hang).
+            Err(()) => {
+                write_error(&mut client_write, 504, "gateway timeout").await;
+                return;
             }
-            BodyFraming::UntilEof => Ok(()),
         };
         match request_body {
             Ok(()) => {}
@@ -1363,7 +1753,14 @@ pub async fn serve_http<CR, CW>(
                 pos: 0,
                 inner: &mut backend_read,
             };
-            let (head_bytes, rest) = match read_head(&mut source, cfg.server_header_timeout).await {
+            let (head_bytes, rest) = match until_deadline(
+                stream_deadline,
+                read_head(&mut source, cfg.server_header_timeout),
+            )
+            .await
+            .map_err(|_| HeadError::Timeout)
+            .and_then(|result| result)
+            {
                 Ok(pair) => pair,
                 Err(HeadError::Timeout) => {
                     metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
@@ -1392,11 +1789,14 @@ pub async fn serve_http<CR, CW>(
                     return;
                 }
             };
-            if response.status >= 200 {
+            // A7: a `101` answering the client's upgrade request is final
+            // for us — the tunnel opens after the loop. A CONNECT `2xx`
+            // breaks out the same way (A8).
+            if response.status >= 200 || (response.status == 101 && request.wants_upgrade) {
                 break (head_bytes, response);
             }
-            // Interim: `101` would open an upgrade tunnel (unsupported,
-            // A7/A8): explicit 502, never half-forwarded.
+            // Interim: an unsolicited `101` (the client never asked for a
+            // switch) is refused explicitly (A7): never half-forwarded.
             if response.status == 101 {
                 eprintln!(
                     "WARN [{}] backend {} offered a protocol switch (101); refused (peer {peer})",
@@ -1430,13 +1830,77 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
+        // A7/A8 upgrade tunnel: the client asked (Upgrade or CONNECT) and
+        // the backend accepted (101 / 2xx). The switch head is forwarded
+        // verbatim (no proxy additions on a protocol switch) and the
+        // exchange becomes a raw bidirectional tunnel until either side
+        // closes or goes idle (`idle_timeout` is the inactivity cap). The
+        // connection is consumed: it never returns to the pool.
+        if (response.status == 101 && request.wants_upgrade)
+            || (request.method == "CONNECT" && (200..300).contains(&response.status))
+        {
+            if write_with_timeout(&mut client_write, &response_head_bytes, cfg.idle_timeout)
+                .await
+                .is_err()
+                || write_with_timeout(&mut client_write, HEAD_END, cfg.idle_timeout)
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            let mut from_backend = Prefixed {
+                prefix: carry,
+                pos: 0,
+                inner: &mut backend_read,
+            };
+            run_tunnel(
+                &mut from_client,
+                &mut client_write,
+                &mut from_backend,
+                &mut backend_write,
+                cfg.idle_timeout,
+            )
+            .await;
+            return;
+        }
+
+        // Response header actions (B-N4/B-I4/B-E17) on the proxied
+        // response the client sees.
+        let mut response_lines = rule_headers
+            .map(|actions| render_header_lines(&actions.response, peer, &request.host, scheme))
+            .unwrap_or_default();
+        // Sticky cookie (B-H8): re-issued only when the request had none
+        // or it did not pin to the server that served.
+        if let Some(affinity) = backend.affinity.as_ref()
+            && affinity.mode == AffinityMode::Cookie
+            && let Some(token) = backend
+                .balancer
+                // Stable slot index (B-H13): a re-resolution must not
+                // change the cookie's meaning.
+                .slot_of(served_addr)
+                .map(|idx| idx.to_string())
+            && Some(&token) != affinity_cookie.as_ref()
+        {
+            response_lines.push(format!(
+                "set-cookie: {}={token}; Path=/; HttpOnly",
+                affinity.cookie
+            ));
+        }
+        if let Some(cors) = rule_headers.and_then(|actions| actions.cors.as_ref()) {
+            response_lines.extend(cors_response_lines(cors, false));
+        }
+        let response_head_bytes = if response_lines.is_empty() {
+            response_head_bytes
+        } else {
+            append_response_headers(&response_head_bytes, &response_lines)
+        };
         let mut from_backend = Prefixed {
             prefix: carry,
             pos: 0,
             inner: &mut backend_read,
         };
         let mut head_forwarded = false;
-        let response_body = async {
+        let response_body = until_deadline(stream_deadline, async {
             write_with_timeout(&mut client_write, &response_head_bytes, cfg.idle_timeout).await?;
             write_with_timeout(&mut client_write, HEAD_END, cfg.idle_timeout).await?;
             head_forwarded = true;
@@ -1474,8 +1938,19 @@ pub async fn serve_http<CR, CW>(
                     .await
                 }
             }
-        }
+        })
         .await;
+        let response_body = match response_body {
+            Ok(body) => body,
+            // max_stream_duration fired mid-response: the stream is cut
+            // (504 before the head; a truncated stream after it).
+            Err(()) => {
+                if !head_forwarded {
+                    write_error(&mut client_write, 504, "gateway timeout").await;
+                }
+                return;
+            }
+        };
         match response_body {
             Ok(()) => {}
             // Before the response head a clean 502/500 still fits.
@@ -1599,9 +2074,9 @@ mod tests {
             ("GET / HTTP/1.1\r\nFo o: x\r\nHost: y\r\n", 400),
             ("GET http://evil/ HTTP/1.1\r\nHost: x\r\n", 400),
             ("GET / HTTP/2.0\r\nHost: x\r\n", 505),
-            ("CONNECT host:443 HTTP/1.1\r\nHost: x\r\n", 501),
-            ("GET / HTTP/1.1\r\nHost: x\r\nUpgrade: h2c\r\n", 501),
-            ("GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade\r\n", 501),
+            // A7/A8 (v0.6): CONNECT and Upgrade are valid requests now —
+            // routed and tunneled on backend acceptance (see
+            // `framing_fuzz_corpus` and the e2e tunnel tests).
             ("GET /x HTTP/1.1\r\n", 400),
         ];
         for (head, expected) in corpus {

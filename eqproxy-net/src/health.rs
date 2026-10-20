@@ -9,10 +9,16 @@
 //! (`HealthCheck::passive`).
 //!
 //! HTTP semantics (documented, no surprises): the check sends
-//! `METHOD path HTTP/1.1` with `Host`, reads the response up to
-//! [`MAX_CHECK_RESPONSE_BYTES`] and matches the status against
-//! `expect_status` and the **raw** body against `expect_rstring`
-//! (chunked bodies are matched as received; `HEAD` bodies are empty).
+//! `METHOD path HTTP/1.1` with `Host`, reads **one** response message
+//! (head + body, up to [`MAX_CHECK_RESPONSE_BYTES`]) and matches the
+//! status against `expect_status` and the **raw** body against
+//! `expect_rstring` (chunked bodies are matched as received; `HEAD`
+//! bodies are empty). The read ends at the HTTP message boundary (RFC
+//! 9112 §6: `Content-Length`, chunked framing, or no body for
+//! `HEAD`/1xx/204/304) — never at the origin's discretion: a keep-alive
+//! origin may hold the socket open forever, and waiting for its EOF
+//! would time the check out and flap a healthy server to `down`. Only
+//! close-delimited bodies (no framing header) are read to EOF.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -116,7 +122,7 @@ pub async fn run(balancer: Arc<Balancer>, check: HealthCheck, mut shutdown: Shut
         }
 
         let mut attempts = JoinSet::new();
-        for &addr in balancer.servers() {
+        for addr in balancer.resolved_servers() {
             let balancer = Arc::clone(&balancer);
             let check = check.clone();
             attempts.spawn(async move { check_one(balancer, addr, check).await });
@@ -169,22 +175,147 @@ async fn http_exchange(addr: SocketAddr, http: &HttpCheck) -> bool {
         return false;
     }
 
-    // Read the response (head + body) up to the budget.
+    // Read exactly one response message. The head first (a check never
+    // matches a partial head), then the body per its framing — the check
+    // must complete at the message boundary (RFC 9112 §6) and never wait
+    // for the origin to close the socket.
     let mut raw: Vec<u8> = Vec::with_capacity(2048);
     let mut chunk = [0_u8; 2048];
-    loop {
-        match stream.read(&mut chunk).await {
-            Ok(0) => break,
-            Ok(n) => {
-                raw.extend_from_slice(&chunk[..n]);
-                if raw.len() >= MAX_CHECK_RESPONSE_BYTES {
-                    break;
+    let head_end = loop {
+        if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        if !read_more(&mut raw, &mut stream, &mut chunk).await {
+            return false; // EOF or budget before a complete head
+        }
+    };
+    let Some(framing) = body_framing(http.method, &raw[..head_end]) else {
+        return false; // malformed status line or headers
+    };
+    match framing {
+        // HEAD and 1xx/204/304 carry no body (RFC 9112 §6.3-6.4),
+        // whatever `Content-Length` announces.
+        BodyFraming::NoBody => {}
+        BodyFraming::ContentLength(want) => {
+            // Truncate at the budget: matching sees at most the first
+            // MAX_CHECK_RESPONSE_BYTES of the response (as before).
+            let end = head_end + want.min(MAX_CHECK_RESPONSE_BYTES.saturating_sub(raw.len()));
+            while raw.len() < end && read_more(&mut raw, &mut stream, &mut chunk).await {}
+        }
+        BodyFraming::Chunked => {
+            let mut pos = head_end;
+            loop {
+                // Chunk-size line: `hex[;ext] CRLF`.
+                let line_end = loop {
+                    if let Some(i) = raw[pos..].windows(2).position(|w| w == b"\r\n") {
+                        break Some(pos + i);
+                    }
+                    if !read_more(&mut raw, &mut stream, &mut chunk).await {
+                        break None;
+                    }
+                };
+                let Some(line_end) = line_end else {
+                    break; // EOF or budget mid-framing: match truncated
+                };
+                let size = String::from_utf8_lossy(&raw[pos..line_end]);
+                let Ok(size) =
+                    usize::from_str_radix(size.split(';').next().unwrap_or("").trim(), 16)
+                else {
+                    break; // malformed chunked framing: match truncated
+                };
+                pos = line_end + 2;
+                if size == 0 {
+                    break; // terminal chunk: the body ends here
+                }
+                // Chunk data + its trailing CRLF.
+                pos = pos.saturating_add(size).saturating_add(2);
+                while raw.len() < pos && read_more(&mut raw, &mut stream, &mut chunk).await {}
+                if raw.len() < pos {
+                    break; // EOF or budget mid-chunk: match truncated
                 }
             }
-            Err(_) => return false,
         }
+        // Close-delimited body (no framing header): EOF is the only
+        // boundary the protocol offers.
+        BodyFraming::UntilEof => while read_more(&mut raw, &mut stream, &mut chunk).await {},
     }
     matches_response(http, &raw)
+}
+
+/// How the response body is delimited (RFC 9112 §6).
+enum BodyFraming {
+    /// `HEAD` or 1xx/204/304: no body regardless of the headers.
+    NoBody,
+    /// `Content-Length: n` — exactly `n` bytes.
+    ContentLength(usize),
+    /// `Transfer-Encoding: chunked` — through the terminal chunk.
+    Chunked,
+    /// No framing header: close-delimited (read to EOF).
+    UntilEof,
+}
+
+/// Body framing of a response head; `None` = malformed status/headers.
+fn body_framing(method: HttpCheckMethod, head: &[u8]) -> Option<BodyFraming> {
+    let head = String::from_utf8_lossy(head);
+    let status = head
+        .split("\r\n")
+        .next()?
+        .split_whitespace()
+        .nth(1)?
+        .parse::<u16>()
+        .ok()?;
+    if matches!(method, HttpCheckMethod::Head)
+        || (100..200).contains(&status)
+        || status == 204
+        || status == 304
+    {
+        return Some(BodyFraming::NoBody);
+    }
+    let mut content_length = None;
+    let mut chunked = false;
+    for line in head.split("\r\n").skip(1) {
+        if line.is_empty() {
+            break;
+        }
+        let (name, value) = line.split_once(':')?;
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        match name.as_str() {
+            "content-length" => content_length = Some(value.parse::<usize>().ok()?),
+            // Transfer-Encoding wins over Content-Length (RFC 9112 §6.1).
+            "transfer-encoding" => {
+                chunked |= value
+                    .to_ascii_lowercase()
+                    .split(',')
+                    .any(|token| token.trim() == "chunked");
+            }
+            _ => {}
+        }
+    }
+    Some(if chunked {
+        BodyFraming::Chunked
+    } else if let Some(n) = content_length {
+        BodyFraming::ContentLength(n)
+    } else {
+        BodyFraming::UntilEof
+    })
+}
+
+/// Reads one more socket chunk into `raw`, bounded by
+/// [`MAX_CHECK_RESPONSE_BYTES`]. `false` = EOF, socket error or budget
+/// exhausted (the response is then matched truncated).
+async fn read_more(raw: &mut Vec<u8>, stream: &mut TcpStream, chunk: &mut [u8]) -> bool {
+    if raw.len() >= MAX_CHECK_RESPONSE_BYTES {
+        return false;
+    }
+    match stream.read(chunk).await {
+        Ok(0) | Err(_) => false,
+        Ok(n) => {
+            let n = n.min(MAX_CHECK_RESPONSE_BYTES - raw.len());
+            raw.extend_from_slice(&chunk[..n]);
+            true
+        }
+    }
 }
 
 /// Matches a raw HTTP response against the expectations (pure).
@@ -319,7 +450,10 @@ mod tests {
         });
 
         let balancer = Arc::new(Balancer::new(
-            vec![crate::balancer::ResolvedServer { addr, weight: 1 }],
+            vec![crate::balancer::ResolvedServer {
+                addr: addr.into(),
+                weight: 1,
+            }],
             1,
             1,
         ));
@@ -352,5 +486,171 @@ mod tests {
             .await
             .expect("the check task must finish on the signal")
             .expect("join");
+    }
+
+    /// Origin that answers `response` to any request head. With
+    /// `keep_alive` it **never** closes the socket (the interop hazard:
+    /// a checker that reads to EOF hangs until its timeout).
+    async fn origin_with(response: &'static [u8], keep_alive: bool) -> SocketAddr {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let mut total = 0usize;
+                    loop {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    }
+                    if socket.write_all(response).await.is_err() {
+                        return;
+                    }
+                    if keep_alive {
+                        // Hold the socket open forever: no shutdown, no
+                        // EOF for anyone reading.
+                        std::future::pending::<()>().await;
+                    }
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        addr
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn content_length_closes_against_a_keep_alive_origin() {
+        let addr = origin_with(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", true).await;
+        let check = http_check("200-299", Some("^ok$"));
+        let done = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_ok(addr, &check, Duration::from_secs(30)),
+        )
+        .await
+        .expect(
+            "the check must complete at the Content-Length boundary, \
+             never wait for a keep-alive origin to close",
+        );
+        assert!(done, "a 200 + \"ok\" keep-alive origin must be UP");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn chunked_framing_closes_against_a_keep_alive_origin() {
+        let addr = origin_with(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+            true,
+        )
+        .await;
+        let check = http_check("200-299", Some("ok"));
+        let done = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_ok(addr, &check, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the check must complete at the terminal chunk");
+        assert!(done, "a chunked keep-alive origin must be UP");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn head_check_never_waits_for_the_declared_body() {
+        // HEAD carries no body (RFC 9112 §6.3) even though the head
+        // announces one — a keep-alive origin sends nothing more.
+        let addr = origin_with(b"HTTP/1.1 200 OK\r\nContent-Length: 42\r\n\r\n", true).await;
+        let mut check = http_check("200-299", None);
+        check.method = HttpCheckMethod::Head;
+        let done = tokio::time::timeout(
+            Duration::from_secs(1),
+            http_ok(addr, &check, Duration::from_secs(30)),
+        )
+        .await
+        .expect("HEAD has no body: the check must complete at the head");
+        assert!(done, "a 200 to HEAD must be UP");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_delimited_body_is_still_read_to_eof() {
+        // No framing header: EOF remains the message boundary (HTTP/1.0
+        // style origins).
+        let addr = origin_with(b"HTTP/1.1 200 OK\r\n\r\nok", false).await;
+        let check = http_check("200-299", Some("^ok$"));
+        assert!(
+            http_ok(addr, &check, Duration::from_secs(2)).await,
+            "a close-delimited origin must still be checked"
+        );
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+    )]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn oversized_body_is_matched_truncated_at_the_budget() {
+        // Content-Length far beyond the 64 KiB budget: the read stops at
+        // the budget (the origin keeps the body coming forever) and
+        // matching sees the truncated body.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0_u8; 1024];
+                    let mut total = 0usize;
+                    loop {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let _ = socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 200000\r\n\r\nok")
+                        .await;
+                    let filler = [b'x'; 4096];
+                    loop {
+                        if socket.write_all(&filler).await.is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        let check = http_check("200-299", Some("^ok"));
+        let done = tokio::time::timeout(
+            Duration::from_secs(2),
+            http_ok(addr, &check, Duration::from_secs(30)),
+        )
+        .await
+        .expect("the budget must bound the read even when the body is longer");
+        assert!(done, "the truncated body still matches ^ok");
     }
 }

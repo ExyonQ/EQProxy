@@ -1,0 +1,127 @@
+# EQProxy migration matrix — source config: Envoy (static bootstrap, no xDS)
+#
+# The same demo deployment as docs/migration/haproxy.cfg, written as a static
+# Envoy bootstrap: virtual hosts per domain, ordered routes (first match wins),
+# one prefix_rewrite, one redirect, one direct response and canary routes on
+# cookie/header. `strip_any_host_port` declares the port-free host comparison.
+# Translation: docs/migration/eqproxy.toml.
+admin:
+  access_log_path: /dev/null
+  address:
+    socket_address: { address: 127.0.0.1, port_value: 9901 }
+static_resources:
+  listeners:
+    - name: edge
+      address:
+        socket_address: { address: 0.0.0.0, port_value: 8080 }
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: migration
+                strip_any_host_port: true
+                use_remote_address: true
+                http_filters:
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                route_config:
+                  name: migration
+                  virtual_hosts:
+                    - name: shop
+                      domains: ["shop.example.com"]
+                      routes:
+                        - match: { path: "/healthz" }
+                          direct_response: { status: 200, body: { inline_string: "ok" } }
+                        - match: { path: "/old/blog" }
+                          redirect: { path_redirect: "/blog" }
+                        - match:
+                            prefix: "/admin"
+                            headers: [{ name: ":method", exact_match: "POST" }]
+                          route: { cluster: admin }
+                        - match: { prefix: "/admin" }
+                          route: { cluster: web }
+                        - match: { prefix: "/reports/" }
+                          route: { cluster: api }
+                        - match:
+                            prefix: "/"
+                            headers:
+                              - name: "cookie"
+                                safe_regex_match:
+                                  google_re2: {}
+                                  regex: ".*canary=on.*"
+                          route: { cluster: canary }
+                        - match:
+                            prefix: "/"
+                            headers: [{ name: "x-canary", exact_match: "on" }]
+                          route: { cluster: canary }
+                        - match: { prefix: "/" }
+                          route: { cluster: web }
+                    - name: api
+                      domains: ["api.example.com"]
+                      routes:
+                        - match: { prefix: "/api/v1/" }
+                          route: { cluster: api, prefix_rewrite: "/api/" }
+                        - match: { safe_regex: { google_re2: {}, regex: "/api/.*\\.json$" } }
+                          route: { cluster: api }
+                        - match: { prefix: "/api/" }
+                          route: { cluster: api }
+                        - match: { prefix: "/" }
+                          route: { cluster: fallback }
+                    - name: default
+                      domains: ["*"]
+                      routes:
+                        - match: { prefix: "/" }
+                          route: { cluster: fallback }
+  clusters:
+    - name: web
+      connect_timeout: 5s
+      type: STATIC
+      load_assignment:
+        cluster_name: web
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 172.24.0.11, port_value: 80 }
+    - name: api
+      connect_timeout: 5s
+      type: STATIC
+      load_assignment:
+        cluster_name: api
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 172.24.0.12, port_value: 80 }
+    - name: admin
+      connect_timeout: 5s
+      type: STATIC
+      load_assignment:
+        cluster_name: admin
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 172.24.0.13, port_value: 80 }
+    - name: canary
+      connect_timeout: 5s
+      type: STATIC
+      load_assignment:
+        cluster_name: canary
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 172.24.0.14, port_value: 80 }
+    - name: fallback
+      connect_timeout: 5s
+      type: STATIC
+      load_assignment:
+        cluster_name: fallback
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address: { address: 172.24.0.15, port_value: 80 }

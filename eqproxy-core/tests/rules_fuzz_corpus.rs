@@ -328,6 +328,7 @@ impl OwnedFacts {
             path: &self.path,
             headers: &self.headers,
             peer: self.peer,
+            maps: eqproxy_core::MapRegistry::empty(),
         }
     }
 }

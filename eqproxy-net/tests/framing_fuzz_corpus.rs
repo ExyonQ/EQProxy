@@ -41,8 +41,6 @@ fn request_seeds() -> Vec<Vec<u8>> {
         b"get /a HTTP/1.1\r\nHost: x\r\n".to_vec(),
         b"GET http://x/a HTTP/1.1\r\nHost: x\r\n".to_vec(),
         b"GET /a HTTP/2.0\r\nHost: x\r\n".to_vec(),
-        b"CONNECT x:443 HTTP/1.1\r\nHost: x\r\n".to_vec(),
-        b"GET /a HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n".to_vec(),
         b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: 03\r\n".to_vec(),
         b"POST /a HTTP/1.1\r\nHost: x\r\nContent-Length: -5\r\n".to_vec(),
         b"".to_vec(),
@@ -245,8 +243,6 @@ fn known_attack_seeds_are_rejected_with_documented_status() {
             400,
         ),
         (b"GET /a HTTP/1.1\r\nHost: x\r\n Bad: fold\r\n", 400),
-        (b"CONNECT x:443 HTTP/1.1\r\nHost: x\r\n", 501),
-        (b"GET /a HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n", 501),
         (b"GET /a HTTP/2.0\r\nHost: x\r\n", 505),
         (b"GET http://x/a HTTP/1.1\r\nHost: x\r\n", 400),
     ];
@@ -254,6 +250,16 @@ fn known_attack_seeds_are_rejected_with_documented_status() {
         let err = parse_request_head(input).expect_err("attack seed must be rejected");
         assert_eq!(err.status, *status, "wrong status for {input:?}");
     }
+    // A7/A8 (v0.6): CONNECT and Upgrade parse and route — the tunnel
+    // opens only on backend acceptance, never at parse time.
+    let connect = parse_request_head(b"CONNECT x:443 HTTP/1.1\r\nHost: x\r\n")
+        .expect("connect parses and routes (A8)");
+    assert_eq!(connect.method, "CONNECT");
+    assert_eq!(connect.host, "x");
+    let upgrade = parse_request_head(b"GET /a HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n")
+        .expect("upgrade parses and routes (A7)");
+    assert!(upgrade.wants_upgrade);
+
     // Header-count boundary: exactly MAX_HEADERS parses, MAX_HEADERS+1 is 431.
     let mut at_limit = b"GET /a HTTP/1.1\r\nHost: x\r\n".to_vec();
     for i in 0..MAX_HEADERS - 1 {
