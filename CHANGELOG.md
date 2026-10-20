@@ -5,6 +5,15 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [v0.6.2] — 2026-10-20
+
+Patch release with two goals: the image is now scanned **and** exercised on
+both architectures before a release tag exists, and the two RustSec advisories
+published after v0.6.1 (`webpki-roots` 1.0.9, `rustls-webpki` 0.103.15) are
+fixed. No configuration key, wire behaviour or rule semantics changed.
+
 ### Changed
 
 - **Docker Scout now gates both image architectures, before any release

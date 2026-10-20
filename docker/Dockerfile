@@ -2,7 +2,7 @@
 #
 # Usage:
 #   docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
-#     --tag ghcr.io/exyonq/eqproxy:0.6.1 --tag ghcr.io/exyonq/eqproxy:latest \
+#     --tag ghcr.io/exyonq/eqproxy:0.6.2 --tag ghcr.io/exyonq/eqproxy:latest \
 #     --provenance=mode=max --sbom=true --push .
 #
 # The binary runs with `docker run ghcr.io/exyonq/eqproxy --help`.
@@ -10,7 +10,7 @@
 #   docker buildx build --file docker/Dockerfile --target export \
 #     --platform linux/amd64 --output type=local,dest=docker-out-amd64 .
 #
-# Runtime base is `scratch` (v0.6.1): the release binary is linked against
+# Runtime base is `scratch` (v0.6.2): the release binary is linked against
 # musl and is fully static, so the published image carries **no** OS
 # packages — no shell, no package manager, no perl/openssl/util-linux from a
 # Debian base. Docker Scout scanned the previous Debian-bookworm-slim image

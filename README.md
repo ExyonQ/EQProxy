@@ -6,7 +6,8 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: v0.6.1 «rules, routing and traffic» (2026-10-20).** A real TCP
+> **Status: v0.6.2 (2026-10-20) — patch over v0.6.1 «rules, routing and
+> traffic».** A real TCP
 > and HTTP/1.1 proxy (crates `eqproxy-core/config/net/cli`) with **typed
 > routing rules per listener** — host/path/method/header/cookie/map/IP
 > conditions, first match wins — and four rule actions: `use_backend`,
@@ -34,7 +35,7 @@ diagnostics, configuration, administration, extensibility and security.
 > checks** (four real source configs and their `eqproxy.toml` translation
 > routing identically; evidence in
 > [docs/evidence/v06-migration/](docs/evidence/v06-migration/)). No HTTP/2
-> yet. Release v0.6.1 (binaries for darwin/linux amd64+arm64 and multi-arch
+> yet. Release v0.6.2 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100
 > backends, 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms),
@@ -62,10 +63,10 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.6.1
+## Install from release v0.6.2
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.1).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.2).
 
 Every release carries **four prebuilt binaries**: `eqproxy-darwin-arm64`,
 `eqproxy-darwin-amd64`, `eqproxy-linux-arm64` and `eqproxy-linux-amd64`. The
@@ -80,8 +81,8 @@ architectures (`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`).
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64   (static, musl)
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.1/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.1/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.2/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.2/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # Linux: sha256sum -c --ignore-missing SHA256SUMS.txt
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 --version
@@ -102,9 +103,9 @@ EOF
 Docker (linux/amd64 + linux/arm64), same digests on both registries:
 
 ```bash
-docker pull exyonq/eqproxy:0.6.1           # Docker Hub (docs + examples on the repo page)
-docker pull ghcr.io/exyonq/eqproxy:0.6.1   # GitHub Container Registry
-docker run --rm exyonq/eqproxy:0.6.1 --version
+docker pull exyonq/eqproxy:0.6.2           # Docker Hub (docs + examples on the repo page)
+docker pull ghcr.io/exyonq/eqproxy:0.6.2   # GitHub Container Registry
+docker run --rm exyonq/eqproxy:0.6.2 --version
 ```
 
 ## Documentation
