@@ -134,6 +134,30 @@ both attestation manifests (`vnd.docker.reference.type: attestation-manifest`),
 so provenance and SBOM survive promotion. That is the property step 6 depends
 on.
 
+## 3b. Audit trail of this increment
+
+`veyra audit . --profile standard` ran twice, and the first verdict was not a
+pass:
+
+| Run | Verdict | Exit | Evidence |
+|---|---|---|---|
+| before the dependency bump | **REJECTED** — `audit:RUSTSEC-2026-0381`, `audit:RUSTSEC-2026-0382`, `deny:vulnerability` | 1 | `.veyra/evidence/20261020T203004Z/` |
+| after `cargo update -p webpki-roots -p rustls-webpki` | **ACCEPTED** (all profile tools executed, no blocking finding) | 0 | `.veyra/evidence/20261020T203924Z/` |
+
+RUSTSEC-2026-0381 (`webpki-roots` 1.0.9, distrusted emSign intermediates) and
+RUSTSEC-2026-0382 (`rustls-webpki` 0.103.15, verification may accept distrusted
+intermediates) were published on 2026-10-19/20, after the v0.6.1 audit. The
+fix is the advisory's own remediation (`>=1.0.10`, `>=0.103.16`), not a
+suppression; no test, lint or check was changed. `cargo fmt --check`,
+`clippy --workspace --all-targets -- -D warnings` and `cargo test --workspace`
+pass unchanged (**327 passed, 0 failed**). `cargo-geiger` stays INCONCLUSIVE
+(4 coverage warnings) and dylint/semver-checks stay skipped, as before —
+reported, not counted as passes.
+
+**The published v0.6.1 artifacts predate those advisories and still bundle the
+old roots.** Shipping the fix needs a new tag (`v0.6.2`); this increment does
+not create one.
+
 ## 4. What is NOT verified here
 
 - **The modified workflow has not run on GitHub Actions yet** — that happens on

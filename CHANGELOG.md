@@ -23,6 +23,19 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   post-promotion step re-reads every published tag's digest and fails if it
   differs from the scanned one.
 
+### Security
+
+- `webpki-roots` 1.0.9 → 1.0.10 and `rustls-webpki` 0.103.15 → 0.103.16.
+  RUSTSEC-2026-0381 (2026-10-19, "Bundled root certificates allow trust in
+  distrusted emSign intermediates") and RUSTSEC-2026-0382 (2026-10-20,
+  "Certificate verification may accept distrusted intermediates") were
+  published after the v0.6.1 audit and turned the next `veyra audit` into
+  REJECTED. The bump is the advisory's own fix, not a suppression: no test or
+  check changed, `cargo fmt`/`clippy -D warnings`/`cargo test --workspace`
+  (327 passed, 0 failed) still pass. **The published v0.6.1 binaries and image
+  were built before the advisories and keep the old roots** — the fix ships
+  with the next tag.
+
 ### Documentation
 
 - README and the Docker Hub page now state what the artifacts already were:
