@@ -5,7 +5,26 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
-Nothing yet.
+### Documentation
+
+- **Erratum:** the v0.6.1 parity report labelled one column "glibc", but that
+  column ran the release asset — which is a static musl build — inside Debian.
+  Both sides were the same binary, so the report measured the image base and
+  the user, not libc. The erratum is at the top of
+  `docs/evidence/v0.6.1-parity/README.md`; its "no measurable cost" result
+  stands for packaging only.
+- TLS parity measured with **genuinely built glibc binaries** on both
+  architectures (`docs/evidence/v0.6.2-tls-parity/`). Findings: ECDSA P-256
+  termination works and is at parity on arm64 (−2.4 %, p 0.28) but the musl
+  build is **20 % behind on amd64** under load (p 0.001) and **11 % behind with
+  no TLS at all** (p 0.0001), so the gap is libc-general, not handshake cost;
+  **TLS 1.2 sessions resume and TLS 1.3 ones do not** (no ticketer is
+  configured, so no ticket is ever sent); and HTTP/2 does not exist, while
+  `alpn = ["h2"]` is accepted by the config gate and negotiates a protocol the
+  proxy cannot serve (curl exit 52, zero accepted connections).
+- The published Linux binaries are musl only, so the glibc build that carries
+  the tier-1 performance claims is not the artifact users download. Shipping
+  glibc variants is an open decision, not a claim.
 
 ## [v0.6.2] — 2026-10-20
 

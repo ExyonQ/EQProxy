@@ -1,9 +1,24 @@
-# Parity report — glibc release binary vs musl container (v0.6.1)
+# Parity report — release asset in Debian vs the published container (v0.6.1)
+
+> **Erratum (2026-10-21): the column labelled "glibc" never measured glibc.**
+> The Linux release assets are built by `docker/Dockerfile` from
+> `rust:1.97-alpine`, i.e. the **musl** target, and the v0.6.2 assets were
+> confirmed as such (`file`: `static-pie linked`; `readelf`: 0 `NEEDED`, 0
+> `PT_INTERP`; they run from `FROM scratch`; `strings` shows musl symbols and
+> no glibc version banner). So both columns ran **the same musl binary**: what
+> differed was the image base (`debian:bookworm-slim` vs `scratch`) and the
+> user (root vs `65532:65532`). Read every "glibc" label below as "the
+> release asset wrapped in Debian", and the conclusion as **packaging has no
+> measurable cost**, which is what the numbers actually support. A genuine
+> glibc-vs-musl measurement (both binaries built for this purpose, same base
+> image) is in [`../v0.6.2-tls-parity/`](../v0.6.2-tls-parity/README.md).
 
 Language: **English**. Same scenario, same host, same backend, same load
-generator; the only variable is the runtime pair (glibc + Debian vs static
-musl + `scratch`). Measured over **both architectures and both transports**:
-`linux/arm64`/`linux/amd64` × HTTP/TLS, 16 measured reps per artifact per cell.
+generator; the variables are the image base (Debian vs `scratch`), the user
+(root vs unprivileged) and the packaging of the same static musl binary —
+**not** the libc, see the erratum above. Measured over **both architectures
+and both transports**: `linux/arm64`/`linux/amd64` × HTTP/TLS, 16 measured
+reps per artifact per cell.
 
 ## Why this exists
 
@@ -15,7 +30,7 @@ keeps performance claims on glibc x86_64. This report closes the question:
 
 ## Artifacts under test
 
-| | glibc | musl |
+| | "glibc" column (actually musl in Debian) | musl container |
 |---|---|---|
 | What ran | the release asset (`eqproxy-linux-arm64` sha256 `5913e60dc7f8…` / `eqproxy-linux-amd64` sha256 `a9308e2029c7…`, the files listed in `SHA256SUMS.txt`), wrapped in its own image | `ghcr.io/exyonq/eqproxy:0.6.1` (index `sha256:ae15bb0f3651c9a76dd5be7b592ae007839ad46883a7c57756c52c2dcd4c4418`) |
 | Base | `debian:bookworm-slim` + the asset copied in at build time | `scratch` |

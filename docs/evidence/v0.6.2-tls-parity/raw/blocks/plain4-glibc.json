@@ -1,0 +1,99 @@
+{
+  "label": "glibc",
+  "arch": "amd64",
+  "binary": "/root/eqp-tls/eqproxy-glibc-amd64",
+  "binary_sha256": "d0af1d1ba977963e42d5c6daa6383b74f7a7db637e28965a4779fe0764bfd540",
+  "reps": 6,
+  "load": {
+    "rps_median": 26754.11286860703,
+    "p50_ms_median": 1.6925555,
+    "p95_ms_median": 3.543339,
+    "p99_ms_median": 4.884436,
+    "success_rate_min": 1.0,
+    "status_codes": [
+      "200"
+    ],
+    "runs": [
+      {
+        "rps": 26180.844404200572,
+        "p50_ms": 1.738933,
+        "p95_ms": 3.568238,
+        "p99_ms": 4.807792,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 261903
+        },
+        "errors": {
+          "aborted due to deadline": 49
+        }
+      },
+      {
+        "rps": 27327.38133301349,
+        "p50_ms": 1.6461780000000001,
+        "p95_ms": 3.51844,
+        "p99_ms": 4.807040000000001,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 273359
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 30740.731397216314,
+        "p50_ms": 1.4756719999999999,
+        "p95_ms": 3.059875,
+        "p99_ms": 4.120669,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 307507
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 25131.50225769191,
+        "p50_ms": 1.8109549999999999,
+        "p95_ms": 3.734947,
+        "p99_ms": 5.00533,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 251397
+        },
+        "errors": {
+          "aborted due to deadline": 49
+        }
+      },
+      {
+        "rps": 24929.93039409692,
+        "p50_ms": 1.767076,
+        "p95_ms": 4.036327999999999,
+        "p99_ms": 5.697819,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 249408
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 28009.588532102876,
+        "p50_ms": 1.587887,
+        "p95_ms": 3.50587,
+        "p99_ms": 4.96108,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 280142
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      }
+    ]
+  },
+  "handshakes": {},
+  "capabilities": {}
+}

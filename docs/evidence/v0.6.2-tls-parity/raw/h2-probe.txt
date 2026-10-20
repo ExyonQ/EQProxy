@@ -1,0 +1,13 @@
+# HTTP/2 probe — exyonq/eqproxy:0.6.2, listener alpn = ["h2"]
+# 2026-10-20T22:59:00Z
+
+## openssl s_client -alpn h2
+New, TLSv1.3, Cipher is TLS_AES_256_GCM_SHA384
+ALPN protocol: h2
+
+## curl --http2
+http_version=0 code=000
+curl_exit=52
+
+## proxy counters after the h2 attempts
+METRICS client[accepted=0 active=0 completed=0 rejected_maxconn=0 protocol_errors=0] proxy[no_server=0 queue_full=0 queue_timeout=0 retries=0 local_responses=0 redirects=0 direct=0] network[idle_timeouts=0 bytes_c2b=0 bytes_b2c=0] backend[connect_failures=0 tls_failures=0 discarded=0 reused=0 opened=0 proxied=0] phases[header_timeouts=0] proxy_proto[denied=0 invalid=0] cfg[reloads=0 reload_failures=0 last_swap_us=0] auth[denied=0 service_errors=0] dns[ok=0 failures=0 updates=0] maps[reloads=0 failures=0] mirror[sent=0 failures=0 skipped=0]

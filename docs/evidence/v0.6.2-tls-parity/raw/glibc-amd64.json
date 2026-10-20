@@ -1,0 +1,183 @@
+{
+  "label": "glibc",
+  "arch": "amd64",
+  "binary": "/root/eqp-tls/eqproxy-glibc-amd64",
+  "binary_sha256": "d0af1d1ba977963e42d5c6daa6383b74f7a7db637e28965a4779fe0764bfd540",
+  "reps": 8,
+  "load": {
+    "rps_median": 25645.121664364924,
+    "p50_ms_median": 1.7507169999999999,
+    "p95_ms_median": 3.6675835,
+    "p99_ms_median": 4.9183795,
+    "success_rate_min": 1.0,
+    "status_codes": [
+      "200"
+    ],
+    "runs": [
+      {
+        "rps": 28277.158724273046,
+        "p50_ms": 1.5781129999999999,
+        "p95_ms": 3.3853630000000003,
+        "p99_ms": 4.739145000000001,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 283115
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 24611.426348341756,
+        "p50_ms": 1.797845,
+        "p95_ms": 3.930764,
+        "p99_ms": 5.653252999999999,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 246235
+        },
+        "errors": {
+          "aborted due to deadline": 49
+        }
+      },
+      {
+        "rps": 25460.734295663315,
+        "p50_ms": 1.77517,
+        "p95_ms": 3.675396,
+        "p99_ms": 4.933178,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 254739
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 28041.910900819043,
+        "p50_ms": 1.612636,
+        "p95_ms": 3.3360960000000004,
+        "p99_ms": 4.509116,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 280540
+        },
+        "errors": {
+          "aborted due to deadline": 49
+        }
+      },
+      {
+        "rps": 30328.512871454583,
+        "p50_ms": 1.496584,
+        "p95_ms": 3.054746,
+        "p99_ms": 4.137797,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 303389
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 25432.002976428586,
+        "p50_ms": 1.78178,
+        "p95_ms": 3.659771,
+        "p99_ms": 4.903581,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 254409
+        },
+        "errors": {
+          "aborted due to deadline": 44
+        }
+      },
+      {
+        "rps": 23870.623623956417,
+        "p50_ms": 1.856877,
+        "p95_ms": 4.049678999999999,
+        "p99_ms": 5.670988,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 238855
+        },
+        "errors": {
+          "aborted due to deadline": 50
+        }
+      },
+      {
+        "rps": 25829.509033066533,
+        "p50_ms": 1.726264,
+        "p95_ms": 3.7687910000000002,
+        "p99_ms": 5.148774,
+        "success_rate": 1.0,
+        "status_codes": {
+          "200": 258359
+        },
+        "errors": {
+          "aborted due to deadline": 49
+        }
+      }
+    ]
+  },
+  "handshakes": {
+    "tls1_2": {
+      "full": [
+        2113,
+        1787,
+        2665,
+        1998,
+        2316
+      ],
+      "resumed": [
+        6880,
+        6565,
+        6990,
+        5138,
+        7391
+      ],
+      "full_median": 2113,
+      "resumed_median": 6880,
+      "session_check": "Reused, TLSv1.2, Cipher is ECDHE-ECDSA-AES256-GCM-SHA384"
+    },
+    "tls1_3": {
+      "full": [
+        2268,
+        2069,
+        2230,
+        2181,
+        2131
+      ],
+      "resumed": [
+        4662,
+        4746,
+        4182,
+        3901,
+        4331
+      ],
+      "full_median": 2181,
+      "resumed_median": 4331,
+      "session_check": "no-session-saved"
+    }
+  },
+  "capabilities": {
+    "handshake": [
+      "depth=0 CN = localhost",
+      "verify error:num=18:self-signed certificate",
+      "CONNECTION ESTABLISHED",
+      "Protocol version: TLSv1.3",
+      "Ciphersuite: TLS_AES_256_GCM_SHA384",
+      "Peer certificate: CN = localhost",
+      "Hash used: SHA256",
+      "Signature type: ECDSA",
+      "Verification error: self-signed certificate",
+      "Server Temp Key: X25519, 253 bits",
+      "DONE",
+      "probe_exit=1"
+    ],
+    "client_offers_h2_alpn_result": "4067245CD9730000:error:0A000460:SSL routines:ssl3_read_bytes:tlsv1 alert no application protocol:../ssl/record/rec_layer_s3.c:1602:SSL alert number 120\nNo ALPN negotiated\nprobe_exit=0",
+    "curl_http2_against_alpn_http1.1": "1.1 200probe_exit=0",
+    "alpn_h2_listener_negotiation": "4027A5B07F7F0000:error:8000006F:system library:BIO_connect:Connection refused:../crypto/bio/bio_sock2.c:117:calling connect()\n4027A5B07F7F0000:error:10000067:BIO routines:BIO_connect:connect error:../crypto/bio/bio_sock2.c:119:\nconnect:errno=111\nprobe_exit=1",
+    "curl_http2_against_alpn_h2": "0 000probe_exit=7"
+  }
+}
