@@ -44,7 +44,7 @@ diagnostics, configuration, administration, extensibility and security.
 > ([evidence](docs/evidence/v06-bench-arm64/)) leads in both scenarios with
 > S-H1-04 gaps within noise.
 >
-> **Scope honesty:** v0.6.1 is not declared production ready (Phase 9 gate
+> **Scope honesty:** v0.6.2 is not declared production ready (Phase 9 gate
 > pending). The whole v0.6 roadmap is delivered (32/32 scope boxes, 6/6
 > version-gate criteria); what remains is outside this version by design
 > and listed in the [CHANGELOG](CHANGELOG.md): the reference filters that

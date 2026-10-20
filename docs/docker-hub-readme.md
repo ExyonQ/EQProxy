@@ -33,7 +33,7 @@ The musl build was measured against the glibc release binary on arm64 and
 amd64, over HTTP and TLS, same scenario and same hosts: the container is within
 +1.6 % to +6.2 % of the glibc binary (p 0.03–0.68, sign flips between
 campaigns), RSS at parity and every response a real `200` — no meaningful
-regression ([parity report](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/docs/evidence/v0.6.1-parity/README.md)).
+regression ([parity report](https://github.com/ExyonQ/EQProxy/blob/v0.6.2/docs/evidence/v0.6.1-parity/README.md)).
 
 ## Quick reference
 
@@ -41,16 +41,16 @@ regression ([parity report](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/docs/e
 - **Where to get help:** [GitHub issues](https://github.com/ExyonQ/EQProxy/issues) or contact@exyonq.org
 - **Security:** security@exyonq.org
 - **Supported architectures:** `linux/amd64`, `linux/arm64`
-- **Source of this image:** https://github.com/ExyonQ/EQProxy/blob/v0.6.1/docker/Dockerfile
-- **Release:** https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.1
+- **Source of this image:** https://github.com/ExyonQ/EQProxy/blob/v0.6.2/docker/Dockerfile
+- **Release:** https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.2
 
 ## Supported tags
 
-- `0.6.1` — the released version (pinned).
+- `0.6.2` — the released version (pinned).
 - `latest` — the same image as the newest release.
 
 ```bash
-docker pull exyonq/eqproxy:0.6.1
+docker pull exyonq/eqproxy:0.6.2
 ```
 
 The same images are published on GitHub Container Registry as

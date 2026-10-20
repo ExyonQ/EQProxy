@@ -83,11 +83,19 @@ METRICS client[accepted=0 ...] proxy[no_server=0 ...] ...
 
 `webpki-roots` 1.0.10 and `rustls-webpki` 0.103.16 (RUSTSEC-2026-0381,
 RUSTSEC-2026-0382). The v0.6.1 artifacts predate those advisories and keep the
-old roots; these do not. `veyra audit . --profile standard` on the released
-tree: **ACCEPTED**, exit 0, evidence `.veyra/evidence/20261020T203924Z/`
-(the earlier run, `.veyra/evidence/20261020T203004Z/`, is the REJECTED one that
-motivated the bump). `cargo fmt --check`, `clippy --workspace --all-targets --
--D warnings` and `cargo test --workspace`: **327 passed, 0 failed**.
+old roots; these do not.
+
+`veyra audit . --profile standard` has three runs in this increment, and the
+first one was not a pass:
+
+| Tree | Verdict | Exit | Evidence |
+|---|---|---|---|
+| before the dependency bump | **REJECTED** (`audit:RUSTSEC-2026-0381/0382`, `deny:vulnerability`) | 1 | `.veyra/evidence/20261020T203004Z/` |
+| after the bump, version still 0.6.1 | **ACCEPTED** | 0 | `.veyra/evidence/20261020T203924Z/` |
+| the released tree (commit `1c6984c`, tag `v0.6.2`) | **ACCEPTED** | 0 | `.veyra/evidence/20261020T221543Z/` |
+
+`cargo fmt --check`, `clippy --workspace --all-targets -- -D warnings` and
+`cargo test --workspace`: **327 passed, 0 failed** on the released tree.
 
 ## 5. Known limitations
 
