@@ -110,6 +110,11 @@ rejected by the config gate when malformed.
   scan and an EvoForge `mcp_submit_eval` on a real slice.
 - Image scanned with Docker Scout **before** publishing (see the image
   section of the release evidence).
+- Parity of the two runtimes measured on the released artifacts, same host and
+  same scenario (S-H1-04, 16 reps each): the container matches the glibc
+  binary — 9 643 vs 9 798 rps (−1.6 %, inside the host's ±12 % run-to-run
+  spread), p50 identical, p95 +5 %, RSS 6.5 vs 10.8 MiB, every response a real
+  `200`. Report: [`docs/evidence/v0.6.1-parity/`](docs/evidence/v0.6.1-parity/README.md).
 
 ## [v0.6.0] — 2026-10-20
 
