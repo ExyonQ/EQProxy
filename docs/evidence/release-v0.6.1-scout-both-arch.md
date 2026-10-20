@@ -22,6 +22,8 @@ Evidence, run on the downloaded files:
 shasum -a 256 -c <(grep linux SHA256SUMS.txt)      -> both OK
 file eqproxy-linux-amd64  -> ELF 64-bit LSB pie executable, x86-64, static-pie linked
 file eqproxy-linux-arm64  -> ELF 64-bit LSB executable, ARM aarch64, statically linked
+readelf -d  (both)        -> 0 NEEDED entries
+readelf -l  (both)        -> 0 PT_INTERP
 ```
 
 The consequence that matters is not the `file` wording but that they run with
@@ -114,15 +116,35 @@ to an unscanned image. `.github/workflows/release.yml` now:
 7. the `release` job now `needs` the image job and uploads the two Scout
    reports as release assets.
 
+### Is promotion by digest lossless? (executed)
+
+`imagetools create` from an index digest was exercised end to end against a
+local `registry:2` (no external publish):
+
+```
+$ docker buildx imagetools create --tag localhost:5055/copy:test \
+    ghcr.io/exyonq/eqproxy@sha256:ae15bb0f3651c9a76dd5be7b592ae007839ad46883a7c57756c52c2dcd4c4418
+$ docker buildx imagetools inspect localhost:5055/copy:test
+Digest:    sha256:ae15bb0f3651c9a76dd5be7b592ae007839ad46883a7c57756c52c2dcd4c4418
+  Platform: linux/amd64 / linux/arm64 / unknown/unknown (2 attestation manifests)
+```
+
+The copy keeps the **identical index digest**, both platform manifests and
+both attestation manifests (`vnd.docker.reference.type: attestation-manifest`),
+so provenance and SBOM survive promotion. That is the property step 6 depends
+on.
+
 ## 4. What is NOT verified here
 
 - **The modified workflow has not run on GitHub Actions yet** — that happens on
   the next tag push. The new steps were validated as YAML (all five jobs parse,
   dependency graph `guard → darwin/linux → image → release`, no cycle) and each
   command was exercised locally against the published digest (raw-digest
-  computation matched `ae15bb0f…`, both Scout invocations, both scratch runs).
-  The promotion step cannot be exercised without pushing a tag: **NOT
-  EXECUTED**.
+  computation matched `ae15bb0f…`, both Scout invocations both ways — exit 0
+  on the release image, exit 2 on `python:3.8-slim` —, both scratch runs, and
+  promotion-by-digest against a local registry). What has not run is the
+  workflow itself on Actions infrastructure: **NOT EXECUTED** until the next
+  tag push.
 - arm64 containers run under QEMU in CI; the journeys prove the artifact, not
   native arm64 performance.
 - Scout policies, the Docker Hub health score and `docker scout compare` are
