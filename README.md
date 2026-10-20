@@ -7,9 +7,9 @@ functional parity with the reference proxy together with verifiable improvements
 diagnostics, configuration, administration, extensibility and security.
 
 > **Status: v0.6.2 (2026-10-20) — patch over v0.6.1 «rules, routing and
-> traffic».** A real TCP
-> and HTTP/1.1 proxy (crates `eqproxy-core/config/net/cli`) with **typed
-> routing rules per listener** — host/path/method/header/cookie/map/IP
+> traffic».** A real TCP and HTTP/1.1 proxy (crates
+> `eqproxy-core/config/net/cli`) with **typed routing rules per listener** —
+> host/path/method/header/cookie/map/IP
 > conditions, first match wins — and four rule actions: `use_backend`,
 > `split` (weighted canary with `weight = 0` rollback, optionally pinned by
 > `hash_policy` so a key keeps its target, and optionally **mirrored** to a
