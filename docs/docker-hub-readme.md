@@ -16,10 +16,11 @@ Scout, `0C 0H 0M 0L`). It runs as the unprivileged user `65532:65532`. It
 listens wherever the configuration says (the convention in the examples is
 port 8080).
 
-The musl build was measured against the glibc release binary on the same host
-and the same scenario: 9 643 vs 9 798 rps (−1.6 %, inside the host's ±12 %
-run-to-run spread), identical p50, 6.5 vs 10.8 MiB RSS, every response a real
-`200` ([parity report](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/docs/evidence/v0.6.1-parity/README.md)).
+The musl build was measured against the glibc release binary on arm64 and
+amd64, over HTTP and TLS, same scenario and same hosts: the container is within
++1.6 % to +6.2 % of the glibc binary (p 0.03–0.68, sign flips between
+campaigns), RSS at parity and every response a real `200` — no meaningful
+regression ([parity report](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/docs/evidence/v0.6.1-parity/README.md)).
 
 ## Quick reference
 

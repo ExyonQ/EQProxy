@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import shutil
+import ssl
 import statistics
 import subprocess
 import sys
@@ -50,20 +51,63 @@ def sh(cmd, timeout=120, check=True):
     return r
 
 
+def binary_sha256(path):
+    """Portable digest: `shasum` on macOS, `sha256sum` on Linux."""
+    path = os.path.abspath(path)
+    if shutil.which("shasum"):
+        return sh(["shasum", "-a", "256", path]).stdout.split()[0]
+    return sh(["sha256sum", path]).stdout.split()[0]
+
+
 def docker_rm(name):
     subprocess.run(["docker", "rm", "-f", name], capture_output=True)
 
 
-def wait_tcp(host_port, deadline_s=30):
+def wait_tcp(host_port, deadline_s=30, tls=False):
+    """Readiness: an actual 200 through the proxy, not just an open port."""
+    scheme = "https" if tls else "http"
+    ctx = ssl._create_unverified_context() if tls else None
     end = time.time() + deadline_s
     while time.time() < end:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{host_port}/", timeout=2) as r:
+            with urllib.request.urlopen(f"{scheme}://127.0.0.1:{host_port}/",
+                                        timeout=2, context=ctx) as r:
                 if r.status == 200:
                     return True
         except Exception:
             time.sleep(0.2)
     return False
+
+
+def make_tls_material(directory):
+    """Self-signed leaf for the TLS variant (generated per run, never shipped)."""
+    os.makedirs(directory, exist_ok=True)
+    cert = os.path.join(directory, "cert.pem")
+    key = os.path.join(directory, "key.pem")
+    sh(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "2",
+        "-subj", "/CN=parity.local",
+        "-addext", "subjectAltName=IP:127.0.0.1,DNS:localhost,DNS:parity.local",
+        "-keyout", key, "-out", cert], timeout=120)
+    # The musl image runs as 65532: it must be able to read the pair.
+    os.chmod(cert, 0o644)
+    os.chmod(key, 0o644)
+    return cert, key
+
+
+def write_tls_config(base_path, out_dir):
+    """Same scenario with TLS termination on the measured listener."""
+    with open(base_path) as fh:
+        lines = fh.read().splitlines()
+    if any(line.strip() == "[listener.web.tls]" for line in lines):
+        return base_path
+    start = next(i for i, line in enumerate(lines) if line.strip() == "[listener.web]")
+    end = next(i for i in range(start + 1, len(lines)) if lines[i].startswith("["))
+    lines[end:end] = ["", "[listener.web.tls]",
+                      'cert = "/certs/cert.pem"', 'key = "/certs/key.pem"', ""]
+    path = os.path.join(out_dir, "config-tls.toml")
+    with open(path, "w") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return path
 
 
 def stats(container):
@@ -76,7 +120,7 @@ def stats(container):
     return {"cpu": cpu.strip(), "mem": mem.strip()}
 
 
-def oha_with_stats(container, url, secs, conns):
+def oha_with_stats(container, url, secs, conns, tls=False):
     """Run oha while sampling the container's CPU and RSS.
 
     A single `docker stats --no-stream` after the run would report an idle
@@ -93,7 +137,7 @@ def oha_with_stats(container, url, secs, conns):
     thread = threading.Thread(target=sampler, daemon=True)
     thread.start()
     try:
-        report = oha(url, secs, conns)
+        report = oha(url, secs, conns, tls=tls)
     finally:
         stop.set()
         thread.join(timeout=10)
@@ -127,9 +171,15 @@ def mem_mib(value):
     return None
 
 
-def oha(url, secs, conns):
-    r = sh(["oha", "-z", f"{secs}s", "-c", str(conns), "--latency-correction",
-            "--no-tui", "--output-format", "json", url], timeout=secs + 60)
+def oha(url, secs, conns, tls=False):
+    cmd = ["oha", "-z", f"{secs}s", "-c", str(conns), "--latency-correction",
+           "--no-tui", "--output-format", "json"]
+    if tls:
+        # The load generator accepts the per-run self-signed leaf; the
+        # handshake, key exchange and record layer are still exercised.
+        cmd.append("--insecure")
+    cmd.append(url)
+    r = sh(cmd, timeout=secs + 60)
     return json.loads(r.stdout)
 
 
@@ -153,20 +203,44 @@ def start_backend():
     raise RuntimeError("backend origins never answered on 172.20.0.2:19002")
 
 
-def start_proxy(kind, binary, config):
+def glibc_image(binary):
+    """Wrap the release asset in an image, like the musl side ships its own.
+
+    A bind mount would put the binary on a host filesystem (virtiofs on macOS,
+    a native mount on Linux). Deferred page faults of code pages then depend on
+    that filesystem, which showed up as wild TLS outliers on the glibc side
+    only. Putting the same bytes in a layer keeps the delivery identical on
+    both sides; only the runtime pair differs.
+    """
+    digest = binary_sha256(binary)[:12]
+    tag = f"eqparity-glibc:{digest}"
+    if sh(["docker", "image", "inspect", tag], check=False).returncode == 0:
+        return tag
+    ctx = os.path.join(HERE, "_glibc-image")
+    os.makedirs(ctx, exist_ok=True)
+    shutil.copyfile(os.path.abspath(binary), os.path.join(ctx, "eqproxy"))
+    with open(os.path.join(ctx, "Dockerfile"), "w") as fh:
+        fh.write("FROM debian:bookworm-slim\n"
+                 "COPY eqproxy /eqproxy\n"
+                 "RUN chmod 755 /eqproxy\n"
+                 "ENTRYPOINT [\"/eqproxy\"]\n")
+    sh(["docker", "build", "-q", "-t", tag, ctx], timeout=600)
+    return tag
+
+
+def start_proxy(kind, binary, config, tls_dir=None):
     docker_rm("eqparity-proxy")
     common = ["docker", "run", "-d", "--network", NET, "--ip", PROXY_IP,
               "--name", "eqparity-proxy", "-p", f"127.0.0.1:{PORT}:{PORT}"]
+    if tls_dir:
+        common += ["-v", f"{os.path.abspath(tls_dir)}:/certs:ro"]
+    cmd = common + ["-v", f"{os.path.abspath(config)}:/c.toml:ro"]
     if kind == "glibc":
-        # The released asset, mounted read-only into the same Debian base the
-        # v0.6.0 image used. No toolchain, no build: the file under test is the
-        # artifact users download.
-        cmd = common + ["-v", f"{os.path.abspath(binary)}:/eqproxy:ro",
-                        "-v", f"{os.path.abspath(config)}:/c.toml:ro",
-                        GLIBC_IMAGE, "/eqproxy", "run", "--config", "/c.toml"]
+        # The released asset inside the image built from it (same bytes, same
+        # delivery mechanism as the musl image).
+        cmd += [glibc_image(binary), "run", "--config", "/c.toml"]
     else:
-        cmd = common + ["-v", f"{os.path.abspath(config)}:/c.toml:ro",
-                        MUSL_IMAGE, "run", "--config", "/c.toml"]
+        cmd += [MUSL_IMAGE, "run", "--config", "/c.toml"]
     sh(cmd, timeout=180)
 
 
@@ -175,6 +249,8 @@ def main():
     ap.add_argument("--binary", required=True, help="release asset eqproxy-linux-*")
     ap.add_argument("--config", required=True)
     ap.add_argument("--out", default="raw")
+    ap.add_argument("--tls", action="store_true",
+                    help="terminate TLS on the measured listener (self-signed leaf)")
     ap.add_argument("--reps", type=int, default=3, help="reps per block")
     ap.add_argument("--secs", type=int, default=10)
     ap.add_argument("--conns", type=int, default=50)
@@ -182,8 +258,16 @@ def main():
 
     if shutil.which("oha") is None:
         sys.exit("oha not found in PATH")
+    # The container mounts the binary by path: it must be executable.
+    os.chmod(os.path.abspath(args.binary), 0o755)
     out = os.path.join(HERE, args.out)
     os.makedirs(out, exist_ok=True)
+    tls_dir = None
+    config = args.config
+    if args.tls:
+        tls_dir = os.path.join(out, "tls")
+        make_tls_material(tls_dir)
+        config = write_tls_config(args.config, out)
 
     sh(["docker", "network", "rm", NET], check=False)
     sh(["docker", "network", "create", "--subnet", SUBNET, NET])
@@ -193,7 +277,7 @@ def main():
         sh(["docker", "pull", img], timeout=600, check=False)
 
     artifacts = {
-        "glibc": {"kind": "glibc", "image": GLIBC_IMAGE},
+        "glibc": {"kind": "glibc", "image": glibc_image(args.binary)},
         "musl": {"kind": "musl", "image": MUSL_IMAGE},
     }
     for name, meta in artifacts.items():
@@ -202,7 +286,8 @@ def main():
         meta["image_id"], meta["repo_digests"] = (r.stdout.strip().split(" ", 1) + [""])[:2]
 
     start_backend()
-    url = f"http://127.0.0.1:{PORT}/"
+    scheme = "https" if args.tls else "http"
+    url = f"{scheme}://127.0.0.1:{PORT}/"
     runs = {name: [] for name in artifacts}
 
     # Block design A B B A: each block starts the artifact once (a restart per
@@ -213,18 +298,19 @@ def main():
     try:
         for block_index, name in enumerate(blocks, start=1):
             meta = artifacts[name]
-            start_proxy(meta["kind"], args.binary, args.config)
-            if not wait_tcp(PORT, deadline_s=30):
+            start_proxy(meta["kind"], args.binary, config, tls_dir=tls_dir)
+            if not wait_tcp(PORT, deadline_s=30, tls=args.tls):
                 logs = sh(["docker", "logs", "eqparity-proxy"], check=False).stderr[-1500:]
                 raise RuntimeError(f"{name}: listener never served\n{logs}")
             # Health checks: interval 2s, rise 2 -> let the backends settle.
             time.sleep(7)
-            oha(url, 5, args.conns)  # discarded warm-up, identical for both
+            oha(url, 5, args.conns, tls=args.tls)  # discarded warm-up, identical for both
             print(f"block {block_index}/{len(blocks)} {name}: "
                   f"warm-up done, measuring {args.reps}x{args.secs}s", flush=True)
             for _ in range(args.reps):
                 rep_no += 1
-                report, cpu, mem = oha_with_stats("eqparity-proxy", url, args.secs, args.conns)
+                report, cpu, mem = oha_with_stats("eqparity-proxy", url, args.secs,
+                                                  args.conns, tls=args.tls)
                 entry = {
                     "artifact": name,
                     "block": block_index,
@@ -260,11 +346,15 @@ def main():
 
     summary = {
         "scenario": "S-H1-04 (11 listeners, 200 backend entries, 20 rules)",
-        "config": os.path.abspath(args.config),
-        "binary_sha256": sh(["shasum", "-a", "256", os.path.abspath(args.binary)]).stdout.split()[0],
+        "transport": "https (TLS termination, self-signed leaf)" if args.tls else "http",
+        "config": os.path.abspath(config),
+        "base_config": os.path.abspath(args.config),
+        "binary_sha256": binary_sha256(args.binary),
         "oha": sh(["oha", "--version"]).stdout.strip(),
         "docker": sh(["docker", "version", "--format", "{{.Server.Version}}"]).stdout.strip(),
         "host": {
+            "arch": os.uname().machine,
+            "kernel": sh(["uname", "-sr"]).stdout.strip(),
             "cpus": sh(["docker", "info", "--format", "{{.NCPU}}"]).stdout.strip(),
             "mem_bytes": sh(["docker", "info", "--format", "{{.MemTotal}}"]).stdout.strip(),
         },

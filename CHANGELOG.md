@@ -110,11 +110,16 @@ rejected by the config gate when malformed.
   scan and an EvoForge `mcp_submit_eval` on a real slice.
 - Image scanned with Docker Scout **before** publishing (see the image
   section of the release evidence).
-- Parity of the two runtimes measured on the released artifacts, same host and
-  same scenario (S-H1-04, 16 reps each): the container matches the glibc
-  binary — 9 643 vs 9 798 rps (−1.6 %, inside the host's ±12 % run-to-run
-  spread), p50 identical, p95 +5 %, RSS 6.5 vs 10.8 MiB, every response a real
-  `200`. Report: [`docs/evidence/v0.6.1-parity/`](docs/evidence/v0.6.1-parity/README.md).
+- Parity of the two runtimes measured on the released artifacts over both
+  architectures and both transports (S-H1-04, 16 reps per cell): arm64 HTTP
+  +1.6 % (p 0.51) and arm64 TLS +2.0 % (p 0.68) for the container, amd64 HTTP
+  +6.2 % (p 0.062) and amd64 TLS +6.0 % (p 0.027), with p50/p95 within a few
+  percent, RSS at parity (5.3–7.2 MiB both sides) and every response a real
+  `200` in all 128 measured reps. The sign flips between campaigns, so the
+  supported reading is "no meaningful regression", not "musl is faster".
+  Report: [`docs/evidence/v0.6.1-parity/`](docs/evidence/v0.6.1-parity/README.md)
+  (it also records the correction of the first version, which bind-mounted the
+  glibc binary and produced virtiofs TLS outliers and a false −40 % RSS).
 
 ## [v0.6.0] — 2026-10-20
 

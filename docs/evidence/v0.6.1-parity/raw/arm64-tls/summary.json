@@ -1,0 +1,354 @@
+{
+  "scenario": "S-H1-04 (11 listeners, 200 backend entries, 20 rules)",
+  "transport": "https (TLS termination, self-signed leaf)",
+  "config": "/Volumes/Lexar/Cursor/EQProxy/docs/evidence/v0.6.1-parity/tls3/config-tls.toml",
+  "base_config": "/Volumes/Lexar/Cursor/EQProxy/docs/evidence/v06-bench/configs/s-h1-04-eqproxy.toml",
+  "binary_sha256": "5913e60dc7f87b86c47c54c29c709b399483bf8dfb38e13c656330b1e21bb9dd",
+  "oha": "oha 1.14.0",
+  "docker": "29.8.2",
+  "host": {
+    "arch": "arm64",
+    "kernel": "Darwin 25.5.0",
+    "cpus": "10",
+    "mem_bytes": "8319504384"
+  },
+  "reps": 8,
+  "seconds_per_rep": 10,
+  "connections": 50,
+  "artifacts": {
+    "glibc": {
+      "image": "eqparity-glibc:5913e60dc7f8",
+      "image_id": "sha256:92d31cd022fbd718e5f982af304899413914b302cfdc2d403e39f91158089efa",
+      "repo_digests": "[eqparity-glibc@sha256:92d31cd022fbd718e5f982af304899413914b302cfdc2d403e39f91158089efa]",
+      "rps_median": 7271.797620176256,
+      "rps_all": [
+        4648.020748489497,
+        5623.888136085968,
+        6103.038618958824,
+        7277.742243304686,
+        7265.852997047825,
+        5808.084409207098,
+        6174.309831368294,
+        7756.064424933073,
+        7846.829341752523,
+        7059.41993236767,
+        7500.626009883858,
+        7213.3369364032305,
+        8541.613745064553,
+        8552.386066227231,
+        8167.079949191075,
+        8915.537717973531
+      ],
+      "p50_median": 4.3715,
+      "p95_median": 12.812999999999999,
+      "p99_median": 65.89150000000001,
+      "cpu_median_pct": 362.55,
+      "cpu_all_pct": [
+        311.5,
+        537.0,
+        343.3,
+        330.3,
+        297.1,
+        447.2,
+        559.0,
+        344.8,
+        292.5,
+        389.7,
+        498.4,
+        311.6,
+        423.9,
+        498.4,
+        358.8,
+        366.3
+      ],
+      "mem_median_mib": 7.2,
+      "mem_all_mib": [
+        7.2,
+        7.2,
+        7.1,
+        7.2,
+        7.2,
+        7.3,
+        7.5,
+        7.1,
+        7.3,
+        7.1,
+        7.1,
+        7.5,
+        7.3,
+        7.3,
+        7.1,
+        7.2
+      ],
+      "success_rate_min": 1.0,
+      "status_codes_all": [
+        {
+          "200": 46443
+        },
+        {
+          "200": 56210
+        },
+        {
+          "200": 61097
+        },
+        {
+          "200": 72745
+        },
+        {
+          "200": 72629
+        },
+        {
+          "200": 58053
+        },
+        {
+          "200": 61776
+        },
+        {
+          "200": 77537
+        },
+        {
+          "200": 79347
+        },
+        {
+          "200": 70580
+        },
+        {
+          "200": 74985
+        },
+        {
+          "200": 72112
+        },
+        {
+          "200": 85396
+        },
+        {
+          "200": 85508
+        },
+        {
+          "200": 81643
+        },
+        {
+          "200": 89145
+        }
+      ],
+      "errors_all": [
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 48
+        }
+      ]
+    },
+    "musl": {
+      "image": "ghcr.io/exyonq/eqproxy:0.6.1",
+      "image_id": "sha256:ae15bb0f3651c9a76dd5be7b592ae007839ad46883a7c57756c52c2dcd4c4418",
+      "repo_digests": "[ghcr.io/exyonq/eqproxy@sha256:ae15bb0f3651c9a76dd5be7b592ae007839ad46883a7c57756c52c2dcd4c4418]",
+      "rps_median": 7418.479749872457,
+      "rps_all": [
+        6951.1950353191405,
+        8352.94586772645,
+        7397.830998497617,
+        5063.725395819844,
+        8126.515594871045,
+        8152.778891871035,
+        6592.864711500075,
+        6253.771819247131,
+        6038.448339854897,
+        7547.206844596806,
+        7439.128501247298,
+        7950.138639342996,
+        7071.726039545752,
+        7325.053105472839,
+        7788.4848020713725,
+        7543.239123807946
+      ],
+      "p50_median": 4.426,
+      "p95_median": 12.209499999999998,
+      "p99_median": 59.923,
+      "cpu_median_pct": 385.1,
+      "cpu_all_pct": [
+        609.1,
+        368.3,
+        448.2,
+        438.0,
+        458.6,
+        317.7,
+        293.5,
+        429.9,
+        628.2,
+        337.9,
+        314.5,
+        240.8,
+        312.8,
+        384.6,
+        404.0,
+        385.6
+      ],
+      "mem_median_mib": 7.2,
+      "mem_all_mib": [
+        7.2,
+        7.1,
+        7.3,
+        7.2,
+        7.5,
+        7.5,
+        7.2,
+        7.4,
+        7.2,
+        7.2,
+        7.3,
+        7.5,
+        7.5,
+        7.1,
+        7.1,
+        7.0
+      ],
+      "success_rate_min": 1.0,
+      "status_codes_all": [
+        {
+          "200": 69480
+        },
+        {
+          "200": 83508
+        },
+        {
+          "200": 73952
+        },
+        {
+          "200": 50611
+        },
+        {
+          "200": 81244
+        },
+        {
+          "200": 81498
+        },
+        {
+          "200": 65907
+        },
+        {
+          "200": 62518
+        },
+        {
+          "200": 60359
+        },
+        {
+          "200": 75447
+        },
+        {
+          "200": 74360
+        },
+        {
+          "200": 79481
+        },
+        {
+          "200": 70688
+        },
+        {
+          "200": 73221
+        },
+        {
+          "200": 77864
+        },
+        {
+          "200": 75406
+        }
+      ],
+      "errors_all": [
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 49
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 48
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        },
+        {
+          "aborted due to deadline": 50
+        }
+      ]
+    }
+  },
+  "ratio_musl_over_glibc_rps": 1.0201713712836589,
+  "ratio_musl_over_glibc_p95": 0.952899399047842
+}
