@@ -1,10 +1,11 @@
-# Release audit — v0.6.0 (pre-publication)
+# Release audit — v0.6.0
 
-Audit date: 2026-10-20. Scope: the `main` working tree that becomes the
-`v0.6.0` tag — version pin, the v0.6 rules/traffic dataplane, the two
-Docker-gated harnesses, documentation, and the mandatory toolchain audits
-(Veyra Proof, Rust Audit, EvoForge slice eval). Everything below was executed
-on this tree, on this machine; nothing is inferred.
+Audit date: 2026-10-20. Scope: the `main` tree that became the `v0.6.0` tag —
+version pin, the v0.6 rules/traffic dataplane, the two Docker-gated harnesses,
+documentation, the mandatory toolchain audits (Veyra Proof, Rust Audit,
+EvoForge slice eval), and the published artifacts. Everything below was
+executed on this tree/machine or against the published release; nothing is
+inferred.
 
 ## 1. Environment
 
@@ -108,8 +109,43 @@ semantics the migration matrix asserts):
 - cargo-geiger above: INCONCLUSIVE, not green.
 - Online dependency checks of Rust Audit (`--online`, OSV/docs.rs): not run in
   this pass; no new dependency was added in this slice.
-- Post-publication verification of the release assets (download + checksum +
-  binary E2E from GitHub Releases and both registries): happens after the tag
-  is published by `.github/workflows/release.yml`; not covered here.
+- Post-publication verification of the release assets: executed, see
+  section 8.
 - Full 24h soak re-run and the full BENCHMARK_PLAN matrix: unchanged from
   v0.5.0/v0.6 campaigns, not repeated for this tag.
+
+## 8. Publication (verified after the tag)
+
+Tag `v0.6.0` (lightweight, matching the repo's tag style) pushed on top of
+commit `a0fe24f`; `.github/workflows/release.yml` run `39429030359` completed
+**success** — all five jobs green (version pin, darwin binaries, linux
+binaries + SBOM, GitHub release, multi-arch image).
+
+GitHub release `v0.6.0` (not a prerelease, 9 assets: four binaries, four
+CycloneDX SBOMs, `SHA256SUMS.txt`):
+
+```bash
+gh release download v0.6.0 --repo ExyonQ/EQProxy --dir /tmp/rel-v060
+cd /tmp/rel-v060 && shasum -a 256 -c SHA256SUMS.txt   # 4/4 OK, exit 0
+./eqproxy-darwin-arm64 --version                       # eqproxy 0.6.0
+echo '<config>' | ./eqproxy-darwin-arm64 config validate --config /dev/stdin
+./eqproxy-darwin-arm64 config explain --config min.toml --path /old/x
+#   action: local response (no backend contacted)  (redirect rule matched)
+```
+
+Images — same multi-arch manifest on both registries, `:latest` moved (final
+release, no `-` in the tag):
+
+- `ghcr.io/exyonq/eqproxy:0.6.0` and `exyonq/eqproxy:0.6.0`:
+  `linux/amd64` + `linux/arm64`; per-arch digests
+  `amd64 sha256:08d1fc30a28c90791fe8528621242a12429487ec04d353152ce58b1c0b4e6263`,
+  `arm64 sha256:ea252ecb18b2927b0c3b674c4893f1dd20b44a12ee3ad89dc0585362a948b090`.
+- `:latest` resolves on GHCR and Docker Hub.
+- Docker Hub pull of `:0.6.0` (arm64 host) → image digest
+  `sha256:4f56fafa8693c8eaed7e8dd0ce54f760b1ab1bd928224a7c4aed0f4ea37491af`;
+  `docker run --rm exyonq/eqproxy:0.6.0 --version` → `eqproxy 0.6.0`;
+  `config validate` inside the container → `config OK` (exit 0).
+
+Not verified here: the amd64 image and the linux/darwin-amd64 binaries were
+built and E2E-verified by the pipeline jobs (which run them before upload),
+but were not re-executed on this arm64 machine.
