@@ -113,6 +113,14 @@ enum ConfigCommand {
         #[arg(short, long)]
         config: PathBuf,
     },
+    /// Prints the JSON Schema of the configuration (Q1/CE1) for editor
+    /// completion and inline validation: generated from the same types the
+    /// parser accepts, so it never drifts from the format
+    Schema {
+        /// Write the schema to this file instead of stdout
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
     /// Restores the most recent backup into current (Phase 3, offline)
     Rollback,
     /// Reference-proxy to EQProxy configuration converter (Phase 8)
@@ -163,8 +171,38 @@ fn config_command(command: ConfigCommand) -> u8 {
         ConfigCommand::Diff { left, right } => diff(&left, &right),
         ConfigCommand::Plan { config } => plan(&config),
         ConfigCommand::Apply { config } => apply(&config),
+        ConfigCommand::Schema { output } => schema(output.as_deref()),
         ConfigCommand::Rollback => rollback(),
         ConfigCommand::Import { .. } => not_implemented("config import", "Phase 8"),
+    }
+}
+
+/// `config schema` (Q1/CE1): the public JSON Schema of the configuration,
+/// generated from the same Rust types the parser deserializes. Writes to
+/// `--output` when given (so the repo copy is reproducible with one
+/// command), otherwise to stdout.
+fn schema(output: Option<&std::path::Path>) -> u8 {
+    let schema = match eqproxy_config::json_schema() {
+        Ok(schema) => schema,
+        Err(err) => {
+            eprintln!("error: could not render the configuration schema: {err}");
+            return 1;
+        }
+    };
+    match output {
+        Some(path) => {
+            let mut text = schema;
+            text.push('\n');
+            if let Err(err) = std::fs::write(path, text) {
+                eprintln!("error: could not write {}: {err}", path.display());
+                return 1;
+            }
+            0
+        }
+        None => {
+            println!("{schema}");
+            0
+        }
     }
 }
 
@@ -668,7 +706,17 @@ fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
                     .iter()
                     .map(|p| String::from_utf8_lossy(p).into_owned())
                     .collect();
-                format!("yes(alpn=[{}])", protos.join(","))
+                if t.sni_names().is_empty() {
+                    format!("yes(alpn=[{}])", protos.join(","))
+                } else {
+                    let names: Vec<String> =
+                        t.sni_names().iter().map(|entry| entry.join(",")).collect();
+                    format!(
+                        "yes(alpn=[{}] sni=[{}])",
+                        protos.join(","),
+                        names.join("; ")
+                    )
+                }
             }
         };
         let _ = writeln!(
@@ -1346,6 +1394,9 @@ fn headers_summary(headers: Option<&eqproxy_net::ResolvedHeaders>) -> String {
         }
         parts.push(format!("auth {}", kinds.join(" + ")));
     }
+    if let Some(mirror) = &headers.mirror {
+        parts.push(mirror.describe());
+    }
     if parts.is_empty() {
         String::new()
     } else {
@@ -1372,16 +1423,22 @@ fn action_summary(action: &eqproxy_net::RouteAction, host: &str, req_path: &str)
             }
             out
         }
-        eqproxy_net::RouteAction::Split { targets, .. } => {
+        eqproxy_net::RouteAction::Split { targets, hash, .. } => {
             let parts: Vec<String> = targets
                 .targets()
                 .iter()
                 .map(|target| format!("{} w={}", target.backend.name, target.weight))
                 .collect();
-            format!(
-                "split [{}] (smooth weighted round-robin per request)",
-                parts.join(", ")
-            )
+            // Without a hash policy, selection rotates; with one, the same
+            // key sticks to the same target (B-H3).
+            let selection = match hash {
+                Some(hash) => format!(
+                    "{} (weighted rendezvous: the key keeps its target)",
+                    hash.describe()
+                ),
+                None => "smooth weighted round-robin per request".to_owned(),
+            };
+            format!("split [{}] ({selection})", parts.join(", "))
         }
         eqproxy_net::RouteAction::Redirect { status, location } => {
             let rendered = eqproxy_core::rules::render_location(location, host, req_path)
@@ -1419,18 +1476,20 @@ fn explain_report(
         "simulation: true (no requests issued, no state changed)"
     );
     let _ = writeln!(out, "request: {method} {req_path} host={host}");
+    // TLS with its SNI names (B-I2/B-H10/B-E9) when the listener has more
+    // than the default certificate.
+    let tls = match listener.server_tls.as_ref() {
+        None => "no".to_owned(),
+        Some(t) if t.sni_names().is_empty() => "yes".to_owned(),
+        Some(t) => {
+            let names: Vec<String> = t.sni_names().iter().map(|entry| entry.join(",")).collect();
+            format!("yes sni=[{}]", names.join("; "))
+        }
+    };
     let _ = writeln!(
         out,
-        "listener \"{}\": listen={} mode={} maxconn={} tls={}",
-        listener.name,
-        listener.listen,
-        mode,
-        listener.maxconn,
-        if listener.server_tls.is_some() {
-            "yes"
-        } else {
-            "no"
-        },
+        "listener \"{}\": listen={} mode={} maxconn={} tls={tls}",
+        listener.name, listener.listen, mode, listener.maxconn,
     );
     // Routing (B-H3/B-H4, H4): every rule and why it matched or not, then
     // the decision — never a bare backend without the path to it.
@@ -1963,6 +2022,17 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     eqproxy_net::RouteAction::Split {
                         targets: Arc::new(eqproxy_net::SplitTargets::new(resolved)),
                         rewrite: rewrite(),
+                        hash: rule
+                            .hash_policy
+                            .as_ref()
+                            .map(|policy| {
+                                eqproxy_net::HashPolicy::parse(&policy.key).map_err(|why| {
+                                    format!(
+                                        "listener.{name}.rules[{i}].hash_policy.key: {why}"
+                                    )
+                                })
+                            })
+                            .transpose()?,
                     }
                 } else if let Some(redirect) = &rule.redirect {
                     eqproxy_net::RouteAction::Redirect {
@@ -2000,6 +2070,22 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                         .iter()
                         .map(|op| (op.name.clone(), op.value.clone()))
                         .collect(),
+                    mirror: rule
+                        .request_mirror
+                        .as_ref()
+                        .map(|mirror| {
+                            let target = backends.get(&mirror.backend).ok_or_else(|| {
+                                format!(
+                                    "listener.{name}.rules[{i}].request_mirror.backend does not exist: \"{}\"",
+                                    mirror.backend
+                                )
+                            })?;
+                            Ok::<_, String>(std::sync::Arc::new(eqproxy_net::MirrorPolicy::new(
+                                Arc::clone(target),
+                                mirror.percentage,
+                            )))
+                        })
+                        .transpose()?,
                     rate_limit: rule.rate_limit.as_ref().map(|limit| {
                         std::sync::Arc::new(eqproxy_net::RateLimiter::new(
                             limit.rate,
@@ -2054,7 +2140,8 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     || !headers.response.is_empty()
                     || headers.cors.is_some()
                     || headers.rate_limit.is_some()
-                    || headers.auth.is_some())
+                    || headers.auth.is_some()
+                    || headers.mirror.is_some())
                 .then_some(headers);
                 routes.push(eqproxy_net::ResolvedRoute {
                     rule: compiled,
@@ -2107,9 +2194,30 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     .as_deref()
                     .map(|ca| read_pem(base_dir, &format!("listener.{name}.tls.client_ca"), ca))
                     .transpose()?;
-                let acceptor = tls::server_config(
+                // SNI certificates (B-I2/B-H10/B-E9): each entry carries its
+                // own chain and key; the pair above stays the default.
+                let mut sni = Vec::with_capacity(server_tls.certs.len());
+                for (index, entry) in server_tls.certs.iter().enumerate() {
+                    let cert_pem = read_pem(
+                        base_dir,
+                        &format!("listener.{name}.tls.certs[{index}].cert"),
+                        &entry.cert,
+                    )?;
+                    let key_pem = read_pem(
+                        base_dir,
+                        &format!("listener.{name}.tls.certs[{index}].key"),
+                        &entry.key,
+                    )?;
+                    sni.push(tls::SniCertPem {
+                        names: entry.names.clone(),
+                        cert_chain_pem: cert_pem,
+                        key_pem,
+                    });
+                }
+                let acceptor = tls::server_config_with_sni(
                     &cert,
                     &key,
+                    &sni,
                     client_ca.as_deref(),
                     &server_tls.alpn,
                     tls_version(server_tls.min_version),

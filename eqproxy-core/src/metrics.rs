@@ -88,6 +88,14 @@ pub struct Metrics {
     /// Map reloads that failed (unreadable or invalid file): the last
     /// good data keeps serving and this counts (C10).
     pub map_reload_failures: AtomicU64,
+    /// Mirrored copies written to the mirror backend (B-H3).
+    pub requests_mirrored: AtomicU64,
+    /// Mirror attempts that failed (connect, write or timeout): the
+    /// client response is unaffected (B-H3).
+    pub mirror_failures: AtomicU64,
+    /// Requests not mirrored because the body exceeded the mirror
+    /// budget (B-H3): never a silent truncation.
+    pub mirror_skipped: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -128,6 +136,9 @@ pub struct MetricsSnapshot {
     pub dns_address_updates: u64,
     pub map_reloads: u64,
     pub map_reload_failures: u64,
+    pub requests_mirrored: u64,
+    pub mirror_failures: u64,
+    pub mirror_skipped: u64,
 }
 
 impl Metrics {
@@ -171,6 +182,9 @@ impl Metrics {
             dns_address_updates: self.dns_address_updates.load(Ordering::Relaxed),
             map_reloads: self.map_reloads.load(Ordering::Relaxed),
             map_reload_failures: self.map_reload_failures.load(Ordering::Relaxed),
+            requests_mirrored: self.requests_mirrored.load(Ordering::Relaxed),
+            mirror_failures: self.mirror_failures.load(Ordering::Relaxed),
+            mirror_skipped: self.mirror_skipped.load(Ordering::Relaxed),
         }
     }
 
@@ -261,8 +275,12 @@ impl fmt::Display for MetricsSnapshot {
         )?;
         write!(
             f,
-            " maps[reloads={} failures={}]",
-            self.map_reloads, self.map_reload_failures
+            " maps[reloads={} failures={}] mirror[sent={} failures={} skipped={}]",
+            self.map_reloads,
+            self.map_reload_failures,
+            self.requests_mirrored,
+            self.mirror_failures,
+            self.mirror_skipped
         )
     }
 }

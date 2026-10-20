@@ -56,6 +56,9 @@ pub struct ClientTls {
 pub struct ServerTls {
     pub acceptor: TlsAcceptor,
     config: Arc<rustls::ServerConfig>,
+    /// SNI names of the additional certificates, in declaration order
+    /// (empty when the listener serves a single certificate).
+    sni_names: Vec<Vec<String>>,
 }
 
 impl ServerTls {
@@ -64,13 +67,121 @@ impl ServerTls {
     pub fn alpn(&self) -> &[Vec<u8>] {
         &self.config.alpn_protocols
     }
+
+    /// SNI names of the additional certificates (B-I2/B-H10/B-E9).
+    #[must_use]
+    pub fn sni_names(&self) -> &[Vec<String>] {
+        &self.sni_names
+    }
 }
 
 impl std::fmt::Debug for ServerTls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ServerTls")
             .field("alpn", &self.config.alpn_protocols)
+            .field("sni_names", &self.sni_names)
             .finish_non_exhaustive()
+    }
+}
+
+/// One additional certificate selected by SNI (B-I2/B-H10/B-E9).
+#[derive(Debug, Clone)]
+pub struct SniCertPem {
+    /// Names this certificate answers (exact or `*.domain`).
+    pub names: Vec<String>,
+    /// Full PEM chain, leaf first.
+    pub cert_chain_pem: Vec<u8>,
+    /// PEM private key of the leaf.
+    pub key_pem: Vec<u8>,
+}
+
+/// Parsed SNI name pattern (`*.` prefix = wildcard for one extra label).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NamePattern {
+    Exact(String),
+    Wildcard(String),
+}
+
+impl NamePattern {
+    fn parse(raw: &str) -> Result<Self, TlsError> {
+        let name = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+        if let Some(suffix) = name.strip_prefix("*.") {
+            if suffix.is_empty() || suffix.contains('*') || suffix.starts_with('.') {
+                return Err(TlsError::Config(format!(
+                    "invalid SNI name \"{raw}\": the wildcard must be the leftmost label (*.example.com)"
+                )));
+            }
+            return Ok(NamePattern::Wildcard(suffix.to_owned()));
+        }
+        if name.is_empty() || name.contains('*') {
+            return Err(TlsError::Config(format!(
+                "invalid SNI name \"{raw}\": a literal name or *.domain is required"
+            )));
+        }
+        Ok(NamePattern::Exact(name))
+    }
+
+    fn matches(&self, name: &str) -> bool {
+        match self {
+            NamePattern::Exact(want) => want == name,
+            // `*.example.com` needs exactly one extra label: `a.example.com`
+            // matches, `example.com` and `a.b.example.com` do not.
+            NamePattern::Wildcard(suffix) => name
+                .strip_suffix(suffix.as_str())
+                .and_then(|head| head.strip_suffix('.'))
+                .is_some_and(|head| !head.is_empty() && !head.contains('.')),
+        }
+    }
+}
+
+/// Certificate resolver by SNI: exact name, then the longest matching
+/// wildcard, then the listener's default certificate.
+///
+/// A name no entry claims (or a client without SNI) is **not** an error:
+/// the default certificate answers, like nginx's default server. The
+/// handshake only fails if no default exists, which the builder rejects.
+#[derive(Debug)]
+struct SniResolver {
+    entries: Vec<(Vec<NamePattern>, Arc<rustls::sign::CertifiedKey>)>,
+    default: Arc<rustls::sign::CertifiedKey>,
+}
+
+impl SniResolver {
+    /// Picks the certificate for a (lowercased, port-free) SNI name.
+    fn pick(&self, name: Option<&str>) -> Arc<rustls::sign::CertifiedKey> {
+        let Some(name) = name.map(|n| n.trim_end_matches('.').to_ascii_lowercase()) else {
+            return Arc::clone(&self.default);
+        };
+        let mut wildcard: Option<(usize, &Arc<rustls::sign::CertifiedKey>)> = None;
+        for (patterns, key) in &self.entries {
+            for pattern in patterns {
+                if !pattern.matches(&name) {
+                    continue;
+                }
+                match pattern {
+                    NamePattern::Exact(_) => return Arc::clone(key),
+                    NamePattern::Wildcard(suffix) => {
+                        let len = suffix.len();
+                        if wildcard.as_ref().is_none_or(|(best, _)| len > *best) {
+                            wildcard = Some((len, key));
+                        }
+                    }
+                }
+            }
+        }
+        match wildcard {
+            Some((_, key)) => Arc::clone(key),
+            None => Arc::clone(&self.default),
+        }
+    }
+}
+
+impl rustls::server::ResolvesServerCert for SniResolver {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.pick(client_hello.server_name()))
     }
 }
 
@@ -127,8 +238,58 @@ pub fn server_config(
     alpn: &[String],
     min: TlsVersion,
 ) -> Result<ServerTls, TlsError> {
-    let certs = parse_certs(cert_chain_pem)?;
-    let key = parse_key(key_pem)?;
+    server_config_with_sni(cert_chain_pem, key_pem, &[], client_ca_pem, alpn, min)
+}
+
+/// Builds the listener TLS acceptor with certificates selected by SNI
+/// (B-I2/B-H10/B-E9; Envoy `filter_chains`, nginx multiple
+/// `ssl_certificate`).
+///
+/// The `cert_chain_pem`/`key_pem` pair is the default certificate: it
+/// answers clients without SNI and names no [`SniCertPem`] claims. Each
+/// entry answers the names it declares (exact first, then the longest
+/// wildcard), and the handshake never fails for an unknown name — it
+/// gets the default certificate, like nginx's default server.
+#[allow(clippy::too_many_arguments)]
+pub fn server_config_with_sni(
+    cert_chain_pem: &[u8],
+    key_pem: &[u8],
+    sni: &[SniCertPem],
+    client_ca_pem: Option<&[u8]>,
+    alpn: &[String],
+    min: TlsVersion,
+) -> Result<ServerTls, TlsError> {
+    let default = certified_key(cert_chain_pem, key_pem)?;
+    let mut entries = Vec::with_capacity(sni.len());
+    let mut sni_names = Vec::with_capacity(sni.len());
+    let mut claimed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for entry in sni {
+        if entry.names.is_empty() {
+            return Err(TlsError::Config(
+                "an SNI certificate needs at least one name".to_owned(),
+            ));
+        }
+        let mut patterns = Vec::with_capacity(entry.names.len());
+        for raw in &entry.names {
+            let pattern = NamePattern::parse(raw)?;
+            let key = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+            if !claimed.insert(key.clone()) {
+                return Err(TlsError::Config(format!(
+                    "SNI name \"{key}\" is claimed by more than one certificate"
+                )));
+            }
+            patterns.push(pattern);
+        }
+        sni_names.push(entry.names.clone());
+        entries.push((
+            patterns,
+            certified_key(&entry.cert_chain_pem, &entry.key_pem)?,
+        ));
+    }
+    let resolver = Arc::new(SniResolver {
+        entries,
+        default: Arc::clone(&default),
+    }) as Arc<dyn rustls::server::ResolvesServerCert>;
     let builder = rustls::ServerConfig::builder_with_protocol_versions(protocol_versions(min));
     let mut config = if let Some(client_ca_pem) = client_ca_pem {
         // mTLS (A15): clients must present a certificate issued by this CA.
@@ -144,20 +305,29 @@ pub fn server_config(
             .map_err(|e| TlsError::Ca(format!("client CA verifier: {e}")))?;
         builder
             .with_client_cert_verifier(verifier)
-            .with_single_cert(certs, key)
-            .map_err(|e| TlsError::Config(format!("key and certificate do not match: {e}")))?
+            .with_cert_resolver(Arc::clone(&resolver))
     } else {
-        builder
-            .with_no_client_auth()
-            .with_single_cert(certs, key)
-            .map_err(|e| TlsError::Config(format!("key and certificate do not match: {e}")))?
+        builder.with_no_client_auth().with_cert_resolver(resolver)
     };
     config.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
     let config = Arc::new(config);
     Ok(ServerTls {
         acceptor: TlsAcceptor::from(Arc::clone(&config)),
         config,
+        sni_names,
     })
+}
+
+/// Parses one certificate chain + key into the signer rustls needs.
+fn certified_key(
+    cert_chain_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<Arc<rustls::sign::CertifiedKey>, TlsError> {
+    let certs = parse_certs(cert_chain_pem)?;
+    let key = parse_key(key_pem)?;
+    let signing = rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
+        .map_err(|e| TlsError::Key(format!("unsupported private key: {e}")))?;
+    Ok(Arc::new(rustls::sign::CertifiedKey::new(certs, signing)))
 }
 
 /// Builds the TLS client to backends (A12).
@@ -270,6 +440,135 @@ mod tests {
 
     const CERT: &[u8] = include_bytes!("../tests/fixtures/cert.pem");
     const KEY: &[u8] = include_bytes!("../tests/fixtures/key.pem");
+    const ALPHA: &[u8] = include_bytes!("../tests/fixtures/alpha.pem");
+    const ALPHA_KEY: &[u8] = include_bytes!("../tests/fixtures/alpha.key");
+    const BETA: &[u8] = include_bytes!("../tests/fixtures/beta.pem");
+    const BETA_KEY: &[u8] = include_bytes!("../tests/fixtures/beta.key");
+
+    /// Leaf DER of a PEM chain (what the handshake serves).
+    fn leaf(pem: &[u8]) -> Vec<u8> {
+        parse_certs(pem).expect("fixture parses")[0]
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn sni_name_patterns_follow_rfc6125_single_label_wildcards() {
+        let exact = NamePattern::parse("Shop.Example.TEST.").expect("exact");
+        assert_eq!(exact, NamePattern::Exact("shop.example.test".to_owned()));
+        assert!(exact.matches("shop.example.test"), "exact name matches");
+        assert!(
+            !exact.matches("api.example.test"),
+            "an exact name is not a prefix"
+        );
+
+        let wildcard = NamePattern::parse("*.example.test").expect("wildcard");
+        assert!(
+            wildcard.matches("a.example.test"),
+            "a wildcard matches one extra label"
+        );
+        assert!(!wildcard.matches("a.b.example.test"), "one label only");
+        assert!(!wildcard.matches("example.test"), "no bare domain");
+        assert!(
+            NamePattern::parse("*.*.example.test").is_err(),
+            "a wildcard is only the leftmost label"
+        );
+        assert!(
+            NamePattern::parse("a*b.example.test").is_err(),
+            "a wildcard inside a label is rejected"
+        );
+        assert!(NamePattern::parse("").is_err(), "an empty name is rejected");
+    }
+
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
+    #[test]
+    fn sni_resolver_prefers_exact_then_longest_wildcard_then_default() {
+        let resolver = SniResolver {
+            entries: vec![
+                (
+                    vec![NamePattern::parse("alpha.example.test").expect("alpha")],
+                    certified_key(ALPHA, ALPHA_KEY).expect("alpha key"),
+                ),
+                (
+                    vec![NamePattern::parse("*.example.test").expect("wild")],
+                    certified_key(BETA, BETA_KEY).expect("beta key"),
+                ),
+            ],
+            default: certified_key(CERT, KEY).expect("default key"),
+        };
+        let alpha = leaf(ALPHA);
+        let beta = leaf(BETA);
+        let default = leaf(CERT);
+
+        assert_eq!(
+            resolver.pick(Some("alpha.example.test")).cert[0].as_ref(),
+            alpha
+        );
+        assert_eq!(
+            resolver.pick(Some("ALPHA.example.test.")).cert[0].as_ref(),
+            alpha,
+            "names are case-insensitive and tolerate a trailing dot"
+        );
+        assert_eq!(
+            resolver.pick(Some("other.example.test")).cert[0].as_ref(),
+            beta
+        );
+        assert_eq!(
+            resolver.pick(Some("localhost")).cert[0].as_ref(),
+            default,
+            "an unclaimed name gets the default certificate"
+        );
+        assert_eq!(
+            resolver.pick(None).cert[0].as_ref(),
+            default,
+            "a client without SNI gets the default certificate"
+        );
+        assert_eq!(
+            resolver.pick(Some("deep.other.example.test")).cert[0].as_ref(),
+            default,
+            "a wildcard is one label only"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
+    #[test]
+    fn sni_configuration_rejects_duplicate_names_and_empty_entries() {
+        let dupes = vec![
+            SniCertPem {
+                names: vec!["a.example.test".to_owned()],
+                cert_chain_pem: ALPHA.to_vec(),
+                key_pem: ALPHA_KEY.to_vec(),
+            },
+            SniCertPem {
+                names: vec!["A.example.test".to_owned()],
+                cert_chain_pem: BETA.to_vec(),
+                key_pem: BETA_KEY.to_vec(),
+            },
+        ];
+        let err = server_config_with_sni(CERT, KEY, &dupes, None, &[], TlsVersion::V1_2)
+            .expect_err("duplicate SNI names must be rejected");
+        assert!(
+            err.to_string().contains("more than one certificate"),
+            "{err}"
+        );
+
+        let empty = vec![SniCertPem {
+            names: Vec::new(),
+            cert_chain_pem: ALPHA.to_vec(),
+            key_pem: ALPHA_KEY.to_vec(),
+        }];
+        let err = server_config_with_sni(CERT, KEY, &empty, None, &[], TlsVersion::V1_2)
+            .expect_err("an SNI entry without names must be rejected");
+        assert!(err.to_string().contains("at least one name"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
+    #[test]
+    fn sni_configuration_keeps_the_default_when_no_entries() {
+        let server = server_config_with_sni(CERT, KEY, &[], None, &[], TlsVersion::V1_2)
+            .expect("default only");
+        assert!(server.sni_names().is_empty());
+    }
 
     #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
     #[test]

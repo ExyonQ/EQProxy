@@ -150,6 +150,26 @@ fn example_for(field_path: &str, cause: &str) -> String {
     }
 }
 
+/// Public JSON Schema of the configuration (Q1/CE1), generated **from the
+/// same Rust types** the parser deserializes — it cannot drift from the
+/// accepted format the way a hand-written schema would.
+///
+/// Editors use it for completion and inline validation of `eqproxy.toml`
+/// (Taplo/Even Better TOML: a `#:schema ./eqproxy.schema.json` first line,
+/// or pointing the editor at the file). `deny_unknown_fields` is reflected
+/// as `additionalProperties: false`, so a typo is flagged before the gate
+/// rejects it.
+pub fn json_schema() -> Result<String, serde_json::Error> {
+    let schema = schemars::schema_for!(Config);
+    // Reported, never swallowed: a rendering failure would otherwise print
+    // an empty schema as if it were the real one.
+    serde_json::to_string_pretty(&schema)
+}
+
+/// Repository copy of [`json_schema`], byte-for-byte (the test in this
+/// crate is the drift gate: generating a different schema fails it).
+pub const SCHEMA_FILE: &str = include_str!("../../eqproxy.schema.json");
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -8,10 +8,13 @@ health checks and passive failure detection, safe connect-phase retries,
 bounded backend queues, incoming PROXY protocol v1 with origin allowlists,
 forwarded headers, and hot config + certificate reload under traffic.
 
-The image is small: `debian:bookworm-slim` with CA certificates and one
-static-ish binary at `/opt/eqproxy`. It runs as the unprivileged `nobody`
-user. It listens wherever the configuration says (the convention in the
-examples is port 8080).
+The image is tiny and has no OS: a statically linked (musl) binary at
+`/opt/eqproxy`, a CA bundle for operators that use the system trust store,
+and nothing else — `scratch` as the base, so no shell, no package manager
+and no distribution packages at all (15.8 MB, 0 packages reported by Docker
+Scout, `0C 0H 0M 0L`). It runs as the unprivileged user `65532:65532`. It
+listens wherever the configuration says (the convention in the examples is
+port 8080).
 
 ## Quick reference
 
@@ -19,16 +22,16 @@ examples is port 8080).
 - **Where to get help:** [GitHub issues](https://github.com/ExyonQ/EQProxy/issues) or contact@exyonq.org
 - **Security:** security@exyonq.org
 - **Supported architectures:** `linux/amd64`, `linux/arm64`
-- **Source of this image:** https://github.com/ExyonQ/EQProxy/blob/v0.5.0/docker/Dockerfile
-- **Release:** https://github.com/ExyonQ/EQProxy/releases/tag/v0.5.0
+- **Source of this image:** https://github.com/ExyonQ/EQProxy/blob/v0.6.1/docker/Dockerfile
+- **Release:** https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.1
 
 ## Supported tags
 
-- `0.5.0` — the released version (pinned).
+- `0.6.1` — the released version (pinned).
 - `latest` — the same image as the newest release.
 
 ```bash
-docker pull exyonq/eqproxy:0.5.0
+docker pull exyonq/eqproxy:0.6.1
 ```
 
 The same images are published on GitHub Container Registry as
@@ -43,7 +46,7 @@ CLI. Without arguments it prints `--help`.
 
 ```bash
 docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.5.0 config validate --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:0.6.1 config validate --config /etc/eqproxy/eqproxy.toml
 ```
 
 ### Run the proxy
@@ -65,7 +68,7 @@ server = "api:9000"
 ```bash
 docker run --name eqproxy -d -p 8080:8080 \
   -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.5.0 run --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:0.6.1 run --config /etc/eqproxy/eqproxy.toml
 ```
 
 Traffic to `localhost:8080` is proxied to `api:9000` — put the backend in
@@ -77,11 +80,11 @@ The mounted file must be readable by uid `nobody` (65534).
 ```bash
 # What each timeout does when it fires, per phase:
 docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.5.0 config explain --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:0.6.1 config explain --config /etc/eqproxy/eqproxy.toml
 
 # Pre-flight checks (bind probe, config gate):
 docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.5.0 doctor --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:0.6.1 doctor --config /etc/eqproxy/eqproxy.toml
 
 # Hot reload under traffic (the container forwards signals):
 docker kill --signal=HUP eqproxy
@@ -89,20 +92,21 @@ docker kill --signal=HUP eqproxy
 
 ## What is in the image
 
-- `/opt/eqproxy` — the binary (CLI `eqproxy run|config|doctor`)
+- `/opt/eqproxy` — the binary (CLI `eqproxy run|config|doctor`), statically
+  linked against musl
 - CA certificates at `/etc/ssl/certs/ca-certificates.crt`
-- No shell tooling beyond `debian:bookworm-slim`; no configuration is
-  baked in — mount yours (see above).
+- Nothing else: no shell, no package manager, no distribution packages. No
+  configuration is baked in — mount yours (see above).
 
 ## Documentation
 
 - [README](https://github.com/ExyonQ/EQProxy#readme) — status, install, quick start
-- [SPEC.md](https://github.com/ExyonQ/EQProxy/blob/v0.5.0/SPEC.md) — specified behaviour
-- [eqproxy.toml.example](https://github.com/ExyonQ/EQProxy/blob/v0.5.0/eqproxy.toml.example) — every option documented
-- [THREAT_MODEL.md](https://github.com/ExyonQ/EQProxy/blob/v0.5.0/THREAT_MODEL.md) — threat model and non-protections
+- [SPEC.md](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/SPEC.md) — specified behaviour
+- [eqproxy.toml.example](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/eqproxy.toml.example) — every option documented
+- [THREAT_MODEL.md](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/THREAT_MODEL.md) — threat model and non-protections
 
 ## License
 
 Dual: MIT OR Apache-2.0, at the recipient's choice.
 
-https://github.com/ExyonQ/EQProxy/blob/v0.5.0/LICENSE-MIT
+https://github.com/ExyonQ/EQProxy/blob/v0.6.1/LICENSE-MIT

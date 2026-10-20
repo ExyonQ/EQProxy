@@ -332,6 +332,47 @@ impl RateLimiter {
     }
 }
 
+/// Mirror policy of a matched rule (B-H3; Envoy
+/// `request_mirror_policies`): a copy of the request goes to another
+/// backend, fire-and-forget — its response never reaches the client and
+/// a mirror failure never changes the client's answer.
+#[derive(Debug)]
+pub struct MirrorPolicy {
+    /// Backend that receives the copy.
+    pub backend: Arc<ResolvedBackend>,
+    /// Percentage of the matching requests (1..=100).
+    pub percentage: u32,
+    /// Sampling position. Deterministic: every block of 100 requests
+    /// mirrors exactly `percentage` of them (tests and operations are
+    /// reproducible; Envoy samples randomly — documented difference).
+    counter: AtomicU64,
+}
+
+impl MirrorPolicy {
+    /// Builds the policy for a backend and a percentage (1..=100).
+    #[must_use]
+    pub fn new(backend: Arc<ResolvedBackend>, percentage: u32) -> Self {
+        Self {
+            backend,
+            percentage,
+            counter: AtomicU64::new(0),
+        }
+    }
+
+    /// `true` when this request must be mirrored.
+    #[must_use]
+    pub fn sample(&self) -> bool {
+        let position = self.counter.fetch_add(1, Ordering::Relaxed);
+        (position % 100) < u64::from(self.percentage)
+    }
+
+    /// One-line summary for `config explain`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!("mirror {}% -> {}", self.percentage, self.backend.name)
+    }
+}
+
 /// Header actions of a matched rule (B-N4/B-I4/B-E17): request-side
 /// `set`/`add`/`del` plus `response` additions. Values are templates
 /// (`$remote_addr`, `$host`, `$scheme`), rendered per request.
@@ -351,6 +392,8 @@ pub struct ResolvedHeaders {
     pub rate_limit: Option<Arc<RateLimiter>>,
     /// Authentication of the rule (B-N9/B-I9), whatever the action.
     pub auth: Option<ResolvedAuth>,
+    /// Mirror policy of the rule (B-H3), forwarding actions only.
+    pub mirror: Option<Arc<MirrorPolicy>>,
 }
 
 impl<'a> RouteDecision<'a> {
@@ -365,6 +408,17 @@ impl<'a> RouteDecision<'a> {
         }
     }
 
+    /// The matched rule's mirror policy (B-H3), when it has one.
+    pub fn mirror(&self) -> Option<&Arc<MirrorPolicy>> {
+        match self {
+            RouteDecision::Proxy { headers, .. }
+            | RouteDecision::Redirect { headers, .. }
+            | RouteDecision::Direct { headers, .. } => {
+                headers.and_then(|actions| actions.mirror.as_ref())
+            }
+        }
+    }
+
     /// The matched rule's authentication gate (B-N9), whatever the action.
     pub fn auth(&self) -> Option<&ResolvedAuth> {
         match self {
@@ -373,6 +427,95 @@ impl<'a> RouteDecision<'a> {
             | RouteDecision::Direct { headers, .. } => {
                 headers.as_ref().and_then(|actions| actions.auth.as_ref())
             }
+        }
+    }
+}
+
+/// Request key of a hash policy (B-H3; Envoy `hash_policy` keys).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HashKey {
+    /// Client IP (`connection_properties.source_ip`).
+    Source,
+    /// Request path, query excluded.
+    Path,
+    /// Host header, lowercased and port-free.
+    Host,
+    /// Cookie value by name (RFC 6265 parsing).
+    Cookie(String),
+    /// First value of a request header by name.
+    Header(String),
+}
+
+/// Hash policy of a split (B-H3; Envoy `hash_policy` + `RING_HASH`): the
+/// target is chosen by a hash of the request key instead of the weighted
+/// rotation, so the same key keeps its target while targets come and go.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashPolicy {
+    /// Key extracted from the request.
+    pub key: HashKey,
+}
+
+impl HashPolicy {
+    /// Parses a `hash_policy.key` string (B-H3): `source`, `path`, `host`,
+    /// `cookie:NAME` or `header:NAME`. The config gate validates the
+    /// same grammar (`eqproxy-config`), so a failure here means the two
+    /// halves disagree — an error, never a silent fallback.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let key = raw.trim();
+        let kind = match key {
+            "source" => HashKey::Source,
+            "path" => HashKey::Path,
+            "host" => HashKey::Host,
+            _ => match key.split_once(':') {
+                Some((kind, name)) if kind == "cookie" || kind == "header" => {
+                    let name = name.trim();
+                    if name.is_empty() {
+                        return Err(format!("{kind}: needs a name after the colon"));
+                    }
+                    if kind == "cookie" {
+                        HashKey::Cookie(name.to_owned())
+                    } else {
+                        HashKey::Header(name.to_owned())
+                    }
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown key {key:?}: expected source, path, host, cookie:NAME or header:NAME"
+                    ));
+                }
+            },
+        };
+        Ok(Self { key: kind })
+    }
+
+    /// The key of this request; `None` when the request does not carry it
+    /// (absent cookie/header) — the caller falls back to the rotation.
+    #[must_use]
+    pub fn key_for(&self, facts: &eqproxy_core::rules::RequestFacts<'_>) -> Option<String> {
+        match &self.key {
+            HashKey::Source => Some(facts.peer.to_string()),
+            HashKey::Path => Some(facts.path.to_owned()),
+            HashKey::Host => Some(eqproxy_core::rules::host_key(facts.host)),
+            HashKey::Cookie(name) => {
+                eqproxy_core::rules::cookie_value(facts.headers, name).map(str::to_owned)
+            }
+            HashKey::Header(name) => facts
+                .headers
+                .iter()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.clone()),
+        }
+    }
+
+    /// One-line summary for `config explain`.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match &self.key {
+            HashKey::Source => "hash source".to_owned(),
+            HashKey::Path => "hash path".to_owned(),
+            HashKey::Host => "hash host".to_owned(),
+            HashKey::Cookie(name) => format!("hash cookie:{name}"),
+            HashKey::Header(name) => format!("hash header:{name}"),
         }
     }
 }
@@ -434,11 +577,88 @@ impl SplitTargets {
         &self.targets[chosen].backend
     }
 
+    /// Picks the backend for one request **by key** (B-H3, Envoy
+    /// `hash_policy`): weighted rendezvous hashing (HRW) over the active
+    /// targets.
+    ///
+    /// Properties (documented, pinned by tests): deterministic (the same
+    /// key always lands on the same target while the set is unchanged),
+    /// weighted (`weight` sets the share of keys), and consistent
+    /// (removing or disabling one target only remaps the keys it owned —
+    /// the other keys keep their target). No state: nothing to reset.
+    ///
+    /// `None` when no target is active; the caller falls back to the plain
+    /// rotation (the config gate rejects an all-zero split anyway, so this
+    /// is the panic-free shape of an impossible state, never an index).
+    #[must_use]
+    pub fn pick_hashed(&self, key: &str) -> Option<&Arc<ResolvedBackend>> {
+        let mut best: Option<(f64, &Arc<ResolvedBackend>)> = None;
+        for target in &self.targets {
+            if target.weight == 0 {
+                continue;
+            }
+            // FNV-1a alone leaves too much of the top 53 bits untouched by
+            // short keys that differ only in their last characters, so the
+            // 64-bit result is passed through the splitmix64 finalizer
+            // before taking bits: without it every key of a run landed on
+            // the same target (caught by the distribution test).
+            let hash = mix64(fnv1a(&target.backend.name, key));
+            // 53 random-ish bits → (0, 1); weighted rendezvous score
+            // `weight / -ln(u)` keeps the share proportional to weight.
+            let u = ((hash >> 11) as f64 + 0.5) / (1_u64 << 53) as f64;
+            // `u` is at least 2^-53, so `-ln(u)` is at least ~36 and the
+            // division can never be zero: the guard is the explicit proof
+            // of that, not a behavioural change.
+            let spread = -u.ln();
+            // `u` is finite and positive, so the spread is finite and
+            // positive too; anything else (NaN) skips the target instead of
+            // poisoning the comparison.
+            if spread.is_nan() || spread <= 0.0 {
+                continue;
+            }
+            let score = f64::from(target.weight) / spread;
+            if best.as_ref().is_none_or(|(best, _)| score > *best) {
+                best = Some((score, &target.backend));
+            }
+        }
+        best.map(|(_, backend)| backend)
+    }
+
     /// The configured targets (explain and `all_backends`).
     #[must_use]
     pub fn targets(&self) -> &[SplitTarget] {
         &self.targets
     }
+}
+
+/// splitmix64 finalizer: full avalanche of a 64-bit value (the cheap
+/// mixing step of the same-named PRNG).
+const fn mix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
+/// FNV-1a over `(target, key)`: stable across processes and runs (a
+/// sticky key must survive restarts), cheap, and independent of the
+/// Rust std hasher's per-process seed. Not cryptographic: keys are never
+/// adversarial input for a hash-flooding attack here (one target list of
+/// bounded size) — a hostile client could still aim a key at a target,
+/// exactly like Envoy's ring hash; the gate is the key being the client's
+/// own data.
+fn fnv1a(target: &str, key: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in target
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .chain(key.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 /// Action of a matched routing rule (v0.6 slice 2): route to a backend
@@ -451,10 +671,12 @@ pub enum RouteAction {
         backend: Arc<ResolvedBackend>,
         rewrite: Option<ResolvedRewrite>,
     },
-    /// Proxy to the weighted target the split picks this request (B-I11).
+    /// Proxy to the weighted target the split picks this request (B-I11);
+    /// with a hash policy the pick is keyed instead of rotated (B-H3).
     Split {
         targets: Arc<SplitTargets>,
         rewrite: Option<ResolvedRewrite>,
+        hash: Option<HashPolicy>,
     },
     /// Answer locally: 3xx + `Location` (template rendered per request).
     Redirect { status: u16, location: String },
@@ -620,11 +842,25 @@ impl ResolvedListener {
                             rewrite: rewrite.as_ref(),
                             headers,
                         },
-                        RouteAction::Split { targets, rewrite } => RouteDecision::Proxy {
-                            backend: targets.pick(),
-                            rewrite: rewrite.as_ref(),
-                            headers,
-                        },
+                        RouteAction::Split {
+                            targets,
+                            rewrite,
+                            hash,
+                        } => {
+                            // B-H3: with a hash policy the target follows
+                            // the request key; a request without the key
+                            // falls back to the weighted rotation.
+                            let backend = hash
+                                .as_ref()
+                                .and_then(|policy| policy.key_for(facts))
+                                .and_then(|key| targets.pick_hashed(&key))
+                                .unwrap_or_else(|| targets.pick());
+                            RouteDecision::Proxy {
+                                backend,
+                                rewrite: rewrite.as_ref(),
+                                headers,
+                            }
+                        }
                         RouteAction::Redirect { status, location } => RouteDecision::Redirect {
                             status: *status,
                             location,
@@ -1437,7 +1673,17 @@ async fn dial_with_retries<'a>(
         }
 
         // --- Dial the chosen server ---
-        match connect_backend_to(cfg, backend, addr, peer, local, metrics).await {
+        match connect_backend_to(
+            &cfg.name,
+            cfg.connect_timeout,
+            backend,
+            addr,
+            peer,
+            local,
+            metrics,
+        )
+        .await
+        {
             Ok((read, write)) => {
                 metrics
                     .backend_connections_opened
@@ -1543,29 +1789,26 @@ pub async fn checkout_or_connect<'a>(
 ///
 /// The PROXY v1 header (A9) is written once per connection: pool-reused
 /// connections already carry it from their first use.
-async fn connect_backend_to(
-    cfg: &ResolvedListener,
+pub(crate) async fn connect_backend_to(
+    name: &str,
+    connect_timeout: Duration,
     backend: &ResolvedBackend,
     addr: SocketAddr,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
 ) -> Result<(BoxRead, BoxWrite), OutboundError> {
-    let socket = match tokio::time::timeout(cfg.connect_timeout, TcpStream::connect(addr)).await {
+    let socket = match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-            eprintln!(
-                "ERROR [{}] could not connect to {} (peer {peer}): {err}",
-                cfg.name, addr
-            );
+            eprintln!("ERROR [{name}] could not connect to {addr} (peer {peer}): {err}");
             return Err(OutboundError::Connect);
         }
         Err(_elapsed) => {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             eprintln!(
-                "ERROR [{}] connect timeout to {} (peer {peer}) after {:?}",
-                cfg.name, addr, cfg.connect_timeout
+                "ERROR [{name}] connect timeout to {addr} (peer {peer}) after {connect_timeout:?}"
             );
             return Err(OutboundError::Connect);
         }
@@ -1573,10 +1816,10 @@ async fn connect_backend_to(
     let _ = socket.set_nodelay(true);
 
     if let Some(client_tls) = &backend.tls {
-        let name = tls::server_name_for(client_tls, addr);
+        let server_name = tls::server_name_for(client_tls, addr);
         let handshake = tokio::time::timeout(
-            cfg.connect_timeout,
-            client_tls.connector.connect(name, socket),
+            connect_timeout,
+            client_tls.connector.connect(server_name, socket),
         );
         let mut stream = match handshake.await {
             Ok(Ok(stream)) => stream,
@@ -1584,10 +1827,8 @@ async fn connect_backend_to(
                 metrics
                     .tls_handshake_failures
                     .fetch_add(1, Ordering::Relaxed);
-                eprintln!(
-                    "ERROR [{}] failed TLS handshake to {} (peer {peer}): {err}",
-                    cfg.name, addr
-                );
+                eprintln!("ERROR [{name}] failed TLS handshake to {addr} (peer {peer}): {err}");
+
                 return Err(OutboundError::Connect);
             }
             Err(_elapsed) => {
@@ -1595,8 +1836,7 @@ async fn connect_backend_to(
                     .tls_handshake_failures
                     .fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "ERROR [{}] TLS handshake timeout to {} (peer {peer}) after {:?}",
-                    cfg.name, addr, cfg.connect_timeout
+                    "ERROR [{name}] TLS handshake timeout to {addr} (peer {peer}) after {connect_timeout:?}"
                 );
                 return Err(OutboundError::Connect);
             }
@@ -1963,6 +2203,90 @@ mod tests {
         // Smooth WRR: the minority target lands inside the window, not
         // in a burst at the end of it (nginx's algorithm).
         assert_eq!(order, ["a", "a", "b", "a"], "order: {order:?}");
+    }
+
+    // --- B-H3: hash policy keys and weighted rendezvous selection ---
+
+    #[test]
+    fn hash_policy_parses_the_documented_keys_and_rejects_the_rest() {
+        for (raw, expected) in [
+            ("source", HashKey::Source),
+            ("path", HashKey::Path),
+            ("  host  ", HashKey::Host),
+            ("cookie:session", HashKey::Cookie("session".to_owned())),
+            ("header:X-User", HashKey::Header("X-User".to_owned())),
+        ] {
+            assert_eq!(
+                HashPolicy::parse(raw).expect("parses").key,
+                expected,
+                "{raw:?}"
+            );
+        }
+        for raw in ["iphash", "cookie:", "header:", "cookie", ""] {
+            assert!(
+                HashPolicy::parse(raw).is_err(),
+                "{raw:?} must be rejected, not silently ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn hashed_pick_is_sticky_weighted_and_consistent_under_removal() {
+        let three = split(&[("a", 1), ("b", 1), ("c", 1)]);
+        let mut mapping = std::collections::BTreeMap::new();
+        for i in 0..300 {
+            let key = format!("key-{i}");
+            let first = three
+                .pick_hashed(&key)
+                .expect("an active target")
+                .name
+                .clone();
+            // Deterministic: the same key always lands on the same target.
+            for _ in 0..3 {
+                assert_eq!(
+                    three.pick_hashed(&key).expect("an active target").name,
+                    first,
+                    "key {key}"
+                );
+            }
+            mapping.insert(key, first);
+        }
+        let mut counts = std::collections::BTreeMap::new();
+        for name in mapping.values() {
+            *counts.entry(name.clone()).or_insert(0usize) += 1;
+        }
+        for name in ["a", "b", "c"] {
+            let share = counts.get(name).copied().unwrap_or(0);
+            assert!(
+                (60..140).contains(&share),
+                "equal weights must give each target ~100 of 300 keys: {counts:?}"
+            );
+        }
+
+        // Consistent removal: dropping one target only moves its keys.
+        let two = split(&[("a", 1), ("b", 1)]);
+        for (key, was) in &mapping {
+            let now = two.pick_hashed(key).expect("an active target").name.clone();
+            if was != "c" {
+                assert_eq!(&now, was, "key {key} moved although its target stayed");
+            }
+        }
+
+        // Weights set the share of keys, not the identity of a key.
+        let weighted = split(&[("a", 9), ("b", 1)]);
+        let a_share = (0..300)
+            .filter(|i| {
+                weighted
+                    .pick_hashed(&format!("key-{i}"))
+                    .expect("an active target")
+                    .name
+                    == "a"
+            })
+            .count();
+        assert!(
+            (200..300).contains(&a_share),
+            "9:1 must send most keys to `a` but not all, got {a_share} of 300"
+        );
     }
 
     #[test]

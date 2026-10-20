@@ -3,6 +3,114 @@
 Language: **English**. Format follows "Keep a Changelog" (Added / Changed /
 Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
+## [Unreleased]
+
+Nothing yet.
+
+## [v0.6.1] — 2026-10-20
+
+«Rules, routing and traffic», patch release. It closes every scope box that
+v0.6.0 had postponed by owner decision: multi-certificate TLS per SNI, the
+two Envoy rule actions (`hash_policy` and `request_mirror`), the native
+filter equivalence table (B-E4) and the public JSON Schema with editor
+autocompletion (Q1/CE1, which also completes CE8). The v0.6 roadmap now
+reads 32/32 scope boxes and 6/6 version-gate criteria. No behaviour of an
+existing deployment changes: every addition is opt-in and every new key is
+rejected by the config gate when malformed.
+
+### Added
+
+- Multi-certificate TLS per SNI (B-I2/B-H10/B-E9; Envoy `filter_chains` per
+  SNI, nginx multiple `ssl_certificate`): `[[listener.*.tls.certs]]` entries
+  add `cert`/`key`/`names` to a listener. The `cert`/`key` pair of
+  `[listener.*.tls]` stays the **default** certificate — it answers clients
+  without SNI and names no entry claims, like nginx's default server — and
+  each entry answers the names it declares: exact names first, then the
+  longest wildcard, with `*.example.com` covering exactly one extra label
+  (RFC 6125). Names are case-insensitive and tolerate a trailing dot; the
+  config gate rejects an empty `names` list, a name claimed by two
+  certificates, malformed labels, a wildcard that is not the leftmost label
+  and IP literals (a TLS client never sends an IP as SNI, RFC 6066) — each
+  error naming the field, the cause and a valid example. `config explain`
+  lists the names of each listener (`sni=[…]`). The hot certificate reload
+  path rebuilds the resolver, so the SNI set swaps in hot (verified: the
+  same name answers with the previous certificate, then with the reloaded
+  one, on the same listener). Verified end to end: unit tests for the name
+  grammar and the resolver preference order, a dataplane E2E with real
+  handshakes that records the presented leaf per SNI (exact, wildcard,
+  two-label miss, unknown name, no SNI, case-insensitivity) and the real
+  binary driven by
+  `openssl s_client -servername … -showcerts` for both names plus the
+  default fallbacks, with traffic through the SNI tunnel.
+- Envoy rule actions `hash_policy` and `request_mirror` (B-H3), the last two
+  pieces of the rule engine. `hash_policy = { key = "source" | "path" |
+  "host" | "cookie:NAME" | "header:NAME" }` makes a `split` pick its target
+  by **weighted rendezvous hashing** instead of the rotation: the same key
+  keeps its target across requests and connections, the weight sets each
+  target's share of keys, and removing a target only remaps the keys it
+  owned (no state, no ring to rebuild); a request without the key falls back
+  to the smooth weighted rotation. `request_mirror = { backend,
+  percentage = 1..=100 }` sends a **copy** of the matching request to a
+  shadow backend on a detached task — the client keeps the primary answer,
+  a mirror that is down or slow changes nothing (`requests_mirrored`,
+  `mirror_failures`, `mirror_skipped` in METRICS), the copy carries the
+  same forwarded head (and body, up to a 256 KiB budget — larger is not
+  mirrored and counted, never truncated). The config gate names field,
+  cause and fix for a hash policy without a split, with fewer than two live
+  targets or with an unknown key, and for a mirror to a missing backend,
+  with a percentage outside 1..=100 or on a local action. `config explain`
+  shows `(hash cookie:session …)` and `mirror 100% -> shadow`. Verified end
+  to end: stickiness, spread and consistency under target removal, a real
+  copy observed on the shadow socket, a dead shadow backend without client
+  impact, and the same through the real binary.
+- Public JSON Schema of the configuration (Q1/CE1): `eqproxy config schema
+  [--output FILE]` prints or writes a draft 2020-12 schema generated from
+  the same Rust types the parser deserializes (so it cannot drift from the
+  accepted format), published as
+  [`eqproxy.schema.json`](eqproxy.schema.json). `eqproxy.toml.example`
+  starts with the `#:schema ./eqproxy.schema.json` directive, which gives
+  Taplo/Even Better TOML users completion and inline validation — including
+  `additionalProperties: false` (from `deny_unknown_fields`), so a typo is
+  flagged before `config validate` rejects it. Three gates keep it honest:
+  the generated schema must match the repository file byte for byte, the
+  documented example must satisfy it (and the real gate), and a typo plus a
+  numeric duration must be rejected by it.
+- Filter equivalence table (B-E4) in [docs/equivalences.md](docs/equivalences.md):
+  CORS, `ext_authz` and `rate_limit` mapped from Envoy, nginx, HAProxy and
+  ingress-nginx to EQProxy, with the semantics that differ stated explicitly
+  (fail-closed auth without `failure_mode_allow`, a per-instance token
+  bucket, HTTP-only `ext_authz`) and what still needs WASM.
+
+### Changed
+
+- Container image runtime: `scratch` with a **static musl** binary instead of
+  `debian:bookworm-slim`. Docker Scout scanned the previous image with 4
+  critical + 13 high findings, every one of them in packages inherited from
+  the Debian base (perl, util-linux, openssl, zlib) and none in EQProxy; the
+  fix removes that surface rather than patching it: the image now carries
+  **0 packages** (binary + `/etc/ssl/certs/ca-certificates.crt` only, 15.8 MB
+  locally vs 164 MB), reports `0C 0H 0M 0L` and passes the non-root and
+  copyleft policies. The builder stage fails if the binary stops being
+  statically linked, and it now copies `eqproxy.schema.json` before compiling
+  (`eqproxy-config` embeds it with `include_str!`, so the image build was
+  broken by the Q1/CE1 increment and this fixes it).
+- Release pipeline: the image is scanned with Docker Scout (`critical,high`,
+  `--exit-code`) **before** the push, builds use `--pull` so the recorded
+  base digest is current, and the pushed manifest carries provenance
+  (`mode=max`) plus an SPDX SBOM.
+
+### Verification (this release)
+
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings` (0 warnings) and `cargo test --workspace` green: 23 suites,
+  327 passed, 0 failed, 2 ignored (the two Docker-gated harnesses, last
+  measured 23/23 differential and 65/65 migration on the v0.6.0 tree; this
+  patch does not touch those paths).
+- `veyra audit . --profile standard`: ACCEPTED, plus the Rust Audit static
+  scan and an EvoForge `mcp_submit_eval` on a real slice.
+- Image scanned with Docker Scout **before** publishing (see the image
+  section of the release evidence).
+
 ## [v0.6.0] — 2026-10-20
 
 «Rules, routing and traffic» (Phase 4), complete: requests are routed by

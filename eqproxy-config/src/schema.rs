@@ -122,7 +122,7 @@ pub const MIN_MAP_RELOAD_INTERVAL: Duration = Duration::from_millis(250);
 pub const MAX_MAP_RELOAD_INTERVAL: Duration = Duration::from_secs(3_600);
 
 /// Proxy mode of a listener (A1 `tcp`, A2 `http`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ListenerMode {
     /// TCP tunnel without interpretation (Phase 1).
@@ -133,7 +133,7 @@ pub enum ListenerMode {
 }
 
 /// Balancing algorithm (B1/B7 `roundrobin`; B-H5/B-N12/B-E6 `leastconn`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum BalanceAlgorithm {
     /// Smooth weighted round-robin (B1 + B7).
@@ -147,7 +147,7 @@ pub enum BalanceAlgorithm {
 }
 
 /// PROXY protocol send to the backend (A9; reception in Phase 3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ProxyProtocolMode {
     /// No PROXY header (default).
@@ -160,7 +160,7 @@ pub enum ProxyProtocolMode {
 }
 
 /// Minimum accepted TLS version (A11/A12).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 pub enum TlsVersion {
     /// TLS 1.2 (default; TLS 1.0/1.1 are never accepted).
     #[default]
@@ -171,14 +171,36 @@ pub enum TlsVersion {
     V1_3,
 }
 
+/// One SNI certificate of a listener (B-I2/B-H10/B-E9; Envoy
+/// `filter_chains` per SNI, nginx multiple `ssl_certificate`): the
+/// listener serves it for the names it declares and the default
+/// certificate for everything else.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SniCertConfig {
+    /// Path to the PEM certificate chain (leaf first).
+    pub cert: String,
+    /// Path to the PEM private key of the leaf (PKCS#8, PKCS#1 or SEC1).
+    pub key: String,
+    /// SNI names answered by this certificate: exact DNS names or a
+    /// wildcard `*.domain` (one extra label; `*.a.example` does not
+    /// match `x.y.a.example`). Case-insensitive.
+    pub names: Vec<String>,
+}
+
 /// TLS termination at the listener (A11): certificate, key and ALPN.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TlsServerConfig {
     /// Path to the PEM certificate chain (leaf first).
     pub cert: String,
     /// Path to the PEM private key (PKCS#8, PKCS#1 or SEC1).
     pub key: String,
+    /// Additional certificates selected by SNI (B-I2/B-H10/B-E9). The
+    /// `cert`/`key` pair above stays the default: it answers clients
+    /// without SNI and names no entry claims.
+    #[serde(default)]
+    pub certs: Vec<SniCertConfig>,
     /// Offered ALPN protocols (e.g. `["http/1.1"]`); empty = no ALPN.
     #[serde(default)]
     pub alpn: Vec<String>,
@@ -191,7 +213,7 @@ pub struct TlsServerConfig {
 }
 
 /// TLS to the backend (A12): verification on by default.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TlsClientConfig {
     /// Server certificate and name verification (default `true`).
@@ -261,7 +283,7 @@ pub fn parse_server_target(raw: &str) -> Result<ServerTarget, String> {
 }
 
 /// One backend server with its weight (B7).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     /// Server `IP:PORT` or `HOSTNAME:PORT` address (B-H13/B-N18/B-E15:
@@ -275,14 +297,16 @@ pub struct ServerConfig {
 
 /// Active TCP health check (B11 TCP): `fall` consecutive failures drop the
 /// server, `rise` consecutive successes raise it.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     /// Interval between check cycles.
     #[serde(default = "default_health_interval", with = "duration")]
+    #[schemars(with = "String")]
     pub interval: Duration,
     /// Timeout of each TCP connection attempt.
     #[serde(default = "default_health_timeout", with = "duration")]
+    #[schemars(with = "String")]
     pub timeout: Duration,
     /// Consecutive failures to mark a server down.
     #[serde(default = "default_fall")]
@@ -315,7 +339,7 @@ pub struct HealthCheckConfig {
 }
 
 /// Health check type (`"type"` key of `[backend.*.health_check]`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthCheckKind {
     /// TCP connect only (B11; default).
@@ -326,7 +350,7 @@ pub enum HealthCheckKind {
 }
 
 /// HTTP health-check request method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum HealthCheckMethod {
     #[default]
@@ -335,7 +359,7 @@ pub enum HealthCheckMethod {
 }
 
 /// `X-Forwarded-For` / `X-Real-IP` handling (B-N4 first step).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum ForwardedHeaders {
     /// No forwarded headers (default; explicit opt-in).
@@ -348,7 +372,7 @@ pub enum ForwardedHeaders {
 }
 
 /// Custom local response when no server is available (C9 minimal).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LocalResponseConfig {
     /// Status code (400-599).
@@ -363,7 +387,7 @@ pub struct LocalResponseConfig {
 
 /// Metrics options (D1): cardinality stays bounded; detailed per-server
 /// counters are opt-in (CE4).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Per-server counters (bounded by [`MAX_SECTIONS`]).
@@ -373,7 +397,7 @@ pub struct MetricsConfig {
 
 /// One header condition of a routing rule (exactly one of `exact`,
 /// `regex` or `present = true`; v0.6, B-H3/B-N3).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderConditionConfig {
     /// Header name (case-insensitive).
@@ -390,7 +414,7 @@ pub struct HeaderConditionConfig {
 /// CORS policy of a matched rule (B-I10; ingress-nginx `cors-*`):
 /// preflight `OPTIONS` is answered locally and every response of the
 /// rule carries the CORS headers.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CorsConfig {
     /// Exact allowed origin (`Access-Control-Allow-Origin`). `"*"` is
@@ -404,6 +428,7 @@ pub struct CorsConfig {
     pub expose_headers: Option<String>,
     /// Preflight cache time (`Access-Control-Max-Age`; `"0s"` omits it).
     #[serde(default, with = "duration")]
+    #[schemars(with = "String")]
     pub max_age: Duration,
     /// `Access-Control-Allow-Credentials: true`.
     #[serde(default)]
@@ -413,13 +438,14 @@ pub struct CorsConfig {
 /// Token-bucket rate limit of a rule (B-N8/B-I7/B-E16; nginx `limit_req`,
 /// ingress `limit-rps`/`limit-rpm`, Envoy `local_ratelimit`): per client
 /// IP, in-memory — no network in the hot path (Q6).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RateLimitConfig {
     /// Tokens added per `per` window (>= 1).
     pub rate: u32,
     /// Window for `rate` (default `"1s"`); `"60s"` expresses rpm.
     #[serde(default = "one_second", with = "duration")]
+    #[schemars(with = "String")]
     pub per: Duration,
     /// Bucket capacity (default = `rate`); a request over the limit gets
     /// an explicit 429, never a silent drop.
@@ -436,7 +462,7 @@ fn default_map_reload() -> Duration {
 
 /// Authentication type (`"type"` key of `[listener.*.rules.auth]`,
 /// ingress-nginx `auth-type`): `"basic"` only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthType {
     /// HTTP Basic against htpasswd-format users (ingress `auth-secret`).
@@ -447,7 +473,7 @@ pub enum AuthType {
 /// `auth_request`, ingress-nginx `auth-type`/`auth-url`): HTTP Basic
 /// against htpasswd-format users and/or an external auth subrequest.
 /// Both run when both are set: Basic first (local), then `url`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AuthConfig {
     /// External auth subrequest (ingress `auth-url`, nginx
@@ -466,7 +492,7 @@ pub struct AuthConfig {
 }
 
 /// One header action (B-N4/B-I4/B-E17): name + value template.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HeaderOpConfig {
     /// Header name (case-insensitive; no spaces or `:`).
@@ -477,7 +503,7 @@ pub struct HeaderOpConfig {
 
 /// Rewrite applied to the forwarded request when the rule routes to a
 /// backend (v0.6 slice 2; Envoy `prefix_rewrite`/`host_rewrite`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RewriteConfig {
     /// Replaces the rule's matched `path_prefix` in the forwarded target
@@ -488,7 +514,7 @@ pub struct RewriteConfig {
 }
 
 /// Local 3xx response (v0.6 slice 2; nginx `return 301`, Envoy `redirect`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RedirectConfig {
     /// 301 (default), 302, 303, 307 or 308.
@@ -499,7 +525,7 @@ pub struct RedirectConfig {
 
 /// Local response served without contacting a backend (v0.6 slice 2;
 /// Envoy `direct_response`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DirectResponseConfig {
     /// Status code (200-599).
@@ -512,7 +538,7 @@ pub struct DirectResponseConfig {
 
 /// One cookie condition of a routing rule (B-I11 canary-by-cookie;
 /// exactly one of `exact`, `regex` or `present = true`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CookieConditionConfig {
     /// Cookie name (case-insensitive; RFC 6265 pair parsing).
@@ -528,7 +554,7 @@ pub struct CookieConditionConfig {
 
 /// Map-backed match condition (C10 hot maps; exactly one of `key` or
 /// `header` selects the lookup key).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MapConditionConfig {
     /// Name of the `[maps.*]` table consulted.
@@ -541,9 +567,40 @@ pub struct MapConditionConfig {
     pub equals: Option<String>,
 }
 
+/// Hash policy of a `split` action (B-H3; Envoy `hash_policy` +
+/// `RING_HASH`): the target is chosen by a hash of the request key
+/// instead of the weighted rotation, so the same key keeps the same
+/// target while targets come and go.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HashPolicyConfig {
+    /// Request key: `"source"` (client IP), `"path"`, `"host"`,
+    /// `"cookie:NAME"` or `"header:NAME"` (headers and cookie names are
+    /// case-insensitive).
+    pub key: String,
+}
+
+/// One mirrored fraction of the matched traffic (B-H3; Envoy
+/// `request_mirror_policies`): a copy of the request goes to another
+/// backend, fire-and-forget — its response never reaches the client and
+/// a mirror failure never changes the client's answer.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RequestMirrorConfig {
+    /// Backend that receives the mirrored copy.
+    pub backend: String,
+    /// Percentage of the matching requests to mirror (1-100, default 100).
+    #[serde(default = "default_mirror_percentage")]
+    pub percentage: u32,
+}
+
+fn default_mirror_percentage() -> u32 {
+    100
+}
+
 /// One weighted target of a `split` action (B-I11; Envoy
 /// `weighted_clusters`, ingress-nginx `canary-weight`).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SplitTargetConfig {
     /// Backend that receives this share of the requests.
@@ -557,7 +614,7 @@ pub struct SplitTargetConfig {
 /// A named data map (C10 / PP-02): `key → value` tables that rules
 /// consult, updatable **in hot** without a config reload and without
 /// losing any other dataplane state.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MapConfig {
     /// Map data file (relative to the config file): one `key value`
@@ -570,6 +627,7 @@ pub struct MapConfig {
     pub default: Option<String>,
     /// File re-read period (default `"5s"`; `"0s"` = load once).
     #[serde(default = "default_map_reload", with = "duration")]
+    #[schemars(with = "String")]
     pub reload_interval: Duration,
 }
 
@@ -578,7 +636,7 @@ pub struct MapConfig {
 /// `direct_response`). Rules run in array order, first match wins; the
 /// listener's `backend` is the fallback when no rule matches. All
 /// conditions of a rule are ANDed.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuleConfig {
     /// Display name for `explain`/logs (default `"rule-N"`).
@@ -589,6 +647,14 @@ pub struct RuleConfig {
     /// Envoy `weighted_clusters`). Mutually exclusive with the other
     /// actions.
     pub split: Option<Vec<SplitTargetConfig>>,
+    /// Hash policy of the split (B-H3; Envoy `hash_policy`): with it the
+    /// target is chosen by the request key, not by the weighted rotation.
+    /// Needs a `split` with at least two active targets.
+    pub hash_policy: Option<HashPolicyConfig>,
+    /// Mirror policy (B-H3; Envoy `request_mirror_policies`): copy a
+    /// percentage of the matching requests to another backend without
+    /// affecting the client's response.
+    pub request_mirror: Option<RequestMirrorConfig>,
     /// Rewrite applied to the forwarded request (`use_backend` only).
     #[serde(default)]
     pub rewrite: Option<RewriteConfig>,
@@ -711,7 +777,7 @@ impl RuleConfig {
 }
 
 /// Full EQProxy configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Schema version; must be [`SCHEMA_VERSION`].
@@ -727,6 +793,7 @@ pub struct Config {
     pub maps: BTreeMap<String, MapConfig>,
     /// Drain window on shutdown: live connections may finish.
     #[serde(default = "default_shutdown_grace", with = "duration")]
+    #[schemars(with = "String")]
     pub shutdown_grace: Duration,
     /// Metrics options (D1/D5): detailed counters are opt-in (CE4).
     #[serde(default)]
@@ -734,7 +801,7 @@ pub struct Config {
 }
 
 /// A frontend: where to listen and which backend to send to.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ListenerConfig {
     /// Listen `IP:PORT` address (port 0 = ephemeral, useful in tests).
@@ -749,21 +816,26 @@ pub struct ListenerConfig {
     pub maxconn: u32,
     /// Timeout for connecting to the backend.
     #[serde(default = "default_connect_timeout", with = "duration")]
+    #[schemars(with = "String")]
     pub connect_timeout: Duration,
     /// Inactivity timeout per direction (no bytes in either direction).
     #[serde(default = "default_idle_timeout", with = "duration")]
+    #[schemars(with = "String")]
     pub idle_timeout: Duration,
     /// Client phase: maximum to receive the request head (`http` only).
     #[serde(default = "default_client_header_timeout", with = "duration")]
+    #[schemars(with = "String")]
     pub client_header_timeout: Duration,
     /// Server phase: maximum to receive the response head (`http` only).
     #[serde(default = "default_server_header_timeout", with = "duration")]
+    #[schemars(with = "String")]
     pub server_header_timeout: Duration,
     /// Total duration cap for one forwarded exchange (`http` only;
     /// `"0s"` disables): request body + response head + response body.
     /// `max_stream_duration` (B-H11/B-E12) — complements `idle_timeout`:
     /// inactivity ≠ duration (Q5).
     #[serde(default, with = "duration")]
+    #[schemars(with = "String")]
     pub max_stream_duration: Duration,
     /// TLS termination at this listener (A11). Absent = plain TCP.
     #[serde(default)]
@@ -788,7 +860,7 @@ pub struct ListenerConfig {
 }
 
 /// Session affinity of a backend (B-H8/B-N13/B-I8).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AffinityConfig {
     /// `"cookie"` (the proxy inserts a sticky cookie, HAProxy `cookie
@@ -802,7 +874,7 @@ pub struct AffinityConfig {
 ///
 /// `server` (one server, compat 0.1) and `servers` (weighted list) are
 /// mutually exclusive: exactly one must be present (validated in [`crate::check`]).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     /// Origin server `IP:PORT` address (compat 0.1.0).
@@ -830,6 +902,7 @@ pub struct BackendConfig {
     pub maxqueue: u32,
     /// Maximum wait in the queue (used when `maxqueue > 0`).
     #[serde(default = "default_queue_timeout", with = "duration")]
+    #[schemars(with = "String")]
     pub timeout_queue: Duration,
     /// Connect-phase retries on dial failure (0 = disabled; B-H7).
     #[serde(default)]
@@ -842,6 +915,7 @@ pub struct BackendConfig {
     /// over this window (dynamic weighting). `"0s"` (default) disables
     /// the ramp; maximum `"1h"` (HAProxy `slowstart` range).
     #[serde(default, with = "duration")]
+    #[schemars(with = "String")]
     pub slow_start: Duration,
     /// Periodic re-resolution of `HOSTNAME:PORT` servers
     /// (B-H13/B-N18/B-E15; nginx `resolver valid=` / Envoy
@@ -850,6 +924,7 @@ pub struct BackendConfig {
     /// startup only; maximum `"24h"`. Literal `IP:PORT` servers are
     /// unaffected (no DNS involved).
     #[serde(default = "default_resolve_interval", with = "duration")]
+    #[schemars(with = "String")]
     pub resolve_interval: Duration,
 }
 

@@ -517,6 +517,72 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                         );
                     }
                 }
+                // Hash policy (B-H3, Envoy `hash_policy`): the key selects
+                // among the split targets, so it needs a split with two or
+                // more active targets. Per-server stickiness is
+                // `[backend.*.affinity]`, not this field.
+                if let Some(hash) = &rule.hash_policy {
+                    match hash_key_problem(&hash.key) {
+                        Some(cause) => err(
+                            rule_field("hash_policy.key"),
+                            cause,
+                            "key = \"cookie:session\" (or header:NAME, source, path, host)"
+                                .to_owned(),
+                            &section,
+                        ),
+                        None => match &rule.split {
+                            None => err(
+                                rule_field("hash_policy"),
+                                "hash_policy needs a split action: with one backend there is nothing to hash between (use [backend.*.affinity] for per-server stickiness)"
+                                    .to_owned(),
+                                "split = [{ backend = \"a\", weight = 1 }, { backend = \"b\", weight = 1 }] + hash_policy = { key = \"cookie:session\" }".to_owned(),
+                                &section,
+                            ),
+                            Some(targets)
+                                if targets.iter().filter(|t| t.weight > 0).count() < 2 => err(
+                                    rule_field("hash_policy"),
+                                    "hash_policy needs at least two targets with weight > 0"
+                                        .to_owned(),
+                                    "give two split targets a weight above 0".to_owned(),
+                                    &section,
+                                ),
+                            Some(_) => {}
+                        },
+                    }
+                }
+                // Mirror policy (B-H3, Envoy `request_mirror_policies`):
+                // a copy of the request to another backend, fire-and-forget.
+                if let Some(mirror) = &rule.request_mirror {
+                    if !rule.forwards() {
+                        err(
+                            rule_field("request_mirror"),
+                            "request_mirror only applies to forwarding rules (use_backend or split)"
+                                .to_owned(),
+                            "use_backend = \"api\" + [listener.LISTENER.rules.request_mirror] backend = \"shadow\"".to_owned(),
+                            &section,
+                        );
+                    }
+                    if !config.backend.contains_key(&mirror.backend) {
+                        err(
+                            rule_field("request_mirror.backend"),
+                            format!("backend \"{}\" does not exist", mirror.backend),
+                            format!(
+                                "request_mirror = {{ backend = \"{}\" }} requires a [backend.{}] section",
+                                mirror.backend, mirror.backend
+                            ),
+                            &section,
+                        );
+                    }
+                    if mirror.percentage == 0 || mirror.percentage > 100 {
+                        err(
+                            rule_field("request_mirror.percentage"),
+                            format!("percentage = {} out of range (1..=100)", mirror.percentage),
+                            "percentage = 10 (one in every ten requests); omit it for 100"
+                                .to_owned(),
+                            &section,
+                        );
+                    }
+                }
                 // Header actions (B-N4/B-I4/B-E17). Request-side ones
                 // modify a forwarded request: forwarding actions only
                 // (like `rewrite`). The proxy owns the framing headers.
@@ -1080,10 +1146,135 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
+            // SNI certificates (B-I2/B-H10/B-E9): every entry needs
+            // names, each name must be a DNS name (never an IP literal)
+            // and no name may be claimed twice.
+            let mut claimed: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for (index, cert) in tls.certs.iter().enumerate() {
+                let field = format!("listener.{name}.tls.certs[{index}].names");
+                if cert.names.is_empty() {
+                    err(
+                        field.clone(),
+                        "an SNI certificate needs at least one name (exact DNS name or *.domain)"
+                            .to_owned(),
+                        "names = [\"api.example.com\", \"*.api.example.com\"]".to_owned(),
+                        &section,
+                    );
+                    continue;
+                }
+                for raw in &cert.names {
+                    if let Some(cause) = sni_name_problem(raw) {
+                        err(
+                            field.clone(),
+                            cause,
+                            "names = [\"api.example.com\", \"*.api.example.com\"]".to_owned(),
+                            &section,
+                        );
+                        continue;
+                    }
+                    let key = raw.trim().trim_end_matches('.').to_ascii_lowercase();
+                    if let Some(previous) = claimed.insert(key.clone(), index)
+                        && previous != index
+                    {
+                        err(
+                            field.clone(),
+                            format!(
+                                "\"{key}\" is already claimed by listener.{name}.tls.certs[{previous}]"
+                            ),
+                            "each SNI name belongs to exactly one certificate".to_owned(),
+                            &section,
+                        );
+                    }
+                }
+            }
         }
     }
 
     result
+}
+
+/// Problems of a `hash_policy.key` (B-H3): `source`, `path`, `host`,
+/// `cookie:NAME` or `header:NAME` (name 1..=255 bytes, no controls).
+fn hash_key_problem(raw: &str) -> Option<String> {
+    let key = raw.trim();
+    match key {
+        "source" | "path" | "host" => None,
+        _ => match key.split_once(':') {
+            Some((kind, name)) if kind == "cookie" || kind == "header" => {
+                if name.is_empty() || name.len() > 255 {
+                    return Some(format!("\"{raw}\": the {kind} name must be 1..=255 bytes"));
+                }
+                if name.bytes().any(|b| b <= 0x20 || b == 0x7f) {
+                    return Some(format!(
+                        "\"{raw}\": the {kind} name must not contain spaces or control characters"
+                    ));
+                }
+                None
+            }
+            Some((kind, _)) => Some(format!(
+                "\"{raw}\": unknown key kind \"{kind}\" (use cookie:NAME or header:NAME)"
+            )),
+            None => Some(format!(
+                "\"{raw}\": use source, path, host, cookie:NAME or header:NAME"
+            )),
+        },
+    }
+}
+
+/// Problems of one configured SNI name (B-I2/B-H10/B-E9): a DNS name or
+/// a `*.` wildcard for exactly one extra label. IP literals are rejected
+/// because a TLS client never sends them as SNI (RFC 6066).
+fn sni_name_problem(raw: &str) -> Option<String> {
+    let name = raw.trim().trim_end_matches('.');
+    if name.is_empty() {
+        return Some("the SNI name is empty".to_owned());
+    }
+    if name.len() > 253 {
+        return Some(format!("\"{raw}\" is longer than 253 bytes"));
+    }
+    if name.parse::<std::net::IpAddr>().is_ok() {
+        return Some(format!(
+            "\"{raw}\" is an IP literal: clients never send an IP as SNI (RFC 6066), so this name can never match — use a DNS name or drop it"
+        ));
+    }
+    let labels = match name.strip_prefix("*.") {
+        Some("") => {
+            return Some(format!(
+                "\"{raw}\": the wildcard needs a domain after it (*.example.com)"
+            ));
+        }
+        Some(rest) => rest,
+        None => {
+            if name.contains('*') {
+                return Some(format!(
+                    "\"{raw}\": the wildcard must be the leftmost label (*.example.com)"
+                ));
+            }
+            name
+        }
+    };
+    if labels.contains('*') {
+        return Some(format!(
+            "\"{raw}\": only one wildcard label is allowed, as the leftmost one"
+        ));
+    }
+    for label in labels.split('.') {
+        if label.is_empty() {
+            return Some(format!("\"{raw}\" has an empty label"));
+        }
+        if label.len() > 63 {
+            return Some(format!(
+                "\"{raw}\": label \"{label}\" is longer than 63 bytes"
+            ));
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Some(format!(
+                "\"{raw}\": labels must be letters, digits or '-' (got \"{label}\")"
+            ));
+        }
+    }
+    None
 }
 
 /// Problems of an ALPN list: non-empty names, no duplicates (A14).
@@ -1115,6 +1306,37 @@ mod tests {
     use crate::schema::{BackendConfig, ListenerConfig, ListenerMode};
     use std::path::PathBuf;
     use std::time::Duration;
+
+    #[test]
+    fn sni_names_accept_dns_and_single_label_wildcards_only() {
+        for ok in [
+            "api.example.com",
+            "API.Example.COM.",
+            "*.example.com",
+            "a-b.example.test",
+        ] {
+            assert_eq!(sni_name_problem(ok), None, "{ok} must be accepted");
+        }
+        for (bad, needle) in [
+            ("", "empty"),
+            ("127.0.0.1", "IP literal"),
+            ("::1", "IP literal"),
+            ("api.*.example.com", "leftmost"),
+            ("*", "leftmost"),
+            ("a..example.com", "empty label"),
+            ("api example.com", "labels must be"),
+            ("*.com*", "leftmost"),
+        ] {
+            let problem =
+                sni_name_problem(bad).unwrap_or_else(|| panic!("{bad:?} must be rejected"));
+            assert!(
+                problem.contains(needle),
+                "{bad:?}: expected {needle:?}, got {problem:?}"
+            );
+        }
+        let long = format!("{}.example.com", "a".repeat(64));
+        assert!(sni_name_problem(&long).is_some_and(|p| p.contains("63")));
+    }
 
     fn check_source(source: &str) -> CheckResult {
         let file = PathBuf::from("eqproxy.toml");
@@ -1830,6 +2052,157 @@ server = "127.0.0.1:9000"
             ),
         );
         assert!(forwards.is_valid(), "errors: {:?}", forwards.errors);
+    }
+
+    // --- B-H3 (hash_policy and request_mirror) gate ---
+
+    /// Split rule (two live targets) plus the `extra` rule keys and a
+    /// `shadow` backend the mirror can point at.
+    fn hashed_source(extra: &str) -> String {
+        format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8080\"\n\
+             mode = \"http\"\n\
+             backend = \"stable\"\n\
+             [[listener.web.rules]]\n\
+             name = \"hashed\"\n\
+             path_prefix = \"/\"\n\
+             split = [{{ backend = \"stable\", weight = 1 }}, {{ backend = \"canary\", weight = 1 }}]\n\
+             {extra}\n\
+             [backend.stable]\n\
+             server = \"127.0.0.1:9000\"\n\
+             [backend.canary]\n\
+             server = \"127.0.0.1:9001\"\n\
+             [backend.shadow]\n\
+             server = \"127.0.0.1:9002\"\n"
+        )
+    }
+
+    #[test]
+    fn hash_policy_and_request_mirror_accept_the_supported_forms() {
+        for extra in [
+            "hash_policy = { key = \"cookie:session\" }",
+            "hash_policy = { key = \"header:x-user\" }",
+            "hash_policy = { key = \"source\" }",
+            "request_mirror = { backend = \"shadow\" }",
+            "request_mirror = { backend = \"shadow\", percentage = 10 }",
+            "hash_policy = { key = \"path\" }\nrequest_mirror = { backend = \"shadow\", percentage = 100 }",
+        ] {
+            let result = check_source(&hashed_source(extra));
+            assert!(
+                result.is_valid(),
+                "{extra:?} must be valid: {:?}",
+                result.errors
+            );
+        }
+    }
+
+    #[test]
+    fn hash_policy_errors_name_the_field_the_cause_and_a_fix() {
+        // Unknown key kind: names the field and the accepted grammar.
+        let unknown = check_source(&hashed_source("hash_policy = { key = \"iphash\" }"));
+        let err = unknown
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("listener.web.rules[0].hash_policy.key"))
+            .expect("names hash_policy.key");
+        assert!(
+            err.cause
+                .contains("use source, path, host, cookie:NAME or header:NAME"),
+            "{err:?}"
+        );
+        assert!(err.example.contains("cookie:session"), "{err:?}");
+
+        // An empty cookie/header name is rejected with its own cause.
+        let empty = check_source(&hashed_source("hash_policy = { key = \"cookie:\" }"));
+        assert!(
+            empty
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("name must be 1..=255 bytes")),
+            "errors: {:?}",
+            empty.errors
+        );
+
+        // Without a split there is nothing to hash between: the error says
+        // so and points at the per-server stickiness instead.
+        let no_split = check_source(
+            &hashed_source("hash_policy = { key = \"source\" }")
+                .replace(
+                    "split = [{ backend = \"stable\", weight = 1 }, { backend = \"canary\", weight = 1 }]",
+                    "use_backend = \"stable\"",
+                ),
+        );
+        let err = no_split
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("listener.web.rules[0].hash_policy"))
+            .expect("names hash_policy");
+        assert!(err.cause.contains("needs a split action"), "{err:?}");
+        assert!(
+            err.cause.contains("affinity"),
+            "the cause names the real alternative for one backend: {err:?}"
+        );
+        assert!(err.example.contains("split ="), "{err:?}");
+
+        // One live target is the same problem: no key to spread.
+        let one_target = check_source(
+            &hashed_source("hash_policy = { key = \"source\" }").replace(
+                "split = [{ backend = \"stable\", weight = 1 }, { backend = \"canary\", weight = 1 }]",
+                "split = [{ backend = \"stable\", weight = 1 }, { backend = \"canary\", weight = 0 }]",
+            ),
+        );
+        assert!(
+            one_target
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("at least two targets with weight > 0")),
+            "errors: {:?}",
+            one_target.errors
+        );
+    }
+
+    #[test]
+    fn request_mirror_errors_name_the_field_the_cause_and_a_fix() {
+        // Unknown backend: names the field and shows the missing section.
+        let ghost = check_source(&hashed_source("request_mirror = { backend = \"ghost\" }"));
+        let err = ghost
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("listener.web.rules[0].request_mirror.backend"))
+            .expect("names request_mirror.backend");
+        assert!(err.cause.contains("ghost"), "{err:?}");
+        assert!(err.example.contains("[backend.ghost]"), "{err:?}");
+
+        // Percentage outside 1..=100 is rejected, never clamped.
+        for bad in ["0", "101"] {
+            let percentage = check_source(&hashed_source(&format!(
+                "request_mirror = {{ backend = \"shadow\", percentage = {bad} }}"
+            )));
+            let err = percentage
+                .errors
+                .iter()
+                .find(|e| {
+                    e.field.as_deref() == Some("listener.web.rules[0].request_mirror.percentage")
+                })
+                .unwrap_or_else(|| panic!("percentage = {bad} must be rejected: {percentage:?}"));
+            assert!(err.cause.contains("1..=100"), "{err:?}");
+        }
+
+        // A local answer has no request to mirror.
+        let redirect = check_source(&hashed_source("request_mirror = { backend = \"shadow\" }")
+            .replace(
+                "split = [{ backend = \"stable\", weight = 1 }, { backend = \"canary\", weight = 1 }]",
+                "redirect = { status = 301, location = \"https://example.com\" }",
+            ));
+        assert!(
+            redirect.errors.iter().any(|e| e.field.as_deref()
+                == Some("listener.web.rules[0].request_mirror")
+                && e.cause.contains("forwarding rules")),
+            "errors: {:?}",
+            redirect.errors
+        );
     }
 
     #[test]

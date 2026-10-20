@@ -1,0 +1,1259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "description": "Full EQProxy configuration.",
+  "type": "object",
+  "properties": {
+    "backend": {
+      "description": "Backends defined by name.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/BackendConfig"
+      }
+    },
+    "listener": {
+      "description": "TCP/HTTP frontends defined by name.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/ListenerConfig"
+      }
+    },
+    "maps": {
+      "description": "Named data maps (C10/PP-02), updatable in hot.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/MapConfig"
+      }
+    },
+    "metrics": {
+      "description": "Metrics options (D1/D5): detailed counters are opt-in (CE4).",
+      "$ref": "#/$defs/MetricsConfig"
+    },
+    "schema_version": {
+      "description": "Schema version; must be [`SCHEMA_VERSION`].",
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "shutdown_grace": {
+      "description": "Drain window on shutdown: live connections may finish.",
+      "type": "string",
+      "default": "10000ms"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schema_version"
+  ],
+  "$defs": {
+    "AffinityConfig": {
+      "description": "Session affinity of a backend (B-H8/B-N13/B-I8).",
+      "type": "object",
+      "properties": {
+        "cookie": {
+          "description": "Cookie name for `mode = \"cookie\"` (default `\"eqproxy_affinity\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "`\"cookie\"` (the proxy inserts a sticky cookie, HAProxy `cookie\ninsert`) or `\"source\"` (hash of the client IP, nginx `ip_hash`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ]
+    },
+    "AuthConfig": {
+      "description": "Authentication of a matched rule (B-N9/B-I9; nginx `auth_basic` +\n`auth_request`, ingress-nginx `auth-type`/`auth-url`): HTTP Basic\nagainst htpasswd-format users and/or an external auth subrequest.\nBoth run when both are set: Basic first (local), then `url`.",
+      "type": "object",
+      "properties": {
+        "realm": {
+          "description": "`WWW-Authenticate` realm (default `\"EQProxy\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "description": "Auth type (`\"type\"` key, ingress `auth-type`): `\"basic\"` only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "url": {
+          "description": "External auth subrequest (ingress `auth-url`, nginx\n`auth_request`): `http://HOST[:PORT][/PATH]`. 2xx allows the\nrequest, 401/403 denies it (the auth response reaches the\nclient), anything else fails closed with an explicit error.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "users": {
+          "description": "htpasswd-format entries `user:hash` (`$apr1$…` or plain).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "AuthType": {
+      "description": "Authentication type (`\"type\"` key of `[listener.*.rules.auth]`,\ningress-nginx `auth-type`): `\"basic\"` only.",
+      "oneOf": [
+        {
+          "description": "HTTP Basic against htpasswd-format users (ingress `auth-secret`).",
+          "type": "string",
+          "const": "basic"
+        }
+      ]
+    },
+    "BackendConfig": {
+      "description": "A backend: one or more origin servers with balancing (Phase 2b).\n\n`server` (one server, compat 0.1) and `servers` (weighted list) are\nmutually exclusive: exactly one must be present (validated in [`crate::check`]).",
+      "type": "object",
+      "properties": {
+        "affinity": {
+          "description": "Session affinity (B-H8/B-N13/B-I8): pin a client to the server\nthat first served it.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AffinityConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "balance": {
+          "description": "Balancing algorithm (Phase 2b: `\"roundrobin\"`).",
+          "$ref": "#/$defs/BalanceAlgorithm"
+        },
+        "health_check": {
+          "description": "Active TCP health check (B11). Absent = all servers operational.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HealthCheckConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "maxqueue": {
+          "description": "Bounded queue while no server is available (B-H7; 0 = reject now).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "proxy_protocol": {
+          "description": "PROXY protocol v1 send to the servers (A9).",
+          "$ref": "#/$defs/ProxyProtocolMode"
+        },
+        "resolve_interval": {
+          "description": "Periodic re-resolution of `HOSTNAME:PORT` servers\n(B-H13/B-N18/B-E15; nginx `resolver valid=` / Envoy\n`dns_refresh_rate` semantics): the dataplane re-resolves each name\nat this rate and swaps addresses in hot. `\"0s\"` resolves once at\nstartup only; maximum `\"24h\"`. Literal `IP:PORT` servers are\nunaffected (no DNS involved).",
+          "type": "string",
+          "default": "30000ms"
+        },
+        "retries": {
+          "description": "Connect-phase retries on dial failure (0 = disabled; B-H7).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "retry_non_idempotent": {
+          "description": "Allow retrying non-idempotent requests (default `false`).",
+          "type": "boolean",
+          "default": false
+        },
+        "server": {
+          "description": "Origin server `IP:PORT` address (compat 0.1.0).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "servers": {
+          "description": "Weighted servers (B1/B7). Mutually exclusive with `server`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ServerConfig"
+          }
+        },
+        "slow_start": {
+          "description": "Slow start (B14): when a server becomes operational (startup or\nrecovery) its effective weight ramps linearly from ~0 to `weight`\nover this window (dynamic weighting). `\"0s\"` (default) disables\nthe ramp; maximum `\"1h\"` (HAProxy `slowstart` range).",
+          "type": "string",
+          "default": "0ms"
+        },
+        "timeout_queue": {
+          "description": "Maximum wait in the queue (used when `maxqueue > 0`).",
+          "type": "string",
+          "default": "5000ms"
+        },
+        "tls": {
+          "description": "TLS to the servers (A12). Absent = plain TCP.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsClientConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "BalanceAlgorithm": {
+      "description": "Balancing algorithm (B1/B7 `roundrobin`; B-H5/B-N12/B-E6 `leastconn`).",
+      "oneOf": [
+        {
+          "description": "Smooth weighted round-robin (B1 + B7).",
+          "type": "string",
+          "const": "roundrobin"
+        },
+        {
+          "description": "Weighted least-connections (B-H5/B-N12/B-E6). The reference names\n`least_conn` (nginx) and `least_request` (Envoy `LEAST_REQUEST`)\nare accepted as aliases of `leastconn` (HAProxy).",
+          "type": "string",
+          "const": "leastconn"
+        }
+      ]
+    },
+    "CookieConditionConfig": {
+      "description": "One cookie condition of a routing rule (B-I11 canary-by-cookie;\nexactly one of `exact`, `regex` or `present = true`).",
+      "type": "object",
+      "properties": {
+        "exact": {
+          "description": "Exact value (byte-for-byte).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Cookie name (case-insensitive; RFC 6265 pair parsing).",
+          "type": "string"
+        },
+        "present": {
+          "description": "Presence check (`true`; the value is irrelevant).",
+          "type": "boolean",
+          "default": false
+        },
+        "regex": {
+          "description": "Unanchored regex over the value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "CorsConfig": {
+      "description": "CORS policy of a matched rule (B-I10; ingress-nginx `cors-*`):\npreflight `OPTIONS` is answered locally and every response of the\nrule carries the CORS headers.",
+      "type": "object",
+      "properties": {
+        "allow_credentials": {
+          "description": "`Access-Control-Allow-Credentials: true`.",
+          "type": "boolean",
+          "default": false
+        },
+        "allow_headers": {
+          "description": "`Access-Control-Allow-Headers` (omitted when absent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allow_methods": {
+          "description": "`Access-Control-Allow-Methods` (default `GET, HEAD, POST, OPTIONS`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "allow_origin": {
+          "description": "Exact allowed origin (`Access-Control-Allow-Origin`). `\"*\"` is\nrejected together with `allow_credentials` (the browser does too).",
+          "type": "string"
+        },
+        "expose_headers": {
+          "description": "`Access-Control-Expose-Headers` (omitted when absent).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_age": {
+          "description": "Preflight cache time (`Access-Control-Max-Age`; `\"0s\"` omits it).",
+          "type": "string",
+          "default": "0ms"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "allow_origin"
+      ]
+    },
+    "DirectResponseConfig": {
+      "description": "Local response served without contacting a backend (v0.6 slice 2;\nEnvoy `direct_response`).",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Body (default empty; bounded by the local-response budget).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content_type": {
+          "description": "Content type (default `text/plain`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "description": "Status code (200-599).",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "status"
+      ]
+    },
+    "ForwardedHeaders": {
+      "description": "`X-Forwarded-For` / `X-Real-IP` handling (B-N4 first step).",
+      "oneOf": [
+        {
+          "description": "No forwarded headers (default; explicit opt-in).",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Append the client address to `X-Forwarded-For`.",
+          "type": "string",
+          "const": "append"
+        },
+        {
+          "description": "Replace `X-Forwarded-For`/`X-Real-IP` with the client address.",
+          "type": "string",
+          "const": "replace"
+        }
+      ]
+    },
+    "HashPolicyConfig": {
+      "description": "Hash policy of a `split` action (B-H3; Envoy `hash_policy` +\n`RING_HASH`): the target is chosen by a hash of the request key\ninstead of the weighted rotation, so the same key keeps the same\ntarget while targets come and go.",
+      "type": "object",
+      "properties": {
+        "key": {
+          "description": "Request key: `\"source\"` (client IP), `\"path\"`, `\"host\"`,\n`\"cookie:NAME\"` or `\"header:NAME\"` (headers and cookie names are\ncase-insensitive).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "key"
+      ]
+    },
+    "HeaderConditionConfig": {
+      "description": "One header condition of a routing rule (exactly one of `exact`,\n`regex` or `present = true`; v0.6, B-H3/B-N3).",
+      "type": "object",
+      "properties": {
+        "exact": {
+          "description": "Exact value (byte-for-byte).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Header name (case-insensitive).",
+          "type": "string"
+        },
+        "present": {
+          "description": "Presence check (`true`; the value is irrelevant).",
+          "type": "boolean",
+          "default": false
+        },
+        "regex": {
+          "description": "Unanchored regex over the value.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "HeaderOpConfig": {
+      "description": "One header action (B-N4/B-I4/B-E17): name + value template.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "Header name (case-insensitive; no spaces or `:`).",
+          "type": "string"
+        },
+        "value": {
+          "description": "Value template: literal text plus `$remote_addr`, `$host`, `$scheme`.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "value"
+      ]
+    },
+    "HealthCheckConfig": {
+      "description": "Active TCP health check (B11 TCP): `fall` consecutive failures drop the\nserver, `rise` consecutive successes raise it.",
+      "type": "object",
+      "properties": {
+        "expect_rstring": {
+          "description": "HTTP check: regex that must match somewhere in the response body\n(optional; the body is read up to 64 KiB).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expect_status": {
+          "description": "HTTP check: expected status codes/ranges (default `\"200-299\"`).",
+          "type": "string",
+          "default": "200-299"
+        },
+        "fall": {
+          "description": "Consecutive failures to mark a server down.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "http_host": {
+          "description": "HTTP check: Host header (default: the server address).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "http_method": {
+          "description": "HTTP check: request method (default `\"GET\"`; GET or HEAD only).",
+          "$ref": "#/$defs/HealthCheckMethod"
+        },
+        "http_path": {
+          "description": "HTTP check: request path (default `/`).",
+          "type": "string",
+          "default": "/"
+        },
+        "interval": {
+          "description": "Interval between check cycles.",
+          "type": "string",
+          "default": "2000ms"
+        },
+        "passive": {
+          "description": "Passive detection (B-N10): live-traffic connect failures also feed\nthe `fall`/`rise` machine (default `false` = active checks only).",
+          "type": "boolean",
+          "default": false
+        },
+        "rise": {
+          "description": "Consecutive successes to mark a server up.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "timeout": {
+          "description": "Timeout of each TCP connection attempt.",
+          "type": "string",
+          "default": "1000ms"
+        },
+        "type": {
+          "description": "Check type (`\"type\"` key): `\"tcp\"` (connect only, default) or\n`\"http\"` (B-H6: request + `expect` matching).",
+          "$ref": "#/$defs/HealthCheckKind"
+        }
+      },
+      "additionalProperties": false
+    },
+    "HealthCheckKind": {
+      "description": "Health check type (`\"type\"` key of `[backend.*.health_check]`).",
+      "oneOf": [
+        {
+          "description": "TCP connect only (B11; default).",
+          "type": "string",
+          "const": "tcp"
+        },
+        {
+          "description": "HTTP request with `expect status`/`expect rstring` (B-H6).",
+          "type": "string",
+          "const": "http"
+        }
+      ]
+    },
+    "HealthCheckMethod": {
+      "description": "HTTP health-check request method.",
+      "type": "string",
+      "enum": [
+        "get",
+        "head"
+      ]
+    },
+    "ListenerConfig": {
+      "description": "A frontend: where to listen and which backend to send to.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Backend name ([`BackendConfig`] in `Config::backend`).",
+          "type": "string"
+        },
+        "client_header_timeout": {
+          "description": "Client phase: maximum to receive the request head (`http` only).",
+          "type": "string",
+          "default": "5000ms"
+        },
+        "connect_timeout": {
+          "description": "Timeout for connecting to the backend.",
+          "type": "string",
+          "default": "5000ms"
+        },
+        "forwarded_headers": {
+          "description": "`X-Forwarded-For`/`X-Real-IP` handling (`http` only; B-N4).",
+          "$ref": "#/$defs/ForwardedHeaders"
+        },
+        "idle_timeout": {
+          "description": "Inactivity timeout per direction (no bytes in either direction).",
+          "type": "string",
+          "default": "60000ms"
+        },
+        "listen": {
+          "description": "Listen `IP:PORT` address (port 0 = ephemeral, useful in tests).",
+          "type": "string"
+        },
+        "local_response": {
+          "description": "Custom response when no server is available (C9 minimal).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LocalResponseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_stream_duration": {
+          "description": "Total duration cap for one forwarded exchange (`http` only;\n`\"0s\"` disables): request body + response head + response body.\n`max_stream_duration` (B-H11/B-E12) — complements `idle_timeout`:\ninactivity ≠ duration (Q5).",
+          "type": "string",
+          "default": "0ms"
+        },
+        "maxconn": {
+          "description": "Maximum concurrent connections; newcomers are explicitly refused when full.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1024,
+          "minimum": 0
+        },
+        "mode": {
+          "description": "Mode: `\"tcp\"` (tunnel, default) or `\"http\"` (strict HTTP/1.1).",
+          "$ref": "#/$defs/ListenerMode"
+        },
+        "proxy_allow": {
+          "description": "Trusted PROXY origins (IP or CIDR; required non-empty with\n`proxy_receive = true`).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "proxy_receive": {
+          "description": "Receive PROXY protocol v1 from trusted proxies (B-H9/B-E10).",
+          "type": "boolean",
+          "default": false
+        },
+        "rules": {
+          "description": "Ordered routing rules (v0.6, B-H3/B-H4): first match wins, the\n`backend` above is the fallback. `http` mode only.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RuleConfig"
+          }
+        },
+        "server_header_timeout": {
+          "description": "Server phase: maximum to receive the response head (`http` only).",
+          "type": "string",
+          "default": "30000ms"
+        },
+        "tls": {
+          "description": "TLS termination at this listener (A11). Absent = plain TCP.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsServerConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen",
+        "backend"
+      ]
+    },
+    "ListenerMode": {
+      "description": "Proxy mode of a listener (A1 `tcp`, A2 `http`).",
+      "oneOf": [
+        {
+          "description": "TCP tunnel without interpretation (Phase 1).",
+          "type": "string",
+          "const": "tcp"
+        },
+        {
+          "description": "HTTP/1.1 proxy with strict framing (Phase 2a).",
+          "type": "string",
+          "const": "http"
+        }
+      ]
+    },
+    "LocalResponseConfig": {
+      "description": "Custom local response when no server is available (C9 minimal).",
+      "type": "object",
+      "properties": {
+        "body": {
+          "description": "Response body (bounded: [`MAX_LOCAL_RESPONSE_BYTES`]).",
+          "type": "string"
+        },
+        "content_type": {
+          "description": "Content-Type of the body (default `text/plain; charset=utf-8`).",
+          "type": "string",
+          "default": "text/plain; charset=utf-8"
+        },
+        "status": {
+          "description": "Status code (400-599).",
+          "type": "integer",
+          "format": "uint16",
+          "default": 503,
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "body"
+      ]
+    },
+    "MapConditionConfig": {
+      "description": "Map-backed match condition (C10 hot maps; exactly one of `key` or\n`header` selects the lookup key).",
+      "type": "object",
+      "properties": {
+        "equals": {
+          "description": "Required mapped value (absent = presence match).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "header": {
+          "description": "Key source: first value of this request header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Key source: `\"ip\"`, `\"host\"`, `\"path\"` or `\"method\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Name of the `[maps.*]` table consulted.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name"
+      ]
+    },
+    "MapConfig": {
+      "description": "A named data map (C10 / PP-02): `key → value` tables that rules\nconsult, updatable **in hot** without a config reload and without\nlosing any other dataplane state.",
+      "type": "object",
+      "properties": {
+        "default": {
+          "description": "Value for keys without an entry (nginx `map` `default`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entries": {
+          "description": "Inline entries (static; mutually exclusive with `file`).",
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "file": {
+          "description": "Map data file (relative to the config file): one `key value`\npair per line, `#` comments at line start, a bare `key` maps to\n`\"\"`. Re-read every `reload_interval` (watched in hot).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reload_interval": {
+          "description": "File re-read period (default `\"5s\"`; `\"0s\"` = load once).",
+          "type": "string",
+          "default": "5000ms"
+        }
+      },
+      "additionalProperties": false
+    },
+    "MetricsConfig": {
+      "description": "Metrics options (D1): cardinality stays bounded; detailed per-server\ncounters are opt-in (CE4).",
+      "type": "object",
+      "properties": {
+        "detailed": {
+          "description": "Per-server counters (bounded by [`MAX_SECTIONS`]).",
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "ProxyProtocolMode": {
+      "description": "PROXY protocol send to the backend (A9; reception in Phase 3).",
+      "oneOf": [
+        {
+          "description": "No PROXY header (default).",
+          "type": "string",
+          "const": "none"
+        },
+        {
+          "description": "PROXY protocol v1 header (`PROXY TCP4/TCP6 …`).",
+          "type": "string",
+          "const": "v1"
+        },
+        {
+          "description": "PROXY protocol v2 binary header (A10).",
+          "type": "string",
+          "const": "v2"
+        }
+      ]
+    },
+    "RateLimitConfig": {
+      "description": "Token-bucket rate limit of a rule (B-N8/B-I7/B-E16; nginx `limit_req`,\ningress `limit-rps`/`limit-rpm`, Envoy `local_ratelimit`): per client\nIP, in-memory — no network in the hot path (Q6).",
+      "type": "object",
+      "properties": {
+        "burst": {
+          "description": "Bucket capacity (default = `rate`); a request over the limit gets\nan explicit 429, never a silent drop.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "per": {
+          "description": "Window for `rate` (default `\"1s\"`); `\"60s\"` expresses rpm.",
+          "type": "string",
+          "default": "1000ms"
+        },
+        "rate": {
+          "description": "Tokens added per `per` window (>= 1).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "rate"
+      ]
+    },
+    "RedirectConfig": {
+      "description": "Local 3xx response (v0.6 slice 2; nginx `return 301`, Envoy `redirect`).",
+      "type": "object",
+      "properties": {
+        "location": {
+          "description": "Location template: literal text plus `$host`, `$uri`, `$request_uri`.",
+          "type": "string"
+        },
+        "status": {
+          "description": "301 (default), 302, 303, 307 or 308.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "location"
+      ]
+    },
+    "RequestMirrorConfig": {
+      "description": "One mirrored fraction of the matched traffic (B-H3; Envoy\n`request_mirror_policies`): a copy of the request goes to another\nbackend, fire-and-forget — its response never reaches the client and\na mirror failure never changes the client's answer.",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Backend that receives the mirrored copy.",
+          "type": "string"
+        },
+        "percentage": {
+          "description": "Percentage of the matching requests to mirror (1-100, default 100).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 100,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend"
+      ]
+    },
+    "RewriteConfig": {
+      "description": "Rewrite applied to the forwarded request when the rule routes to a\nbackend (v0.6 slice 2; Envoy `prefix_rewrite`/`host_rewrite`).",
+      "type": "object",
+      "properties": {
+        "host_rewrite": {
+          "description": "Exact value of the upstream `Host` header.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path_prefix_rewrite": {
+          "description": "Replaces the rule's matched `path_prefix` in the forwarded target\n(literal, no regex; `\"\"` strips the prefix). Query untouched.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "RuleConfig": {
+      "description": "One routing rule (v0.6, B-H3/B-H4): ordered match conditions plus\nexactly one action (`use_backend`, `split`, `redirect` or\n`direct_response`). Rules run in array order, first match wins; the\nlistener's `backend` is the fallback when no rule matches. All\nconditions of a rule are ANDed.",
+      "type": "object",
+      "properties": {
+        "add_headers": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderOpConfig"
+          }
+        },
+        "auth": {
+          "description": "Authentication of the rule (B-N9/B-I9), any action.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cookies": {
+          "description": "Cookie conditions (all must hold; B-I11 canary-by-cookie).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CookieConditionConfig"
+          }
+        },
+        "cors": {
+          "description": "CORS policy (B-I10): preflight answered locally + response\nheaders. `use_backend` rules only.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CorsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "del_headers": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "direct_response": {
+          "description": "Action: answer locally with the configured response (no backend).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DirectResponseConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "hash_policy": {
+          "description": "Hash policy of the split (B-H3; Envoy `hash_policy`): with it the\ntarget is chosen by the request key, not by the weighted rotation.\nNeeds a `split` with at least two active targets.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HashPolicyConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "headers": {
+          "description": "Header conditions (all must hold).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderConditionConfig"
+          }
+        },
+        "host": {
+          "description": "Exact host (case-insensitive, port-free).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_prefix": {
+          "description": "Host prefix (case-insensitive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "host_regex": {
+          "description": "Host regex (unanchored).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ip": {
+          "description": "Source CIDR blocks (empty = any).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "map": {
+          "description": "Map-backed condition (C10 hot maps).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MapConditionConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "methods": {
+          "description": "Accepted methods (empty = any).",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "name": {
+          "description": "Display name for `explain`/logs (default `\"rule-N\"`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "Exact path (query string excluded, case-sensitive).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path_prefix": {
+          "description": "Literal path prefix (no normalization: `/v1` also matches `/v10`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path_regex": {
+          "description": "Path regex (unanchored).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rate_limit": {
+          "description": "Rate limit of the rule (B-N8/B-I7/B-E16), any action.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RateLimitConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "redirect": {
+          "description": "Action: answer locally with 3xx + `Location` (no backend).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RedirectConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_mirror": {
+          "description": "Mirror policy (B-H3; Envoy `request_mirror_policies`): copy a\npercentage of the matching requests to another backend without\naffecting the client's response.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestMirrorConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "response_headers": {
+          "description": "Response header actions (any action): appended to the response\nthe client sees. Same value templates.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderOpConfig"
+          }
+        },
+        "rewrite": {
+          "description": "Rewrite applied to the forwarded request (`use_backend` only).",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RewriteConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "set_headers": {
+          "description": "Request header actions (B-N4/B-I4/B-E17, `use_backend` only):\n`set` replaces (or inserts) one value, `add` appends another\nline keeping the client's, `del` removes the header before\nforwarding. Values support `$remote_addr`, `$host`, `$scheme`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HeaderOpConfig"
+          }
+        },
+        "split": {
+          "description": "Action: weighted traffic split across backends (B-I11 canary;\nEnvoy `weighted_clusters`). Mutually exclusive with the other\nactions.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/SplitTargetConfig"
+          }
+        },
+        "use_backend": {
+          "description": "Action: backend that receives the matching requests.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "ServerConfig": {
+      "description": "One backend server with its weight (B7).",
+      "type": "object",
+      "properties": {
+        "addr": {
+          "description": "Server `IP:PORT` or `HOSTNAME:PORT` address (B-H13/B-N18/B-E15:\nhostnames are resolved in the background, never on the request\npath; listeners serve from the first moment whatever DNS does).",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Balancing weight (0 = drained: never selected, still health-checked).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "addr"
+      ]
+    },
+    "SniCertConfig": {
+      "description": "One SNI certificate of a listener (B-I2/B-H10/B-E9; Envoy\n`filter_chains` per SNI, nginx multiple `ssl_certificate`): the\nlistener serves it for the names it declares and the default\ncertificate for everything else.",
+      "type": "object",
+      "properties": {
+        "cert": {
+          "description": "Path to the PEM certificate chain (leaf first).",
+          "type": "string"
+        },
+        "key": {
+          "description": "Path to the PEM private key of the leaf (PKCS#8, PKCS#1 or SEC1).",
+          "type": "string"
+        },
+        "names": {
+          "description": "SNI names answered by this certificate: exact DNS names or a\nwildcard `*.domain` (one extra label; `*.a.example` does not\nmatch `x.y.a.example`). Case-insensitive.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cert",
+        "key",
+        "names"
+      ]
+    },
+    "SplitTargetConfig": {
+      "description": "One weighted target of a `split` action (B-I11; Envoy\n`weighted_clusters`, ingress-nginx `canary-weight`).",
+      "type": "object",
+      "properties": {
+        "backend": {
+          "description": "Backend that receives this share of the requests.",
+          "type": "string"
+        },
+        "weight": {
+          "description": "Share weight (0 = target disabled: canary rollback without\ntouching the rest; at least one target must have weight > 0).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "backend"
+      ]
+    },
+    "TlsClientConfig": {
+      "description": "TLS to the backend (A12): verification on by default.",
+      "type": "object",
+      "properties": {
+        "alpn": {
+          "description": "ALPN protocols to offer in the handshake; empty = no ALPN.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "ca_file": {
+          "description": "Extra CA PEM to verify the backend (private CAs, tests).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "min_version": {
+          "description": "Minimum TLS version (default 1.2).",
+          "$ref": "#/$defs/TlsVersion"
+        },
+        "server_name": {
+          "description": "Name to verify/SNI; defaults to the host part of the address.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "verify": {
+          "description": "Server certificate and name verification (default `true`).",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "TlsServerConfig": {
+      "description": "TLS termination at the listener (A11): certificate, key and ALPN.",
+      "type": "object",
+      "properties": {
+        "alpn": {
+          "description": "Offered ALPN protocols (e.g. `[\"http/1.1\"]`); empty = no ALPN.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "cert": {
+          "description": "Path to the PEM certificate chain (leaf first).",
+          "type": "string"
+        },
+        "certs": {
+          "description": "Additional certificates selected by SNI (B-I2/B-H10/B-E9). The\n`cert`/`key` pair above stays the default: it answers clients\nwithout SNI and names no entry claims.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SniCertConfig"
+          }
+        },
+        "client_ca": {
+          "description": "Client CA PEM: present = mTLS (A15) — client certificates are\nrequired and verified against this bundle.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "Path to the PEM private key (PKCS#8, PKCS#1 or SEC1).",
+          "type": "string"
+        },
+        "min_version": {
+          "description": "Minimum TLS version (default 1.2).",
+          "$ref": "#/$defs/TlsVersion"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cert",
+        "key"
+      ]
+    },
+    "TlsVersion": {
+      "description": "Minimum accepted TLS version (A11/A12).",
+      "oneOf": [
+        {
+          "description": "TLS 1.2 (default; TLS 1.0/1.1 are never accepted).",
+          "type": "string",
+          "const": "1.2"
+        },
+        {
+          "description": "TLS 1.3.",
+          "type": "string",
+          "const": "1.3"
+        }
+      ]
+    }
+  }
+}

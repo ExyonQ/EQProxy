@@ -20,6 +20,24 @@ const FIXTURE_KEY: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../eqproxy-net/tests/fixtures/key.pem"
 );
+/// Additional SNI certificates (B-I2/B-H10/B-E9): `alpha.example.test`
+/// (exact) and `*.beta.example.test` (wildcard).
+const FIXTURE_ALPHA_CERT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../eqproxy-net/tests/fixtures/alpha.pem"
+);
+const FIXTURE_ALPHA_KEY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../eqproxy-net/tests/fixtures/alpha.key"
+);
+const FIXTURE_BETA_CERT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../eqproxy-net/tests/fixtures/beta.pem"
+);
+const FIXTURE_BETA_KEY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../eqproxy-net/tests/fixtures/beta.key"
+);
 
 fn temp_config(name: &str, contents: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -622,10 +640,20 @@ fn proxied(proxy: &str, request: &[u8]) -> String {
     let mut client = TcpStream::connect(proxy).expect("connect proxy");
     client.write_all(request).expect("write request");
     let mut response = Vec::new();
+    // 30 s, not 5: a coverage build (`cargo llvm-cov`) of the binary behind
+    // a full parallel suite can stall well past five seconds, and a swallowed
+    // timeout used to surface as "unexpected origin body" in tests that infer
+    // the routing decision from the body. The exchange itself is unchanged;
+    // only the budget for this harness read grows.
     client
-        .set_read_timeout(Some(Duration::from_secs(5)))
+        .set_read_timeout(Some(Duration::from_secs(30)))
         .expect("read timeout");
     let _ = client.read_to_end(&mut response);
+    assert!(
+        response.windows(4).any(|w| w == b"\r\n\r\n"),
+        "the proxy never completed a response head before the 30 s deadline: {:?}",
+        String::from_utf8_lossy(&response)
+    );
     String::from_utf8_lossy(&response).into_owned()
 }
 
@@ -1823,6 +1851,191 @@ fn run_with_tls_termination_proxies_real_traffic() {
         "the TLS echo must come back intact; stdout: {echoed}"
     );
     wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// Subject of the certificate a real TLS client receives for `sni`
+/// (`openssl s_client -showcerts` piped to `openssl x509`).
+fn served_certificate_subject(addr: &str, sni: Option<&str>) -> String {
+    let sni = sni.map_or(String::new(), |name| format!("-servername {name} "));
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "openssl s_client -connect {addr} {sni}-showcerts </dev/null 2>/dev/null | openssl x509 -noout -subject"
+        ))
+        .output()
+        .expect("run openssl s_client (needed for the SNI e2e)");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_with_sni_serves_the_certificate_of_the_requested_name() {
+    let backend = start_echo_backend();
+    let config = temp_config(
+        "sni",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             idle_timeout = \"1s\"\n\
+             [listener.web.tls]\n\
+             cert = \"{FIXTURE_CERT}\"\n\
+             key = \"{FIXTURE_KEY}\"\n\
+             [[listener.web.tls.certs]]\n\
+             cert = \"{FIXTURE_ALPHA_CERT}\"\n\
+             key = \"{FIXTURE_ALPHA_KEY}\"\n\
+             names = [\"alpha.example.test\"]\n\
+             [[listener.web.tls.certs]]\n\
+             cert = \"{FIXTURE_BETA_CERT}\"\n\
+             key = \"{FIXTURE_BETA_KEY}\"\n\
+             names = [\"*.beta.example.test\"]\n\
+             [backend.api]\n\
+             server = \"{backend}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("leer stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the TLS address was not announced");
+
+    // The certificate of each name comes from the handshake itself.
+    let alpha = served_certificate_subject(&proxy_addr, Some("alpha.example.test"));
+    assert!(
+        alpha.contains("alpha.example.test"),
+        "exact SNI name must serve its certificate; got {alpha:?}"
+    );
+    let beta = served_certificate_subject(&proxy_addr, Some("x.beta.example.test"));
+    assert!(
+        beta.contains("beta.example.test"),
+        "wildcard SNI name must serve its certificate; got {beta:?}"
+    );
+    let unknown = served_certificate_subject(&proxy_addr, Some("unknown.example.test"));
+    assert!(
+        unknown.contains("localhost"),
+        "an unclaimed name must get the default certificate ({FIXTURE_CERT}); got {unknown:?}"
+    );
+    let no_sni = served_certificate_subject(&proxy_addr, None);
+    assert!(
+        no_sni.contains("localhost"),
+        "a client without SNI must get the default certificate; got {no_sni:?}"
+    );
+
+    // Traffic through the SNI tunnel still reaches the backend.
+    let mut client = Command::new("openssl")
+        .args([
+            "s_client",
+            "-connect",
+            proxy_addr.as_str(),
+            "-servername",
+            "alpha.example.test",
+            "-quiet",
+            "-ign_eof",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn openssl s_client");
+    client
+        .stdin
+        .take()
+        .expect("TLS client stdin")
+        .write_all(b"ping-sni")
+        .expect("write TLS");
+    let output = client.wait_with_output().expect("wait for s_client");
+    let echoed = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        echoed.contains("ping-sni"),
+        "the SNI tunnel must carry traffic; stdout: {echoed}"
+    );
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn config_validate_rejects_duplicate_and_invalid_sni_names() {
+    // The same name claimed by two certificates.
+    let duplicate = temp_config(
+        "sni-dupe",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n\
+             [listener.web.tls]\ncert = \"{FIXTURE_CERT}\"\nkey = \"{FIXTURE_KEY}\"\n\
+             [[listener.web.tls.certs]]\ncert = \"{FIXTURE_ALPHA_CERT}\"\nkey = \"{FIXTURE_ALPHA_KEY}\"\nnames = [\"same.example.test\"]\n\
+             [[listener.web.tls.certs]]\ncert = \"{FIXTURE_BETA_CERT}\"\nkey = \"{FIXTURE_BETA_KEY}\"\nnames = [\"SAME.example.test\"]\n\
+             [backend.api]\nserver = \"127.0.0.1:9\"\n"
+        ),
+    );
+    let out = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&duplicate)
+        .output()
+        .expect("run config validate");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("listener.web.tls.certs[1].names"),
+        "the error must name the field; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("already claimed"),
+        "the error must name the cause; stderr: {stderr}"
+    );
+
+    // Invalid names: an IP literal and a wildcard that is not the
+    // leftmost label.
+    let invalid = temp_config(
+        "sni-invalid",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n\
+             [listener.web.tls]\ncert = \"{FIXTURE_CERT}\"\nkey = \"{FIXTURE_KEY}\"\n\
+             [[listener.web.tls.certs]]\ncert = \"{FIXTURE_ALPHA_CERT}\"\nkey = \"{FIXTURE_ALPHA_KEY}\"\nnames = [\"127.0.0.1\", \"api.*.example.test\"]\n\
+             [backend.api]\nserver = \"127.0.0.1:9\"\n"
+        ),
+    );
+    let out = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&invalid)
+        .output()
+        .expect("run config validate");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("IP literal"),
+        "an IP name must be rejected naming the cause; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("leftmost label"),
+        "a misplaced wildcard must be rejected naming the fix; stderr: {stderr}"
+    );
+    remove_temp(&duplicate);
+    remove_temp(&invalid);
 }
 
 // --- `config apply` / `config rollback` (Phase 3, offline) ---
@@ -3658,5 +3871,236 @@ fn validate_rejects_misconfigured_splits_maps_and_missing_files() {
          file = \"/nonexistent/eqproxy-missing.map\"\n",
         "maps.t.file",
         "cannot be read",
+    );
+}
+
+/// B-H3 through the **real** binary: `hash_policy` keeps a key on its split
+/// target and `request_mirror` sends a copy of the matching request to a
+/// shadow backend while the client keeps the primary answer. `config
+/// explain` shows both decisions offline.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_hash_policy_and_request_mirror_end_to_end() {
+    let api_a = start_static_backend("alpha");
+    let api_b = start_static_backend("beta");
+    let (shadow, shadow_seen) = start_recording_backend("shadow");
+    let config = temp_config(
+        "hash-mirror",
+        &format!(
+            r#"schema_version = 1
+[listener.web]
+listen = "127.0.0.1:0"
+backend = "a"
+mode = "http"
+
+[[listener.web.rules]]
+name = "hashed"
+path_prefix = "/hashed"
+split = [{{ backend = "a", weight = 1 }}, {{ backend = "b", weight = 1 }}]
+hash_policy = {{ key = "cookie:session" }}
+
+[[listener.web.rules]]
+name = "mirrored"
+path_prefix = "/api"
+use_backend = "a"
+request_mirror = {{ backend = "shadow", percentage = 100 }}
+
+[backend.a]
+server = "{api_a}"
+[backend.b]
+server = "{api_b}"
+[backend.shadow]
+server = "{shadow}"
+"#
+        ),
+    );
+
+    // `config explain` says how the split picks and that a copy goes out,
+    // before anything runs.
+    let explain = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&config)
+        .args(["--method", "GET", "--host", "svc", "--path", "/hashed"])
+        .output()
+        .expect("run eqproxy config explain");
+    let explained = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        explain.status.success(),
+        "explain must exit 0; stderr: {}",
+        String::from_utf8_lossy(&explain.stderr)
+    );
+    assert!(
+        explained.contains("hash cookie:session"),
+        "explain must name the hash key: {explained}"
+    );
+
+    // The mirror belongs to the other rule: explain again for its path and
+    // check the policy shows up in the matched rule's header summary.
+    let explain_mirror = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&config)
+        .args(["--method", "GET", "--host", "svc", "--path", "/api/x"])
+        .output()
+        .expect("run eqproxy config explain (mirror)");
+    let explained_mirror = String::from_utf8_lossy(&explain_mirror.stdout);
+    assert!(
+        explain_mirror.status.success(),
+        "explain must exit 0; stderr: {}",
+        String::from_utf8_lossy(&explain_mirror.stderr)
+    );
+    assert!(
+        explained_mirror.contains("mirror 100% -> shadow"),
+        "explain must name the mirror policy: {explained_mirror}"
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (hash/mirror)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("leer stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy_addr = addr.trim().to_owned();
+            break;
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    let hashed = |key: &str| {
+        proxied(
+            proxy_addr.as_str(),
+            format!(
+                "GET /hashed/p HTTP/1.1\r\nHost: svc\r\nCookie: session={key}\r\nConnection: close\r\n\r\n"
+            )
+            .as_bytes(),
+        )
+    };
+
+    // One key, many requests: always the same split target.
+    let first = hashed("alice");
+    assert_eq!(body_of(&first), "alpha", "first key: {first}");
+    for _ in 0..5 {
+        assert_eq!(
+            body_of(&hashed("alice")),
+            "alpha",
+            "the same key must keep its target on the real binary"
+        );
+    }
+    // Different keys reach both targets (the key really selects).
+    let mut bodies = std::collections::BTreeSet::new();
+    for i in 0..12 {
+        let response = hashed(&format!("user-{i}"));
+        bodies.insert(body_of(&response).to_owned());
+    }
+    assert_eq!(
+        bodies,
+        ["alpha".to_owned(), "beta".to_owned()]
+            .into_iter()
+            .collect(),
+        "the split must keep every target in rotation: {bodies:?}"
+    );
+
+    // Mirror: the client gets the primary answer, the shadow backend
+    // receives the copy (observed on its own socket, not assumed).
+    let response = proxied(
+        proxy_addr.as_str(),
+        b"POST /api/orders HTTP/1.1\r\nHost: svc\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbody",
+    );
+    assert_eq!(body_of(&response), "alpha", "primary answer: {response}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let seen = shadow_seen.lock().expect("record").clone();
+        if seen.iter().any(|line| line == "POST /api/orders HTTP/1.1") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the shadow backend never received the mirrored copy: {seen:?}"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    send_signal(&child, "-INT");
+    child.wait().expect("eqproxy exits");
+    remove_temp(&config);
+}
+
+/// Q1/CE1: `config schema` publishes the configuration schema the editors
+/// consume — the same document the parser accepts, reproducible into a file.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn config_schema_publishes_the_generated_json_schema() {
+    let output = bin()
+        .args(["config", "schema"])
+        .output()
+        .expect("run eqproxy config schema");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        output.status.success(),
+        "config schema must exit 0; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&stdout).expect("stdout is JSON");
+    assert_eq!(
+        parsed["$schema"], "https://json-schema.org/draft/2020-12/schema",
+        "the schema declares its draft"
+    );
+    for definition in [
+        "ListenerConfig",
+        "BackendConfig",
+        "RuleConfig",
+        "HashPolicyConfig",
+        "RequestMirrorConfig",
+    ] {
+        assert!(
+            parsed["$defs"][definition].is_object(),
+            "the schema must publish {definition}"
+        );
+    }
+
+    // `--output` writes exactly what stdout prints (one trailing newline),
+    // so the repository copy is regenerated by a single command.
+    let path = std::env::temp_dir().join(format!("eqproxy-schema-{}.json", std::process::id()));
+    let written = bin()
+        .args(["config", "schema", "--output"])
+        .arg(&path)
+        .output()
+        .expect("run eqproxy config schema --output");
+    assert!(
+        written.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&written.stderr)
+    );
+    let file = std::fs::read_to_string(&path).expect("read written schema");
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(
+        file, stdout,
+        "--output must write exactly what stdout prints (one trailing newline)"
+    );
+
+    // The published file in the repository is the one this binary renders.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../eqproxy.schema.json");
+    let committed = std::fs::read_to_string(&repo).expect("read eqproxy.schema.json");
+    assert_eq!(
+        committed,
+        file,
+        "{} is stale: run `eqproxy config schema --output eqproxy.schema.json`",
+        repo.display()
     );
 }

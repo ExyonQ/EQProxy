@@ -12,6 +12,7 @@ pub mod balancer;
 pub mod health;
 pub mod http1;
 pub mod maps;
+pub mod mirror;
 pub mod pool;
 pub mod proxy;
 pub mod proxy_proto;
@@ -25,9 +26,9 @@ pub use dns::{DnsSettings, Resolving, SystemResolver};
 pub use health::HealthCheck;
 pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, MAX_IDLE_PER_SERVER, Pool};
 pub use proxy::{
-    AffinityMode, BoundProxy, OutboundError, ProxyError, ProxyMode, READ_BUF, RateLimiter,
-    ResolvedAffinity, ResolvedAuth, ResolvedBackend, ResolvedCors, ResolvedHeaders,
-    ResolvedListener, ResolvedRewrite, ResolvedRoute, RouteAction, RouteDecision, SplitTarget,
-    SplitTargets, SwapSummary, bind, connect_backend,
+    AffinityMode, BoundProxy, BoxRead, BoxWrite, HashKey, HashPolicy, MirrorPolicy, OutboundError,
+    ProxyError, ProxyMode, READ_BUF, RateLimiter, ResolvedAffinity, ResolvedAuth, ResolvedBackend,
+    ResolvedCors, ResolvedHeaders, ResolvedListener, ResolvedRewrite, ResolvedRoute, RouteAction,
+    RouteDecision, SplitTarget, SplitTargets, SwapSummary, bind, connect_backend,
 };
 pub use proxy_proto::ProxyProtocolMode;

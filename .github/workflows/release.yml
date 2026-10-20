@@ -400,8 +400,34 @@ jobs:
 
       - name: Build single-arch image to verify
         run: |
-          docker buildx build --file docker/Dockerfile --platform linux/amd64 \
+          # --pull: the base digest recorded in the image must be the current
+          # one, or Docker Scout's "no outdated base images" policy flags a
+          # release built from a tag that moved after the local cache.
+          docker buildx build --pull --file docker/Dockerfile --platform linux/amd64 \
+            --provenance=mode=max --sbom=true \
             --tag eqproxy-release-verify:ci --load .
+
+      # Publish gate (owner decision 2026-10-20, after the v0.6.0 images
+      # showed base-OS findings on Docker Hub): the exact image about to be
+      # pushed is scanned first and the job fails on any critical or high
+      # vulnerability. The runtime is `scratch`, so a finding here means a
+      # real regression in what we ship, not noise from a Debian base. The
+      # CLI is pinned: `docker scout cves --exit-code` is the command verified
+      # locally on the release image (exit 0), not the action's `compare`
+      # semantics.
+      - name: Install Docker Scout CLI (pinned)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh \
+            | sh -s -- v1.25.0
+          docker scout version
+
+      - name: Docker Scout gate (critical/high must be zero)
+        run: |
+          set -o pipefail
+          docker scout cves --only-severity critical,high --exit-code \
+            local://eqproxy-release-verify:ci | tail -40
+          echo "scout: no critical or high vulnerability in the image about to be published"
 
       - name: Verify image artifact (version + config gate + live traffic)
         run: |
@@ -464,8 +490,9 @@ jobs:
           # `-` suffix) never re-points it.
           TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
           case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
-          docker buildx build --file docker/Dockerfile \
+          docker buildx build --pull --file docker/Dockerfile \
             --platform linux/amd64,linux/arm64 \
+            --provenance=mode=max --sbom=true \
             $TAGS --push .
 
       # Mirror the exact verified manifest (same digests) to Docker Hub.
@@ -492,6 +519,7 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
           case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
-          docker buildx build --file docker/Dockerfile \
+          docker buildx build --pull --file docker/Dockerfile \
             --platform linux/amd64,linux/arm64 \
+            --provenance=mode=max --sbom=true \
             $TAGS .

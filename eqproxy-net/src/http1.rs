@@ -38,6 +38,7 @@ use tokio::io::{
 
 use eqproxy_core::Metrics;
 
+use crate::mirror;
 use crate::proxy::{
     AffinityMode, ForwardedMode, OutboundError, READ_BUF, ResolvedCors, ResolvedHeaders,
     ResolvedListener, ResolvedRewrite, RetryContext, RouteDecision, checkout_or_connect,
@@ -57,6 +58,64 @@ const CONTINUE: &[u8] = b"HTTP/1.1 100 Continue\r\n\r\n";
 /// Interim responses accepted before the final one (bounded, never an
 /// endless 1xx stream).
 const MAX_INTERIM_RESPONSES: u32 = 8;
+
+/// Writer wrapper that duplicates the bytes it forwards into a bounded
+/// buffer (B-H3 request mirror): the copy keeps the **exact** wire framing
+/// the primary backend received (chunk framing included), and the buffer is
+/// dropped as soon as it would exceed its budget (the request is then not
+/// mirrored — counted, never truncated into an invalid message).
+struct MirrorTee<'a, W> {
+    inner: &'a mut W,
+    budget: usize,
+    /// `None` once the budget was exceeded.
+    buffer: Option<Vec<u8>>,
+}
+
+impl<'a, W> MirrorTee<'a, W> {
+    fn new(inner: &'a mut W, budget: usize) -> Self {
+        Self {
+            inner,
+            budget,
+            buffer: Some(Vec::new()),
+        }
+    }
+
+    /// The copied bytes, or `None` when they did not fit the budget.
+    fn finish(self) -> Option<Vec<u8>> {
+        self.buffer
+    }
+}
+
+impl<W: AsyncWrite + Unpin> AsyncWrite for MirrorTee<'_, W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        let written = match Pin::new(&mut *this.inner).poll_write(cx, buf) {
+            Poll::Ready(Ok(written)) => written,
+            Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+            Poll::Pending => return Poll::Pending,
+        };
+        if let Some(copy) = this.buffer.as_mut() {
+            if copy.len() + written > this.budget {
+                this.buffer = None;
+            } else {
+                copy.extend_from_slice(&buf[..written]);
+            }
+        }
+        Poll::Ready(Ok(written))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut *self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
 /// Headers forbidden in chunked trailers (T01).
 const FORBIDDEN_TRAILERS: [&str; 6] = [
@@ -1543,6 +1602,16 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
+        // Request mirror (B-H3): resolved per matching request — the rule's
+        // policy decides by its own percentage, and only a sampled request
+        // costs anything. Placement matters: a mirror never runs for a
+        // request answered locally below (preflight) or rejected by the
+        // forwarding phase.
+        let mirror = rule_headers
+            .and_then(|actions| actions.mirror.as_ref())
+            .filter(|policy| policy.sample())
+            .cloned();
+
         // CORS preflight (B-I10): a matched rule with a CORS policy
         // answers OPTIONS locally — the backend never sees the preflight.
         if is_cors_preflight(&request)
@@ -1679,30 +1748,65 @@ pub async fn serve_http<CR, CW>(
             return;
         }
 
+        // Request body forwarding, teeing the bytes for the mirror copy when
+        // the matched rule has one (B-H3). `None` after the copy = the body
+        // exceeded the mirror budget (counted, never truncated).
+        let mut mirror_body: Option<Vec<u8>> = mirror.as_ref().map(|_| Vec::new());
         let request_body = match until_deadline(stream_deadline, async {
             match request.framing {
                 BodyFraming::None => Ok(()),
-                BodyFraming::ContentLength(len) => {
-                    copy_exact(
-                        &mut from_client,
-                        &mut backend_write,
-                        len,
-                        cfg.idle_timeout,
-                        &metrics.bytes_client_to_backend,
-                        &metrics.idle_timeouts,
-                    )
-                    .await
-                }
-                BodyFraming::Chunked => {
-                    copy_chunked(
-                        &mut from_client,
-                        &mut backend_write,
-                        cfg.idle_timeout,
-                        &metrics.bytes_client_to_backend,
-                        &metrics.idle_timeouts,
-                    )
-                    .await
-                }
+                BodyFraming::ContentLength(len) => match mirror.is_some() {
+                    true => {
+                        let mut tee = MirrorTee::new(&mut backend_write, mirror::BODY_BUDGET);
+                        let copied = copy_exact(
+                            &mut from_client,
+                            &mut tee,
+                            len,
+                            cfg.idle_timeout,
+                            &metrics.bytes_client_to_backend,
+                            &metrics.idle_timeouts,
+                        )
+                        .await;
+                        mirror_body = tee.finish();
+                        copied
+                    }
+                    false => {
+                        copy_exact(
+                            &mut from_client,
+                            &mut backend_write,
+                            len,
+                            cfg.idle_timeout,
+                            &metrics.bytes_client_to_backend,
+                            &metrics.idle_timeouts,
+                        )
+                        .await
+                    }
+                },
+                BodyFraming::Chunked => match mirror.is_some() {
+                    true => {
+                        let mut tee = MirrorTee::new(&mut backend_write, mirror::BODY_BUDGET);
+                        let copied = copy_chunked(
+                            &mut from_client,
+                            &mut tee,
+                            cfg.idle_timeout,
+                            &metrics.bytes_client_to_backend,
+                            &metrics.idle_timeouts,
+                        )
+                        .await;
+                        mirror_body = tee.finish();
+                        copied
+                    }
+                    false => {
+                        copy_chunked(
+                            &mut from_client,
+                            &mut backend_write,
+                            cfg.idle_timeout,
+                            &metrics.bytes_client_to_backend,
+                            &metrics.idle_timeouts,
+                        )
+                        .await
+                    }
+                },
                 BodyFraming::UntilEof => Ok(()),
             }
         })
@@ -1739,6 +1843,28 @@ pub async fn serve_http<CR, CW>(
         // Bytes past the request body belong to the next pipelined
         // exchange on this client connection.
         client_carry = from_client.prefix.split_off(from_client.pos);
+
+        // Request mirror (B-H3): the copy goes out on a detached task now
+        // that the client's body is complete, so it adds no latency to the
+        // exchange and its outcome (success or failure) never reaches the
+        // client — only the counters and the log see it.
+        match (mirror, mirror_body) {
+            (Some(policy), Some(body)) => mirror::spawn(mirror::MirrorCopy {
+                name: cfg.name.clone(),
+                connect_timeout: cfg.connect_timeout,
+                idle_timeout: cfg.idle_timeout,
+                policy,
+                peer,
+                local,
+                head: forwarded_head.clone(),
+                body,
+                metrics: Arc::clone(&metrics),
+            }),
+            (Some(_policy), None) => {
+                metrics.mirror_skipped.fetch_add(1, Ordering::Relaxed);
+            }
+            (None, _) => {}
+        }
 
         // --- Server phase: response head ---
         // Interim (1xx) responses are never final (RFC 9112 §6.2): forward

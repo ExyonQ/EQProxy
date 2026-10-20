@@ -256,6 +256,7 @@ async fn header_actions_apply_to_request_and_response() {
                 cors: None,
                 rate_limit: None,
                 auth: None,
+                mirror: None,
             }),
         },
         ResolvedRoute {
@@ -277,6 +278,7 @@ async fn header_actions_apply_to_request_and_response() {
                 cors: None,
                 rate_limit: None,
                 auth: None,
+                mirror: None,
             }),
         },
     ];
@@ -345,6 +347,7 @@ async fn cors_preflight_is_local_and_responses_carry_headers() {
             }),
             rate_limit: None,
             auth: None,
+            mirror: None,
         }),
     }];
     let cfg = routing_listener("127.0.0.1:0".parse().expect("addr"), echo, routes);
@@ -443,6 +446,7 @@ async fn rate_limit_rejects_over_the_limit_explicitly() {
                 2,
             ))),
             auth: None,
+            mirror: None,
         }),
     }];
     let cfg = routing_listener("127.0.0.1:0".parse().expect("addr"), echo, routes);
@@ -1145,6 +1149,7 @@ fn auth_rule(
             cors: None,
             rate_limit: None,
             auth: Some(auth),
+            mirror: None,
         }),
     }
 }
@@ -1341,6 +1346,7 @@ async fn split_traffic_shares_requests_by_weight_across_backends() {
         action: RouteAction::Split {
             targets: Arc::new(eqproxy_net::SplitTargets::new(targets)),
             rewrite: None,
+            hash: None,
         },
         headers: None,
     };
@@ -1546,6 +1552,296 @@ async fn map_condition_consults_hot_data_and_swaps_in_hot() {
         "the old data is gone after the swap"
     );
 
+    _handle.trigger();
+    serve.await.expect("serve ends");
+}
+
+// --- B-H3 (hash_policy y request_mirror) ---
+
+/// Backend that records every request head it receives and answers with
+/// its id (B-H3 mirror: the shadow side must be observed, not assumed).
+async fn start_recording_backend(
+    id: &'static str,
+) -> (SocketAddr, Arc<tokio::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind recording backend");
+    let addr = listener.local_addr().expect("addr recording backend");
+    let seen = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let recorder = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let recorder = Arc::clone(&recorder);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let mut total = 0usize;
+                    let head_end = loop {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).into_owned();
+                    recorder.lock().await.push(head.clone());
+                    let close = head.contains("Connection: close");
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{}",
+                        id.len(),
+                        id
+                    );
+                    if socket.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                    if close {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, seen)
+}
+
+fn hash_split_rule(targets: Vec<eqproxy_net::SplitTarget>, key: &str) -> ResolvedRoute {
+    ResolvedRoute {
+        rule: Rule::compile(&RuleSpec {
+            name: "hashed".to_owned(),
+            path_prefix: Some("/".to_owned()),
+            ..RuleSpec::default()
+        })
+        .expect("rule compiles"),
+        action: RouteAction::Split {
+            targets: Arc::new(eqproxy_net::SplitTargets::new(targets)),
+            rewrite: None,
+            hash: Some(eqproxy_net::HashPolicy::parse(key).expect("hash key parses")),
+        },
+        headers: None,
+    }
+}
+
+/// Hash policy (B-H3, Envoy `hash_policy`): the same key keeps the same
+/// target across requests and connections, different keys spread over the
+/// targets, a request without the key falls back to the rotation, and
+/// removing a target only remaps the keys it owned (consistent hashing).
+#[tokio::test]
+async fn hash_policy_keeps_a_key_on_its_target_and_only_remaps_owned_keys() {
+    let a = start_identity_backend("alpha").await;
+    let b = start_identity_backend("beta").await;
+    let c = start_identity_backend("gamma").await;
+    let target = |name: &str, addr: SocketAddr, weight: u32| eqproxy_net::SplitTarget {
+        backend: Arc::new(ResolvedBackend::single(name, addr)),
+        weight,
+    };
+    let cookie_get = |key: &str| {
+        format!(
+            "GET /p HTTP/1.1\r\nHost: svc.example\r\nCookie: session={key}\r\nConnection: close\r\n\r\n"
+        )
+    };
+
+    let cfg = routing_listener(
+        "127.0.0.1:0".parse().expect("addr"),
+        a,
+        vec![hash_split_rule(
+            vec![
+                target("alpha", a, 1),
+                target("beta", b, 1),
+                target("gamma", c, 1),
+            ],
+            "cookie:session",
+        )],
+    );
+    let metrics = Arc::new(Metrics::default());
+    let (proxy, _handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    // One key, many exchanges: always the same target (no rotation).
+    let first = request_body(proxy, &cookie_get("alice")).await;
+    for _ in 0..10 {
+        assert_eq!(
+            request_body(proxy, &cookie_get("alice")).await,
+            first,
+            "the same key must keep its target across requests"
+        );
+    }
+
+    // Many keys: all three targets serve, so the key really selects.
+    let mut mapping = std::collections::BTreeMap::new();
+    for i in 0..30 {
+        let key = format!("user-{i}");
+        mapping.insert(key.clone(), request_body(proxy, &cookie_get(&key)).await);
+    }
+    let distinct: std::collections::BTreeSet<_> = mapping.values().collect();
+    assert!(
+        distinct.len() >= 2,
+        "different keys must spread over the targets: {mapping:?}"
+    );
+
+    // Without the cookie the request falls back to the weighted rotation
+    // (the split keeps serving every target rather than pinning one).
+    let no_cookie = "GET /p HTTP/1.1\r\nHost: svc.example\r\nConnection: close\r\n\r\n";
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..6 {
+        seen.insert(request_body(proxy, no_cookie).await);
+    }
+    assert!(
+        seen.len() >= 2,
+        "a request without the key rotates instead of sticking: {seen:?}"
+    );
+
+    _handle.trigger();
+    serve.await.expect("serve ends");
+
+    // Consistent removal: with gamma gone, every key that was on alpha or
+    // beta keeps its target — only gamma's keys move.
+    let cfg = routing_listener(
+        "127.0.0.1:0".parse().expect("addr"),
+        a,
+        vec![hash_split_rule(
+            vec![target("alpha", a, 1), target("beta", b, 1)],
+            "cookie:session",
+        )],
+    );
+    let metrics = Arc::new(Metrics::default());
+    let (proxy, _handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+    let mut moved = 0;
+    for (key, was) in &mapping {
+        let name = request_body(proxy, &cookie_get(key)).await;
+        if was != "gamma" {
+            assert_eq!(
+                &name, was,
+                "key {key} was on {was} and must not move when gamma leaves"
+            );
+        } else {
+            moved += 1;
+        }
+    }
+    assert_eq!(
+        moved,
+        mapping.values().filter(|name| *name == "gamma").count(),
+        "only the keys owned by the removed target move"
+    );
+    _handle.trigger();
+    serve.await.expect("serve ends");
+}
+
+/// Request mirror (B-H3, Envoy `request_mirror_policies`): a rule with a
+/// mirror sends a copy of the matching request to the shadow backend while
+/// the client keeps the primary answer; the copy carries the same forwarded
+/// head and body, and a dead shadow backend changes nothing for the client
+/// (counted, logged).
+#[tokio::test]
+async fn request_mirror_copies_the_request_and_never_changes_the_client_answer() {
+    let primary = start_identity_backend("primary").await;
+    let (shadow, seen) = start_recording_backend("shadow").await;
+    let metrics = Arc::new(Metrics::default());
+    let mirror_rule = |shadow_addr: SocketAddr, percentage: u32| ResolvedRoute {
+        rule: Rule::compile(&RuleSpec {
+            name: "mirrored".to_owned(),
+            path_prefix: Some("/api".to_owned()),
+            ..RuleSpec::default()
+        })
+        .expect("rule compiles"),
+        action: RouteAction::Backend {
+            backend: Arc::new(ResolvedBackend::single("primary", primary)),
+            rewrite: None,
+        },
+        headers: Some(ResolvedHeaders {
+            mirror: Some(Arc::new(eqproxy_net::MirrorPolicy::new(
+                Arc::new(ResolvedBackend::single("shadow", shadow_addr)),
+                percentage,
+            ))),
+            ..ResolvedHeaders::default()
+        }),
+    };
+
+    let cfg = routing_listener(
+        "127.0.0.1:0".parse().expect("addr"),
+        primary,
+        vec![mirror_rule(shadow, 100)],
+    );
+    let (proxy, _handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let body = request_body(
+        proxy,
+        "POST /api/orders HTTP/1.1\r\nHost: svc.example\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world",
+    )
+    .await;
+    assert_eq!(body, "primary", "the client gets the primary answer");
+
+    // The shadow side must have actually received the copy: head + body.
+    let deadline = std::time::Instant::now() + WAIT;
+    let copy = loop {
+        if let Some(first) = seen.lock().await.first().cloned() {
+            break first;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the shadow backend never received the mirrored request"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert!(
+        copy.starts_with("POST /api/orders HTTP/1.1\r\n"),
+        "the mirror keeps the request line: {copy:?}"
+    );
+    assert!(
+        copy.contains("Host: svc.example"),
+        "the mirror keeps the client's Host: {copy:?}"
+    );
+    assert_eq!(
+        metrics.snapshot().requests_mirrored,
+        1,
+        "one mirror copy on the wire"
+    );
+
+    // A path that does not match the rule is not mirrored.
+    assert_eq!(
+        request_body(proxy, &get("svc.example", "/other")).await,
+        "primary"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        seen.lock().await.len(),
+        1,
+        "only the matching requests are mirrored"
+    );
+
+    _handle.trigger();
+    serve.await.expect("serve ends");
+
+    // Dead shadow backend: the client still gets the primary answer, the
+    // failure is counted and nothing hangs.
+    let dead: SocketAddr = "127.0.0.1:1".parse().expect("addr");
+    let cfg = routing_listener(
+        "127.0.0.1:0".parse().expect("addr"),
+        primary,
+        vec![mirror_rule(dead, 100)],
+    );
+    let metrics = Arc::new(Metrics::default());
+    let (proxy, _handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+    assert_eq!(
+        request_body(proxy, &get("svc.example", "/api/x")).await,
+        "primary",
+        "a dead shadow backend never changes the client's answer"
+    );
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        if metrics.snapshot().mirror_failures == 1 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mirror failure was never counted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(metrics.snapshot().requests_mirrored, 0);
     _handle.trigger();
     serve.await.expect("serve ends");
 }
