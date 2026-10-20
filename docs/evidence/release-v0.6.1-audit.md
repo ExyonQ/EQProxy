@@ -99,7 +99,39 @@ arm64 manifest `sha256:3308db56…`, attestation manifest `sha256:6c3fa1ed…`):
 - **`cargo-geiger`**: INCONCLUSIVE (coverage warnings in 4 runs), reported as
   such, not as a pass.
 
-## 5. Known limitations of the new runtime
+## 5. Publication (verified against the published artifacts)
+
+Workflow run **39469628305** (tag `v0.6.1`): every job green — guard, darwin
+binaries, linux binaries + SBOM, multi-arch image (build, Scout gate, E2E,
+push, Docker Hub mirror), GitHub release.
+
+An earlier run of the same tag (**39465112082**) failed in the image job:
+`ERROR: failed to build: docker exporter does not currently support exporting
+manifest lists` — `--provenance/--sbom` together with `--load`. It had already
+published the GitHub release (9 assets) but no image. The workflow was fixed
+(attestations only on the pushed manifest; Scout gate runs on the publishing
+path with the Docker Hub login it needs; the release step refreshes an existing
+release), the tag was re-pointed to that commit and the run above is the one
+that published.
+
+Artifacts checked after publication, not during:
+
+| Check | Result |
+|---|---|
+| `docker buildx imagetools inspect ghcr.io/exyonq/eqproxy:0.6.1` | index `sha256:ae15bb0f3651c9a76dd5be7b592ae007839ad46883a7c57756c52c2dcd4c4418`, platforms `linux/amd64` + `linux/arm64` + **2 attestation manifests** |
+| `docker buildx imagetools inspect exyonq/eqproxy:0.6.1` | **same index digest** (Docker Hub mirrors the verified manifest) |
+| `ghcr.io/exyonq/eqproxy:latest` | same digest (no prerelease re-pointing) |
+| `docker pull` + `docker run … --version` | `eqproxy 0.6.1`, `user=65532:65532`, 15.8 MB |
+| `docker scout cves --only-severity critical,high --exit-code local://ghcr.io/exyonq/eqproxy:0.6.1` | **exit 0**, 0 packages, no vulnerable packages |
+| `docker scout quickview` on the published image | **7/7 policies met** (non-root, copyleft, fixable critical/high, high-profile, outdated base, unapproved base, **attestations**) |
+| `gh release download v0.6.1` + `shasum -a 256 -c SHA256SUMS.txt` | `eqproxy-linux-arm64: OK` |
+| released binary run in `debian:bookworm-slim` (linux/arm64) | `eqproxy 0.6.1`, `config validate` → `config OK`, `config schema --output` reproduces the repository schema byte for byte |
+
+The CI image job also ran the Scout gate itself (`Docker Scout gate
+(critical/high must be zero): success`) and the live-traffic E2E on the
+exact image it pushed.
+
+## 6. Known limitations of the new runtime
 
 - The published **container** is a musl build (ADR-0001 tier 2): functionally
   verified, **not** covered by the benchmark claims, which stay on glibc
