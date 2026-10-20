@@ -57,9 +57,16 @@ unchanged.
   high vulnerabilities" and "No high-profile vulnerabilities" all met.
 - Functional E2E through the container: `--version` (`eqproxy 0.6.1`),
   `config validate` through stdin, and live proxied traffic (`200` from a
-  real nginx backend behind the container). CI repeats these on the exact
-  image it publishes, plus a Docker Scout gate (`critical,high`,
-  `--exit-code`) before the push.
+  real nginx backend behind the container).
+- **Both architectures, not only amd64** (2026-10-20): a retro-check of the
+  published v0.6.1 image gave `0C 0H 0M 0L` on `linux/amd64`
+  (`sha256:f1b1ff07…`, 4.6 MB) and on `linux/arm64` (`sha256:517945df…`,
+  4.3 MB), 0 packages each. The pipeline now enforces what was checked by
+  hand: it builds the multi-arch index once under a `-candidate` tag, scans
+  both platforms, runs E2E on both, and promotes that digest to
+  `<version>`/`:latest`; the release job depends on it and receives the two
+  Scout reports as assets. Evidence:
+  `docs/evidence/release-v0.6.1-scout-both-arch.md`.
 
 ## Consequences
 
@@ -78,6 +85,9 @@ unchanged.
   rather than presented as equivalent.
 - **Supply chain**: builds push provenance (`mode=max`) and an SPDX SBOM;
   the workflow fails if Scout finds any critical/high vulnerability.
-- **Not verified here**: multi-arch (`linux/amd64`) emulated build on this
-  host — CI builds and verifies `linux/amd64` for every release, and the
-  arm64 build was verified locally.
+- **Not verified here**: arm64 containers run under QEMU emulation on the
+  amd64 runner; the E2E journeys and Scout scan prove the artifact, not
+  native arm64 speed (the benchmark evidence covers arm64 separately).
+  Registry-side policy evaluation (`docker scout policy`, the Docker Hub
+  health score) is not part of the gate; only `cves --only-severity
+  critical,high --exit-code` is.

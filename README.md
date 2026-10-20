@@ -67,10 +67,19 @@ cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 Binaries and checksums live on the
 [release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.1).
 
+Every release carries **four prebuilt binaries**: `eqproxy-darwin-arm64`,
+`eqproxy-darwin-amd64`, `eqproxy-linux-arm64` and `eqproxy-linux-amd64`. The
+Linux ones are **statically linked against musl** (`file` reports `static-pie
+linked` on amd64 and `statically linked` on arm64, no `NEEDED` entries, no
+interpreter), so they need no libc, no glibc version and no packages at all:
+they run on any Linux distribution of that architecture, and also on
+`FROM scratch`. Each release ships the Docker Scout report of both image
+architectures (`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`).
+
 ```bash
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
-#   eqproxy-linux-arm64  | eqproxy-linux-amd64
+#   eqproxy-linux-arm64  | eqproxy-linux-amd64   (static, musl)
 curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.1/eqproxy-linux-amd64
 curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.1/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # Linux: sha256sum -c --ignore-missing SHA256SUMS.txt

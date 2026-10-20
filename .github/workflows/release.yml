@@ -336,8 +336,12 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: GitHub release (binaries + SHA256SUMS + SBOM)
-    needs: [darwin, linux]
+    name: GitHub release (binaries + SHA256SUMS + SBOM + Scout)
+    # The image job is a prerequisite, not a sibling: the release must not
+    # exist until both architecture images have been scanned by Docker Scout
+    # and exercised end to end. A failing scan or E2E leaves the tag without
+    # a release instead of shipping one next to an unverified image.
+    needs: [darwin, linux, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -351,9 +355,16 @@ jobs:
       - name: Assemble dist/ and write SHA256SUMS (only after both builds verified)
         run: |
           set -euo pipefail
-          mkdir -p dist sbom
+          mkdir -p dist sbom scout
           find collect -type f \( -name 'eqproxy-darwin-*' -o -name 'eqproxy-linux-*' \) -exec cp {} dist/ \;
           find collect -type f -name '*.cdx.json' -exec cp {} sbom/ \;
+          find collect -type f -name 'SCOUT-*.md' -exec cp {} scout/ \;
+          # Both architectures must have been scanned; a missing report means
+          # the gate did not run and the release must not be created.
+          for arch in amd64 arm64; do
+            ls scout/SCOUT-*-linux-"$arch".md >/dev/null 2>&1 \
+              || { echo "missing Scout report for linux/$arch"; exit 1; }
+          done
           for bin in eqproxy-darwin-amd64 eqproxy-darwin-arm64 eqproxy-linux-amd64 eqproxy-linux-arm64; do
             test -f "dist/$bin" || { echo "missing $bin in dist/ (builds did not produce it)"; exit 1; }
           done
@@ -380,16 +391,16 @@ jobs:
           # to a registry) the tag is re-run, and the release must refresh its
           # assets instead of failing on "release already exists".
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json --clobber
+            gh release upload "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json scout/*.md --clobber
             gh release edit "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md $EXTRA
           else
-            gh release create "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json \
+            gh release create "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json scout/*.md \
               --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md $EXTRA
           fi
 
   image:
-    name: Multi-arch image (build + verify + push)
+    name: Multi-arch image (build + Scout both archs + E2E + promote)
     needs: [darwin, linux]
     runs-on: ubuntu-latest
     permissions:
@@ -408,35 +419,55 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build single-arch image to verify
+      # Publish gate (owner decision 2026-10-20, extended the same day to
+      # **both** architectures): the image is built once and pushed under a
+      # throwaway `-candidate` tag, so Docker Scout inspects the exact
+      # manifest digests that get published — on linux/amd64 **and**
+      # linux/arm64. `$VERSION` and `:latest` are only created afterwards by
+      # promoting that same index by digest, and the release job waits for
+      # this job, so no architecture can ship unscanned and no finding can
+      # reach a tag anyone pulls. The candidate tag is never documented nor
+      # pointed by `:latest`; it is the record of what was scanned.
+      # --pull: the base digest recorded in the image must be the current
+      # one, or Docker Scout's "no outdated base images" policy flags a
+      # release built from a tag that moved after the local cache.
+      - name: Build and push the candidate manifest (linux/amd64 + linux/arm64)
+        if: github.ref_type == 'tag'
         run: |
-          # --pull: the base digest recorded in the image must be the current
-          # one, or Docker Scout's "no outdated base images" policy flags a
-          # release built from a tag that moved after the local cache.
-          # No --provenance/--sbom here: they turn the result into a manifest
-          # list and the docker exporter (`--load`) refuses those. Attestations
-          # belong to the pushed manifest, which is built further down.
-          docker buildx build --pull --file docker/Dockerfile --platform linux/amd64 \
-            --tag eqproxy-release-verify:ci --load .
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          docker buildx build --pull --file docker/Dockerfile \
+            --platform linux/amd64,linux/arm64 \
+            --provenance=mode=max --sbom=true \
+            --tag "ghcr.io/exyonq/eqproxy:${VERSION}-candidate" --push .
+
+      - name: Record the candidate index digest
+        if: github.ref_type == 'tag'
+        id: candidate
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          REF="ghcr.io/exyonq/eqproxy:${VERSION}-candidate"
+          # The digest of the index bytes is the digest `imagetools create`
+          # promotes and the one the post-promotion check compares against.
+          DIGEST=$(docker buildx imagetools inspect --raw "$REF" | sha256sum | cut -d' ' -f1)
+          echo "digest=$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "candidate index: $REF@sha256:$DIGEST"
 
       # Scout needs an authenticated Docker Hub account to index the image.
       # Same secrets as the mirror step below; the gate only exists on the
       # path that can actually publish.
-      - name: Log in to Docker Hub (Scout)
+      - name: Log in to Docker Hub (Scout indexing and mirror)
         if: github.ref_type == 'tag'
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Publish gate (owner decision 2026-10-20, after the v0.6.0 images
-      # showed base-OS findings on Docker Hub): the exact image about to be
-      # pushed is scanned first and the job fails on any critical or high
-      # vulnerability. The runtime is `scratch`, so a finding here means a
-      # real regression in what we ship, not noise from a Debian base. The
-      # CLI is pinned: `docker scout cves --exit-code` is the command verified
-      # locally on the release image (exit 0), not the action's `compare`
-      # semantics.
+      # The runtime is `scratch`, so a finding here means a real regression in
+      # what we ship, not noise from a Debian base. The CLI is pinned:
+      # `docker scout cves --exit-code` is the command verified locally on the
+      # release image (exit 0), not the action's `compare` semantics.
       - name: Install Docker Scout CLI (pinned)
         if: github.ref_type == 'tag'
         run: |
@@ -445,15 +476,36 @@ jobs:
             | sh -s -- v1.25.0
           docker scout version
 
-      - name: Docker Scout gate (critical/high must be zero)
+      - name: Docker Scout gate (linux/amd64 and linux/arm64, critical/high = 0)
         if: github.ref_type == 'tag'
         run: |
-          set -o pipefail
-          docker scout cves --only-severity critical,high --exit-code \
-            local://eqproxy-release-verify:ci | tail -40
-          echo "scout: no critical or high vulnerability in the image about to be published"
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          REF="ghcr.io/exyonq/eqproxy:${VERSION}-candidate"
+          DIGEST="${{ steps.candidate.outputs.digest }}"
+          mkdir -p scout
+          for arch in amd64 arm64; do
+            report="scout/SCOUT-${VERSION}-linux-${arch}.md"
+            {
+              echo "# Docker Scout — \`$REF\` \`linux/$arch\`"
+              echo
+              echo "Scanned candidate index: \`sha256:${DIGEST}\`"
+              echo
+              echo "Command: \`docker scout cves --format markdown --platform linux/$arch $REF\`"
+              echo
+            } > "$report"
+            docker scout cves --format markdown --platform "linux/$arch" "$REF" \
+              >> "$report"
+            # Same report data, exit code 2 on any critical/high: pipefail keeps
+            # Scout's status through `tail` instead of masking it.
+            set -o pipefail
+            docker scout cves --only-severity critical,high --exit-code \
+              --platform "linux/$arch" "$REF" | tail -12
+            echo "scout: no critical or high vulnerability on linux/$arch"
+          done
 
-      - name: Verify image artifact (version + config gate + live traffic)
+      - name: Verify image artifact on both architectures (version + config gate + live traffic)
+        if: github.ref_type == 'tag'
         run: |
           set -euo pipefail
           VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
@@ -495,51 +547,79 @@ jobs:
             [ "$code" = "200" ] || fail "$proxy_image live traffic HTTP $code ($verdict)"
             log "E2E $proxy_image: live traffic OK ($verdict)"
           }
-          image=eqproxy-release-verify:ci
-          log "E2E $image: --version"
-          docker run --rm "$image" --version | grep -q "eqproxy $VER" \
-            || fail "$image reports wrong version"
-          log "E2E $image: validate accepts good config"
-          printf '%s' "$GOOD_CONFIG" | docker run --rm -i "$image" \
-            config validate --config /dev/stdin \
-            | grep -q "config OK: 1 listener(s), 1 backend(s)" \
-            || fail "$image validate happy path"
-          verify_live_container "image artifact" "$image"
+          VERSION="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/exyonq/eqproxy:${VERSION}-candidate"
+          for arch in amd64 arm64; do
+            log "E2E $image (linux/$arch): --version"
+            docker run --rm --platform "linux/$arch" "$image" --version \
+              | grep -q "eqproxy $VER" \
+              || fail "$image linux/$arch reports wrong version"
+            log "E2E $image (linux/$arch): validate accepts good config"
+            printf '%s' "$GOOD_CONFIG" | docker run --rm -i --platform "linux/$arch" "$image" \
+              config validate --config /dev/stdin \
+              | grep -q "config OK: 1 listener(s), 1 backend(s)" \
+              || fail "$image linux/$arch validate happy path"
+            verify_live_container "image artifact, linux/$arch" "$image" \
+              --platform "linux/$arch"
+          done
 
-      - name: Build and push multi-arch image
+      - uses: actions/upload-artifact@v7
+        if: github.ref_type == 'tag'
+        with:
+          name: scout-reports
+          path: scout/SCOUT-*.md
+          if-no-files-found: error
+
+      # Promotion by digest: the tags point at the exact index Scout scanned
+      # and the E2E journeys ran on. No rebuild happens here, so what was
+      # verified is what gets pulled.
+      - name: Promote the scanned digest to the release tags
         if: github.ref_type == 'tag'
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
+          INDEX="${{ steps.candidate.outputs.digest }}"
           # `:latest` only tracks final releases: a prerelease tag (with a
           # `-` suffix) never re-points it.
           TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
           case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
-          docker buildx build --pull --file docker/Dockerfile \
-            --platform linux/amd64,linux/arm64 \
-            --provenance=mode=max --sbom=true \
-            $TAGS --push .
+          docker buildx imagetools create $TAGS "ghcr.io/exyonq/eqproxy@sha256:$INDEX"
 
       # Mirror the exact verified manifest (same digests) to Docker Hub.
       # Secrets DOCKERHUB_USERNAME/DOCKERHUB_TOKEN come from the maintainer's
       # Hub access token (never stored in the repository).
-      - name: Log in to Docker Hub
-        if: github.ref_type == 'tag'
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
       - name: Mirror the verified manifest to Docker Hub
         if: github.ref_type == 'tag'
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
+          INDEX="${{ steps.candidate.outputs.digest }}"
           TAGS="--tag exyonq/eqproxy:$VERSION"
           case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag exyonq/eqproxy:latest" ;; esac
-          docker buildx imagetools create $TAGS "ghcr.io/exyonq/eqproxy:$VERSION"
+          docker buildx imagetools create $TAGS "ghcr.io/exyonq/eqproxy@sha256:$INDEX"
+
+      # The published tags must be the scanned index on both registries —
+      # otherwise "Scout says 0C/0H" would be a claim about different bytes.
+      - name: Verify the published tags carry the scanned digest
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          INDEX="${{ steps.candidate.outputs.digest }}"
+          REFS="ghcr.io/exyonq/eqproxy:$VERSION exyonq/eqproxy:$VERSION ghcr.io/exyonq/eqproxy:${VERSION}-candidate"
+          case "$VERSION" in *-*) ;; *) REFS="$REFS ghcr.io/exyonq/eqproxy:latest exyonq/eqproxy:latest" ;; esac
+          for ref in $REFS; do
+            got=$(docker buildx imagetools inspect --raw "$ref" | sha256sum | cut -d' ' -f1)
+            [ "$got" = "$INDEX" ] \
+              || { echo "$ref points at sha256:$got, not the scanned sha256:$INDEX"; exit 1; }
+            echo "$ref -> sha256:$INDEX (scanned)"
+          done
+          docker buildx imagetools inspect "ghcr.io/exyonq/eqproxy:$VERSION"
 
       - name: Build multi-arch image (dry run, no push)
         if: github.ref_type != 'tag'
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
           case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
@@ -547,3 +627,12 @@ jobs:
             --platform linux/amd64,linux/arm64 \
             --provenance=mode=max --sbom=true \
             $TAGS .
+          # A dry run publishes nothing, but the image must still be shown to
+          # work: load the native build and run it (Scout and the arm64 E2E
+          # need a registry reference, so they stay tag-only).
+          docker buildx build --pull --file docker/Dockerfile --platform linux/amd64 \
+            --tag eqproxy-dryrun:ci --load .
+          VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          docker run --rm eqproxy-dryrun:ci --version | grep -q "eqproxy $VER" \
+            || { echo "dry-run image reports the wrong version"; exit 1; }
+          echo "dry-run image: eqproxy $VER"

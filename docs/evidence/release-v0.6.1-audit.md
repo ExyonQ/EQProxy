@@ -131,6 +131,15 @@ The CI image job also ran the Scout gate itself (`Docker Scout gate
 (critical/high must be zero): success`) and the live-traffic E2E on the
 exact image it pushed.
 
+**Addendum (2026-10-20, after this audit).** That gate and that E2E covered
+`linux/amd64` only: the image job built a single-arch `linux/amd64` image to
+verify, and `linux/arm64` reached the registries unscanned. The arm64 image was
+scanned retroactively (`0C 0H 0M 0L`, digest `sha256:517945df…`) and the
+pipeline now scans and exercises both architectures on the exact digest it
+promotes, with the release job waiting on it — see
+`docs/evidence/release-v0.6.1-scout-both-arch.md`. Nothing in this audit's
+functional results changes; the scope of the gate does.
+
 ## 6. Known limitations of the new runtime
 
 - The published **container** is a musl build (ADR-0001 tier 2): functionally

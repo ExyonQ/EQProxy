@@ -5,7 +5,31 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
-Nothing yet.
+### Changed
+
+- **Docker Scout now gates both image architectures, before any release
+  exists.** The image job built and scanned only `linux/amd64`;
+  `linux/arm64` reached the registries unscanned. It now builds the
+  multi-arch manifest once, pushes it under a throwaway
+  `<version>-candidate` tag, records the index digest, scans **both**
+  `linux/amd64` and `linux/arm64` (`docker scout cves --only-severity
+  critical,high --exit-code`), runs the container E2E journeys
+  (`--version`, `config validate`, live proxied traffic) on both
+  architectures, and only then promotes that exact digest to `<version>` /
+  `:latest` and mirrors it to Docker Hub — no rebuild, so the scanned bytes
+  are the published bytes. The GitHub release job now `needs` the image job,
+  so a release cannot be created next to an unscanned image, and the two
+  `SCOUT-<version>-linux-<arch>.md` reports ship as release assets. A
+  post-promotion step re-reads every published tag's digest and fails if it
+  differs from the scanned one.
+
+### Documentation
+
+- README and the Docker Hub page now state what the artifacts already were:
+  the `eqproxy-linux-amd64` / `eqproxy-linux-arm64` release binaries are
+  **static musl** (no libc, no interpreter, runnable from `FROM scratch`),
+  verified against the published v0.6.1 assets in
+  `docs/evidence/release-v0.6.1-scout-both-arch.md`.
 
 ## [v0.6.1] — 2026-10-20
 

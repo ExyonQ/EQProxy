@@ -16,6 +16,19 @@ Scout, `0C 0H 0M 0L`). It runs as the unprivileged user `65532:65532`. It
 listens wherever the configuration says (the convention in the examples is
 port 8080).
 
+`linux/amd64` and `linux/arm64` are built from the same Dockerfile and are
+both scanned with Docker Scout before the release tag exists: the workflow
+scans each architecture, runs the container journeys on each, and only then
+promotes the scanned digest to `:<version>` and `:latest`. The two reports
+(`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`) are attached to every GitHub
+release. The scan indexes the image, which contains 0 packages, so a clean
+report means "no OS package was added", not a vulnerability verdict on the
+proxy itself.
+
+Standalone binaries for both architectures — `eqproxy-linux-amd64` and
+`eqproxy-linux-arm64`, static musl, no libc required — are on the release page
+together with `SHA256SUMS.txt`.
+
 The musl build was measured against the glibc release binary on arm64 and
 amd64, over HTTP and TLS, same scenario and same hosts: the container is within
 +1.6 % to +6.2 % of the glibc binary (p 0.03–0.68, sign flips between
