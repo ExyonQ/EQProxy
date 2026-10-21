@@ -5,8 +5,43 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.6.3] — 2026-10-21
+
+Patch release closing the two defects found while measuring TLS parity: a
+configuration that asked for HTTP/2 could pass the gate and then fail every
+request, and the container had no writable state directory, so `config apply`
+and `config rollback` always failed inside it. No wire behaviour of a valid
+configuration changes.
+
+### Fixed
+
+- **`alpn = ["h2"]` / `["h2c"]` is rejected by the config gate instead of
+  silently negotiating a protocol the dataplane cannot speak.** With
+  `mode = "http"` rustls completed the handshake for h2, then every request
+  failed (`curl` exit 52) while the proxy counters showed
+  `client[accepted=0]`. The error names the field, the cause and the fix
+  (`alpn = ["http/1.1"]`), with the file/line context of the other gate
+  errors. `mode = "tcp"` is untouched: it relays bytes without parsing them,
+  so an h2 hint there is a legitimate tunnel choice. A backend TLS entry is
+  rejected only when an HTTP-mode listener routes to that backend, because
+  that listener only ever sends HTTP/1.1 over the connection.
+- **`config apply` and `config rollback` work in the published image.** The
+  state directory defaulted to `./.eqproxy`, which is `/` in the container,
+  and uid 65532 cannot write there: both commands exited 1 with
+  `Permission denied`. The runtime stage now ships
+  `/var/lib/eqproxy` owned by 65532 and sets `EQPROXY_STATE_DIR` to it, so the
+  commands work out of the box; mount a volume on that path to keep history
+  across container replacements. The image also exposes 8443, the port the
+  documented TLS listener uses.
+
 ### Documentation
 
+- The Docker Hub page used the `0.6.1` tag in every example, named uid
+  **65534** for a file-readability requirement when the image runs as
+  **65532**, and did not mention the state directory or volume. All three are
+  corrected and the page points at v0.6.3.
+- The TLS parity report's note that `alpn = ["h2"]` "is accepted by the
+  config gate" is now historical: v0.6.3 rejects it at validation time.
 - **Erratum:** the v0.6.1 parity report labelled one column "glibc", but that
   column ran the release asset — which is a static musl build — inside Debian.
   Both sides were the same binary, so the report measured the image base and
@@ -20,8 +55,9 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   no TLS at all** (p 0.0001), so the gap is libc-general, not handshake cost;
   **TLS 1.2 sessions resume and TLS 1.3 ones do not** (no ticketer is
   configured, so no ticket is ever sent); and HTTP/2 does not exist, while
-  `alpn = ["h2"]` is accepted by the config gate and negotiates a protocol the
-  proxy cannot serve (curl exit 52, zero accepted connections).
+  `alpn = ["h2"]` was accepted by the config gate (v0.6.3 rejects it) and
+  negotiates a protocol the proxy cannot serve (curl exit 52, zero accepted
+  connections).
 - The published Linux binaries are musl only, so the glibc build that carries
   the tier-1 performance claims is not the artifact users download. Shipping
   glibc variants is an open decision, not a claim.

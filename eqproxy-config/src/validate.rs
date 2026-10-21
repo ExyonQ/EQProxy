@@ -1127,6 +1127,22 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             for (cause, example) in alpn_problems(&tls.alpn) {
                 err(field("tls.alpn"), cause, example, &section);
             }
+            // A backend reached by a `mode = "http"` listener only ever
+            // receives HTTP/1.1 from the dataplane; negotiating h2 with it
+            // would hand every request to a protocol layer that is not
+            // implemented (see `unserved_alpn`).
+            if let Some(proto) = unserved_alpn(&tls.alpn)
+                && let Some(user) = http_mode_user(config, name)
+            {
+                err(
+                    field("tls.alpn"),
+                    format!(
+                        "ALPN protocol \"{proto}\" cannot be used with backend \"{name}\": listener \"{user}\" (mode = \"http\") sends HTTP/1.1 over TLS, so a backend that negotiated h2 would receive requests it cannot parse"
+                    ),
+                    "alpn = [\"http/1.1\"]".to_owned(),
+                    &section,
+                );
+            }
             if !tls.verify && tls.ca_file.is_some() {
                 result.warnings.push(format!(
                     "backend \"{name}\" sets ca_file but verify = false: the CA is unused and the backend is not verified"
@@ -1143,6 +1159,21 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     format!("listener.{name}.tls.alpn"),
                     cause,
                     example,
+                    &section,
+                );
+            }
+            // `mode = "http"` terminates TLS and then parses HTTP/1.1: an
+            // h2 entry makes the handshake succeed and every request fail
+            // (no HTTP/2 dataplane), so the gate rejects it here instead.
+            if listener.mode == ListenerMode::Http
+                && let Some(proto) = unserved_alpn(&tls.alpn)
+            {
+                err(
+                    format!("listener.{name}.tls.alpn"),
+                    format!(
+                        "ALPN protocol \"{proto}\" cannot be served: mode = \"http\" speaks HTTP/1.1 only, so the handshake would succeed and every request would then fail (no HTTP/2 dataplane yet)"
+                    ),
+                    "alpn = [\"http/1.1\"]".to_owned(),
                     &section,
                 );
             }
@@ -1275,6 +1306,30 @@ fn sni_name_problem(raw: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The first ALPN protocol in `alpn` that the dataplane cannot speak.
+///
+/// The HTTP dataplane is HTTP/1.1 only: negotiating `h2` (or `h2c`) with a
+/// `mode = "http"` listener is the trap this gate closes — rustls completes
+/// the handshake, the client starts sending HTTP/2 frames and every request
+/// fails while the proxy's own counters never see an accepted connection.
+/// `mode = "tcp"` relays bytes without interpreting them, so an `h2` hint
+/// there is a legitimate tunnel choice and is left alone.
+fn unserved_alpn(alpn: &[String]) -> Option<&str> {
+    alpn.iter()
+        .map(String::as_str)
+        .find(|proto| matches!(*proto, "h2" | "h2c"))
+}
+
+/// Name of the first `mode = "http"` listener that routes to `backend`.
+fn http_mode_user<'a>(config: &'a Config, backend: &str) -> Option<&'a str> {
+    config
+        .listener
+        .iter()
+        .filter(|(_, listener)| listener.mode == ListenerMode::Http && listener.backend == backend)
+        .map(|(name, _)| name.as_str())
+        .min()
 }
 
 /// Problems of an ALPN list: non-empty names, no duplicates (A14).
@@ -1899,6 +1954,70 @@ server = "127.0.0.1:9000"
         assert_eq!(alpn_errors.len(), 2, "errors: {:?}", result.errors);
         assert!(alpn_errors[0].cause.contains("duplicate"));
         assert!(alpn_errors[1].cause.contains("invalid"));
+    }
+
+    #[test]
+    fn http_listener_rejects_h2_alpn_with_actionable_reason() {
+        for proto in ["h2", "h2c"] {
+            let result = check_source(&format!(
+                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\nalpn = [\"{proto}\"]\n[backend.api]\nserver = \"127.0.0.1:1\"\n"
+            ));
+            assert!(!result.is_valid(), "{proto} must be rejected");
+            assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+            let error = &result.errors[0];
+            assert_eq!(error.field.as_deref(), Some("listener.web.tls.alpn"));
+            assert!(
+                error.cause.contains(&format!("\"{proto}\"")),
+                "{}",
+                error.cause
+            );
+            assert!(error.cause.contains("HTTP/1.1"), "{}", error.cause);
+            assert_eq!(error.example, "alpn = [\"http/1.1\"]");
+        }
+    }
+
+    #[test]
+    fn http_listener_accepts_http1_alpn_and_no_alpn() {
+        for alpn in ["alpn = [\"http/1.1\"]\n", ""] {
+            let result = check_source(&format!(
+                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\n{alpn}[backend.api]\nserver = \"127.0.0.1:1\"\n"
+            ));
+            assert!(result.is_valid(), "errors: {:?}", result.errors);
+        }
+    }
+
+    #[test]
+    fn tcp_listener_keeps_h2_alpn_for_byte_tunnels() {
+        // mode = "tcp" relays bytes without parsing them, so advertising h2
+        // there is a legitimate tunnel hint, not the HTTP/1.1 trap.
+        let result = check_source(
+            "schema_version = 1\n[listener.tunnel]\nlisten = \"127.0.0.1:0\"\nmode = \"tcp\"\nbackend = \"api\"\n[listener.tunnel.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\nalpn = [\"h2\"]\n[backend.api]\nserver = \"127.0.0.1:1\"\n",
+        );
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
+    }
+
+    #[test]
+    fn backend_h2_alpn_is_rejected_when_an_http_listener_uses_it() {
+        let result = check_source(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:1\"\n[backend.api.tls]\nalpn = [\"h2\"]\n",
+        );
+        assert!(!result.is_valid());
+        let error = result
+            .errors
+            .iter()
+            .find(|e| e.field.as_deref() == Some("backend.api.tls.alpn"))
+            .unwrap_or_else(|| panic!("errors: {:?}", result.errors));
+        assert!(error.cause.contains("\"h2\""), "{}", error.cause);
+        assert!(error.cause.contains("listener \"web\""), "{}", error.cause);
+        assert_eq!(error.example, "alpn = [\"http/1.1\"]");
+    }
+
+    #[test]
+    fn backend_h2_alpn_is_allowed_for_a_tcp_tunnel() {
+        let result = check_source(
+            "schema_version = 1\n[listener.tunnel]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:1\"\n[backend.api.tls]\nalpn = [\"h2\"]\n",
+        );
+        assert!(result.is_valid(), "errors: {:?}", result.errors);
     }
 
     #[test]

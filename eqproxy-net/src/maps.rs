@@ -146,13 +146,16 @@ mod tests {
         let (stop, shutdown) = eqproxy_core::shutdown::channel();
         let task = tokio::spawn(run(Arc::clone(&map), Arc::clone(&metrics), shutdown));
 
-        // The change lands in hot.
+        // The change lands in hot and is counted as one reload. The map
+        // publishes the new data before the counter increments, so wait for
+        // both: asserting the counter as soon as the data appears is a race
+        // that instrumented builds (llvm-cov) lose reliably.
         std::fs::write(&file, "a 2\n").expect("rewrite map");
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while map.get().lookup("a") != Some("2") {
+        while map.get().lookup("a") != Some("2") || metrics.snapshot().map_reloads == 0 {
             assert!(
                 tokio::time::Instant::now() < deadline,
-                "the reload did not land in time"
+                "the reload did not land and count in time"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }

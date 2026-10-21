@@ -155,6 +155,48 @@ fn validate_reports_file_line_field_cause_example() {
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
+fn validate_rejects_h2_alpn_on_an_http_listener_with_a_fix() {
+    // `alpn = ["h2"]` used to pass the gate, negotiate h2 on the wire and
+    // then fail every request: the dataplane is HTTP/1.1 only.
+    let backend = start_echo_backend();
+    let config = temp_config(
+        "h2-alpn",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\nalpn = [\"h2\"]\n[backend.api]\nserver = \"{backend}\"\n"
+        ),
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "h2 must be rejected; stderr: {stderr}"
+    );
+    for expected in [
+        "field `listener.web.tls.alpn`",
+        "ALPN protocol \"h2\" cannot be served",
+        "HTTP/1.1",
+        "example:",
+        "alpn = [\"http/1.1\"]",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in stderr:\n{stderr}"
+        );
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
 fn validate_reports_syntax_errors_with_line() {
     let config = temp_config("syntax", "schema_version = 1\n[listener.web\n");
     let output = bin()
