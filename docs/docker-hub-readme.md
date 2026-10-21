@@ -27,7 +27,8 @@ proxy itself.
 
 Standalone binaries for both architectures — `eqproxy-linux-amd64` and
 `eqproxy-linux-arm64`, static musl, no libc required — are on the release page
-together with `SHA256SUMS.txt`.
+together with `SHA256SUMS.txt` (four binaries plus the sources,
+`eqproxy-<version>-src.tar.gz`, all five checked in one file).
 
 The musl binary was measured against **genuinely built glibc binaries** on
 arm64 and amd64, same scenario and same hosts, every response a real `200`
@@ -138,10 +139,10 @@ docker kill --signal=HUP eqproxy
 - [README](https://github.com/ExyonQ/EQProxy#readme) — status, install, quick start
 - [SPEC.md](https://github.com/ExyonQ/EQProxy/blob/v0.6.3/SPEC.md) — specified behaviour
 - [eqproxy.toml.example](https://github.com/ExyonQ/EQProxy/blob/v0.6.3/eqproxy.toml.example) — every option documented
-- [THREAT_MODEL.md](https://github.com/ExyonQ/EQProxy/blob/v0.6.1/THREAT_MODEL.md) — threat model and non-protections
+- [THREAT_MODEL.md](https://github.com/ExyonQ/EQProxy/blob/v0.6.3/THREAT_MODEL.md) — threat model and non-protections
 
 ## License
 
 Dual: MIT OR Apache-2.0, at the recipient's choice.
 
-https://github.com/ExyonQ/EQProxy/blob/v0.6.1/LICENSE-MIT
+https://github.com/ExyonQ/EQProxy/blob/v0.6.3/LICENSE-MIT
