@@ -33,6 +33,14 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   and aborted right after assembling `dist/`. A dry run now assembles,
   exports and checksums (`dry run: no Scout reports expected`); a tag run still
   refuses to create a release without both reports.
+- **Release pages carry only the notes of their own version.** The release job
+  passed `CHANGELOG.md` whole to `gh release create/edit`, so every release
+  page from v0.5.0 onwards also listed all previous releases: v0.6.3's page had
+  45 201 characters of changelog, from v0.1.0 up. The notes are now extracted
+  for the released version — heading, date and that section only, 3 678
+  characters for v0.6.3 — and a tag whose version has no section fails the
+  release instead of publishing a stale body. The published v0.6.3 page was
+  corrected the same way.
 
 ## [v0.6.3] — 2026-10-21
 

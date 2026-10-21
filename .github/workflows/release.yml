@@ -442,6 +442,50 @@ jobs:
           [ "$lines" = "5" ] || { echo "SHA256SUMS.txt has $lines lines, expected 5"; exit 1; }
           cat dist/SHA256SUMS.txt
 
+      # The release body is the changelog section of *this* version. Passing the
+      # whole CHANGELOG.md published every past release on every release page:
+      # v0.6.3's page listed v0.1.0 and each version since. The section is
+      # extracted from the same file, so the notes stay a superset of nothing —
+      # a version without an entry fails the release instead of publishing an
+      # empty or stale body.
+      - name: Extract the release notes for this version
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            test "v$VERSION" = "$GITHUB_REF_NAME" \
+              || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml $VERSION"; exit 1; }
+          fi
+          python3 - "$VERSION" <<'PY' > release-notes.md
+          import re, sys
+          version = sys.argv[1]
+          lines = open("CHANGELOG.md", encoding="utf-8").read().splitlines()
+          head = re.compile(
+              r"^##\s+\[?v?" + re.escape(version)
+              + r"\]?(\s*[\u2014-]\s*(?P<date>\d{4}-\d{2}-\d{2}))?\s*$"
+          )
+          start = next((i for i, l in enumerate(lines) if head.match(l)), None)
+          if start is None:
+              sys.exit(f"CHANGELOG.md has no section for {version}")
+          date = head.match(lines[start]).group("date")
+          end = next(
+              (i for i in range(start + 1, len(lines)) if lines[i].startswith("## ")),
+              len(lines),
+          )
+          body = lines[start + 1:end]
+          while body and not body[0].strip():
+              body.pop(0)
+          while body and (not body[-1].strip() or body[-1].strip() == "---"):
+              body.pop()
+          print(f"## EQProxy v{version}" + (f" \u2014 {date}" if date else ""))
+          print()
+          print("\n".join(body))
+          PY
+          grep -q "^## EQProxy v$VERSION" release-notes.md \
+            || { echo "release notes do not start with the version heading"; exit 1; }
+          echo "==> release-notes.md: $(wc -l < release-notes.md | tr -d ' ') lines for v$VERSION"
+          head -4 release-notes.md
+
       - name: Create or refresh GitHub release
         if: github.ref_type == 'tag'
         env:
@@ -457,10 +501,10 @@ jobs:
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json scout/*.md --clobber
             gh release edit "$GITHUB_REF_NAME" \
-              --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md $EXTRA
+              --title "$GITHUB_REF_NAME" --notes-file release-notes.md $EXTRA
           else
             gh release create "$GITHUB_REF_NAME" dist/* sbom/*.cdx.json scout/*.md \
-              --title "$GITHUB_REF_NAME" --notes-file CHANGELOG.md $EXTRA
+              --title "$GITHUB_REF_NAME" --notes-file release-notes.md $EXTRA
           fi
 
   image:
