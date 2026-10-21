@@ -136,10 +136,41 @@ Container journeys on `eqproxy-local:0.6.3` (arm64, 15.8 MB):
 | `SIGHUP` under traffic | `INFO config reload applied: listeners kept=1 added=0 removed=0` |
 | `config explain \| head -1` | first line printed, exit 0, no `Broken pipe` panic (before: panic) |
 
-## 5. Publication
+## 5. Publication (2026-10-21T17:17Z)
 
-Filled in after the tag build: release assets, checksums, image digests and the
-post-publication re-check of the same journeys on the published artifacts.
+Release: <https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.3>, tag
+`v0.6.3` at commit `bc74d50`, run 39633772504 (all jobs success).
+
+**Assets:** `eqproxy-darwin-arm64`, `eqproxy-darwin-amd64`,
+`eqproxy-linux-arm64`, `eqproxy-linux-amd64`, `SHA256SUMS.txt`, the four
+CycloneDX SBOMs and `SCOUT-0.6.3-linux-amd64.md` / `…-arm64.md`. All four
+binaries pass `shasum -a 256 -c SHA256SUMS.txt` on this host.
+
+**Images:** `ghcr.io/exyonq/eqproxy:0.6.3`, `docker.io/exyonq/eqproxy:0.6.3`,
+`ghcr.io/exyonq/eqproxy:latest` and `docker.io/exyonq/eqproxy:latest` all
+resolve to the scanned index
+`sha256:559504b5cd5513073af61ec3761f3e5c6d2f1f51749e15c36130fbdf7997fedb`
+(sha256 of each raw manifest checked byte for byte).
+
+**Release CI on the candidate, per architecture:** version, validate happy
+path, `alpn = ["h2"]` rejected (exit 1 with cause and fix), `config apply`
+writes state, live traffic `200` (`linux/amd64` and `linux/arm64`).
+
+**Re-check of the published artifacts from this host:** `eqproxy 0.6.3` on
+darwin arm64, darwin amd64 (Rosetta) and both Linux binaries inside Debian
+12; h2 exits 1 with the gate message on all four; `config explain | head`
+exits 0 without a panic; the published arm64 image serves TLS with `200` and
+runs `config apply` (exit 0); the Docker Hub `amd64` image reports 0.6.3.
+
+**Attempts that did not publish:** two earlier runs of this tag failed and
+nothing was released from them — `a6f4521` (the new image check piped
+`config apply` into `grep -q`, so `pipefail` failed on SIGPIPE while the
+candidate image passed the same journey locally) and `3c6eef5` (the darwin
+E2E piped `config explain` into `grep -q` and the binary panicked on EPIPE,
+which is the product bug fixed in `bc74d50`). GitHub Actions reported
+"partially degraded service" during the window and delivered the tag event
+late and three times; two duplicate release runs were cancelled, one
+completed.
 
 ## 6. Limits of this evidence
 
