@@ -27,6 +27,12 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   four binary lines of `SHA256SUMS.txt` are written exactly as before and the
   tarball line is appended (five lines, verified with `-c` before upload), so
   no existing checksum changes.
+- **The Scout report requirement is scoped to tag runs.** A manual
+  `workflow_dispatch` dry run never reached the checksum steps: it demanded
+  `SCOUT-<version>-linux-<arch>.md` that only a tagged, pushed image produces,
+  and aborted right after assembling `dist/`. A dry run now assembles,
+  exports and checksums (`dry run: no Scout reports expected`); a tag run still
+  refuses to create a release without both reports.
 
 ## [v0.6.3] — 2026-10-21
 
