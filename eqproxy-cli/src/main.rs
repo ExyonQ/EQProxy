@@ -24,6 +24,26 @@ use eqproxy_net::{
     ProxyMode, ProxyProtocolMode, ResolvedBackend, ResolvedListener, ResolvedServer, bind,
 };
 
+/// Writes a generated report to stdout, treating a reader that closed the
+/// pipe as success.
+///
+/// `println!` panics on `EPIPE`, so `eqproxy config explain | head` used to
+/// abort with "failed printing to stdout: Broken pipe" once the reader had
+/// seen enough. Printing a report is best-effort: the reader stopping early
+/// is not an error and must not turn a successful command into a panic.
+fn emit_report(text: &str) {
+    use std::io::{ErrorKind, Write as _};
+    let mut out = std::io::stdout().lock();
+    match out
+        .write_all(text.as_bytes())
+        .and_then(|()| out.write_all(b"\n"))
+    {
+        Ok(()) => {}
+        Err(err) if err.kind() == ErrorKind::BrokenPipe => {}
+        Err(err) => eprintln!("error: could not write the report to stdout: {err}"),
+    }
+}
+
 #[derive(Parser)]
 #[command(
     name = "eqproxy",
@@ -200,7 +220,7 @@ fn schema(output: Option<&std::path::Path>) -> u8 {
             0
         }
         None => {
-            println!("{schema}");
+            emit_report(&schema);
             0
         }
     }
@@ -332,7 +352,7 @@ fn diff(left: &Path, right: &Path) -> u8 {
         eprintln!("invalid config: refusing to diff until both sides validate");
         return 1;
     }
-    println!("{}", diff_report(&left_config, &right_config));
+    emit_report(&diff_report(&left_config, &right_config));
     0
 }
 
@@ -628,12 +648,9 @@ fn explain(
             return 1;
         }
     };
-    println!(
-        "{}",
-        explain_report(
-            &config, listener, method, host, req_path, &headers, client_ip
-        )
-    );
+    emit_report(&explain_report(
+        &config, listener, method, host, req_path, &headers, client_ip,
+    ));
     0
 }
 
@@ -673,7 +690,7 @@ fn plan(path: &Path) -> u8 {
         eprintln!("error: the configuration defines no listeners; nothing to serve");
         return 1;
     }
-    println!("{}", plan_report(&config, &listeners));
+    emit_report(&plan_report(&config, &listeners));
     0
 }
 
@@ -1003,7 +1020,7 @@ fn apply(path: &Path) -> u8 {
                 current.display(),
                 changes.len()
             );
-            println!("{}", diff_report(&prev, &config));
+            emit_report(&diff_report(&prev, &config));
         }
         None => {
             println!(
@@ -1011,7 +1028,7 @@ fn apply(path: &Path) -> u8 {
                 path.display(),
                 current.display()
             );
-            println!("{}", plan_report(&config, &listeners));
+            emit_report(&plan_report(&config, &listeners));
         }
     }
     0
@@ -1104,11 +1121,11 @@ fn rollback() -> u8 {
                 "rolled back: current restored from {name} ({} difference(s) vs applied)",
                 changes.len()
             );
-            println!("{}", diff_report(&prev, &config));
+            emit_report(&diff_report(&prev, &config));
         }
         None => {
             println!("rolled back: current restored from {name} (no previous current to compare)");
-            println!("{}", plan_report(&config, &listeners));
+            emit_report(&plan_report(&config, &listeners));
         }
     }
     0

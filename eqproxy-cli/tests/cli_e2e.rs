@@ -196,6 +196,43 @@ fn validate_rejects_h2_alpn_on_an_http_listener_with_a_fix() {
     miri,
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
+#[cfg(unix)]
+#[test]
+fn explain_piped_into_head_does_not_panic() {
+    // `println!` panics on EPIPE: piping a long report into `head` used to
+    // abort with "failed printing to stdout: Broken pipe". A reader that
+    // stops early is not an error.
+    let config = temp_config(
+        "pipe",
+        "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nbackend = \"api\"\n[backend.api]\nserver = \"127.0.0.1:1\"\n",
+    );
+    let script = format!(
+        "'{}' config explain --config '{}' | head -1",
+        env!("CARGO_BIN_EXE_eqproxy"),
+        config.display()
+    );
+    let output = Command::new("sh")
+        .args(["-c", &script])
+        .output()
+        .expect("run piped explain");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "pipeline failed: {stderr}; stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        !stderr.contains("Broken pipe") && !stderr.contains("panicked"),
+        "the closed pipe produced a panic:\n{stderr}"
+    );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
 #[test]
 fn validate_reports_syntax_errors_with_line() {
     let config = temp_config("syntax", "schema_version = 1\n[listener.web\n");

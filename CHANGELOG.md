@@ -33,6 +33,11 @@ configuration changes.
   commands work out of the box; mount a volume on that path to keep history
   across container replacements. The image also exposes 8443, the port the
   documented TLS listener uses.
+- **Reports no longer panic when the reader closes the pipe.** `println!`
+  aborts on `EPIPE`, so `eqproxy config explain | head` (and any long report
+  piped into `grep -q`, as the release script does) died with "failed
+  printing to stdout: Broken pipe". Reports now go through a writer that
+  treats a closed reader as success; the exit code stays 0.
 
 ### Documentation
 

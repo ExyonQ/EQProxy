@@ -25,6 +25,7 @@ image so the fixes ship as artifacts, not only as source.
 | `eqproxy-config/src/validate.rs` | `unserved_alpn` rejects `h2`/`h2c` for `mode = "http"` listeners and for backend TLS used by such a listener; five unit tests |
 | `eqproxy-cli/tests/cli_e2e.rs` | E2E test asserting `config validate` exits 1 with field, cause and fix |
 | `eqproxy-net/src/maps.rs` | test race fixed: the map publishes data before the reload counter increments, so the test waits for both (assertion unchanged: exactly one reload) |
+| `eqproxy-cli/src/main.rs`, `eqproxy-cli/tests/cli_e2e.rs` | generated reports are written through `emit_report`, which treats a closed pipe as success; E2E test pipes `config explain` into `head` and requires no panic |
 | `docker/Dockerfile` | runtime stage ships `/var/lib/eqproxy` owned by 65532, `ENV EQPROXY_STATE_DIR=/var/lib/eqproxy`, `EXPOSE 8443` |
 | `.github/workflows/release.yml` | image E2E now also proves `alpn = ["h2"]` is rejected and `config apply` writes state on both architectures |
 | `docs/docker-hub-readme.md` | stale `0.6.1` tags, wrong uid (65534 → 65532), state directory/volume, withdrawn musl-vs-"glibc" claim |
@@ -93,10 +94,10 @@ plan: 1 listener(s), 1 backend(s) — nothing started (dry run)    # exit 0
 |---|---|---|
 | Format | `cargo fmt --all --check` | clean |
 | Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | clean |
-| Tests | `cargo test --workspace` | **333 passed, 0 failed** across 23 suites, exit 0 |
+| Tests | `cargo test --workspace` | **334 passed, 0 failed** across 23 suites, exit 0 |
 | Unit gate tests | `cargo test -p eqproxy-config --lib` | 48 passed |
 | E2E gate test | `cargo test -p eqproxy-cli --test cli_e2e validate_rejects_h2_alpn_on_an_http_listener_with_a_fix` | 1 passed |
-| Veyra Proof | `veyra audit . --profile standard` | **ACCEPTED**, exit 0, `.veyra/evidence/20261021T133249Z/` |
+| Veyra Proof | `veyra audit . --profile standard` | **ACCEPTED**, exit 0, `.veyra/evidence/20261021T161320Z/` (final tree; `20261021T133249Z` is the earlier accepted run before the EPIPE fix) |
 | Rust Audit | `rust_audit.py scan . --format terminal,md,json --fail-on high` | exit 1 (190 static findings, 2 critical / 16 high, triaged below); none in the files changed here |
 | EvoForge | `mcp_submit_eval` on the gate slice | **F = 1.0**, 3/3 sandbox tests pass, trace `56043e4f-e523-4bee-a63a-3a1771a8456c` |
 
@@ -133,6 +134,7 @@ Container journeys on `eqproxy-local:0.6.3` (arm64, 15.8 MB):
 | `config apply` (default state dir) | exit 0, writes `/var/lib/eqproxy/current.toml` |
 | `config apply` twice + `config rollback` in a named volume | exit 0, backup `0001-…`, `rolled back: current restored from …` |
 | `SIGHUP` under traffic | `INFO config reload applied: listeners kept=1 added=0 removed=0` |
+| `config explain \| head -1` | first line printed, exit 0, no `Broken pipe` panic (before: panic) |
 
 ## 5. Publication
 
