@@ -360,11 +360,20 @@ jobs:
           find collect -type f -name '*.cdx.json' -exec cp {} sbom/ \;
           find collect -type f -name 'SCOUT-*.md' -exec cp {} scout/ \;
           # Both architectures must have been scanned; a missing report means
-          # the gate did not run and the release must not be created.
-          for arch in amd64 arm64; do
-            ls scout/SCOUT-*-linux-"$arch".md >/dev/null 2>&1 \
-              || { echo "missing Scout report for linux/$arch"; exit 1; }
-          done
+          # the gate did not run and the release must not be created. On a tag
+          # run this is hard: no report, no release. A dry run has no report to
+          # require (the image job only scans a registry reference, and a
+          # branch publishes nothing), so the requirement would abort the dry
+          # run before the checksum steps it exists to exercise — the gate is
+          # scoped to the run that can publish, which is the run it protects.
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            for arch in amd64 arm64; do
+              ls scout/SCOUT-*-linux-"$arch".md >/dev/null 2>&1 \
+                || { echo "missing Scout report for linux/$arch"; exit 1; }
+            done
+          else
+            echo "dry run: no Scout reports expected (nothing is scanned or published)"
+          fi
           for bin in eqproxy-darwin-amd64 eqproxy-darwin-arm64 eqproxy-linux-amd64 eqproxy-linux-arm64; do
             test -f "dist/$bin" || { echo "missing $bin in dist/ (builds did not produce it)"; exit 1; }
           done
