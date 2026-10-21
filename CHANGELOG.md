@@ -15,6 +15,18 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   the right digest is no longer the last word: the bytes users pull have to
   run. The step is exercised on the next tag; for v0.6.3 the same journeys
   were run by hand against the published artifacts.
+- **Every release also ships the source tarball of the tagged commit,
+  checksummed in `SHA256SUMS.txt`.** `eqproxy-<version>-src.tar.gz` is
+  exported with `git archive` from the released commit, so only tracked
+  files travel: the maintainer-local material (`ROADMAP EQPROXY/`,
+  `SERVIDORES.md`, `.dockerignore`, `scripts/`) cannot leak into an asset.
+  Before upload the export is asserted against the same commit (every
+  workspace member plus `Cargo.lock` present, the `Cargo.toml` version is the
+  released one, no local-only path) and the same commit yields byte-identical
+  bytes, so re-running a tag refreshes the asset with the same digest. The
+  four binary lines of `SHA256SUMS.txt` are written exactly as before and the
+  tarball line is appended (five lines, verified with `-c` before upload), so
+  no existing checksum changes.
 
 ## [v0.6.3] — 2026-10-21
 

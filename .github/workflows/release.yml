@@ -336,7 +336,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: GitHub release (binaries + SHA256SUMS + SBOM + Scout)
+    name: GitHub release (binaries + source tarball + SHA256SUMS + SBOM + Scout)
     # The image job is a prerequisite, not a sibling: the release must not
     # exist until both architecture images have been scanned by Docker Scout
     # and exercised end to end. A failing scan or E2E leaves the tag without
@@ -352,7 +352,7 @@ jobs:
         with:
           path: collect
 
-      - name: Assemble dist/ and write SHA256SUMS (only after both builds verified)
+      - name: Assemble dist/ (only after both builds verified)
         run: |
           set -euo pipefail
           mkdir -p dist sbom scout
@@ -368,14 +368,69 @@ jobs:
           for bin in eqproxy-darwin-amd64 eqproxy-darwin-arm64 eqproxy-linux-amd64 eqproxy-linux-arm64; do
             test -f "dist/$bin" || { echo "missing $bin in dist/ (builds did not produce it)"; exit 1; }
           done
+
+      # The source tarball is exported from the released commit, not from the
+      # workspace: `git archive` ships tracked files only, so the
+      # maintainer-local material (ROADMAP EQPROXY/, SERVIDORES.md,
+      # .dockerignore, scripts/) can never leak into a published asset, and
+      # untracked scratch left by a runner is excluded by construction. The
+      # export is verified before it becomes an asset — the CI logs of the
+      # very commit that ships it are the evidence.
+      - name: Export and verify the source tarball of the released commit
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            test "v$VERSION" = "$GITHUB_REF_NAME" \
+              || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml $VERSION"; exit 1; }
+          fi
+          PREFIX="eqproxy-$VERSION"
+          SRC="$PREFIX-src.tar.gz"
+          COMMIT="${GITHUB_SHA:-HEAD}"
+          LIST="${RUNNER_TEMP:-/tmp}/src-tarball.list"
+          git archive --format=tar.gz --prefix="$PREFIX/" --output "dist/$SRC" "$COMMIT"
+          echo "==> exporting $(git rev-parse --short "$COMMIT") as dist/$SRC"
+          tar -tzf "dist/$SRC" > "$LIST"
+          # Local-only paths are owner decisions that must never be published.
+          for forbidden in 'ROADMAP EQPROXY/' 'SERVIDORES.md' '.dockerignore' 'scripts/' '.git/'; do
+            if grep -q "^$PREFIX/$forbidden" "$LIST"; then
+              echo "source tarball contains the local-only path $forbidden"; exit 1
+            fi
+          done
+          # Every workspace member plus the lockfile, or the tarball does not
+          # build: a truncated export is a broken source release.
+          for required in Cargo.toml Cargo.lock; do
+            grep -qx "$PREFIX/$required" "$LIST" \
+              || { echo "source tarball is missing $required"; exit 1; }
+          done
+          for member in $(sed -n '/^members = /s/.*\[\(.*\)\].*/\1/p' Cargo.toml | tr -d '",'); do
+            grep -qx "$PREFIX/$member/Cargo.toml" "$LIST" \
+              || { echo "source tarball is missing the workspace member $member"; exit 1; }
+          done
+          # And it must be the released tree, not a stale branch export.
+          tar -xzOf "dist/$SRC" "$PREFIX/Cargo.toml" | grep -qx "version = \"$VERSION\"" \
+            || { echo "source tarball does not declare version $VERSION"; exit 1; }
+          echo "==> dist/$SRC: $(wc -l < "$LIST" | tr -d ' ') entries, $(wc -c < "dist/$SRC" | tr -d ' ') bytes, version $VERSION"
+
+      - name: Write SHA256SUMS.txt (the four binary lines unchanged, tarball appended)
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          SRC="eqproxy-$VERSION-src.tar.gz"
+          test -f "dist/$SRC" || { echo "missing dist/$SRC"; exit 1; }
+          count=$(find dist -maxdepth 1 -name '*-src.tar.gz' | wc -l | tr -d ' ')
+          [ "$count" = "1" ] \
+            || { echo "expected exactly one source tarball in dist/, found $count"; exit 1; }
+          sums() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
           echo "==> writing SHA256SUMS (only after every artifact passed)"
-          (cd dist && if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
-              eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt
-          else
-            shasum -a 256 eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
-              eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt
-          fi)
+          (cd dist && sums eqproxy-darwin-amd64 eqproxy-darwin-arm64 \
+            eqproxy-linux-amd64 eqproxy-linux-arm64 > SHA256SUMS.txt)
+          # Appended, never rewritten: the four lines a v0.6.x user already
+          # checks keep their byte-identical form.
+          (cd dist && sums "$SRC" >> SHA256SUMS.txt)
+          (cd dist && sums -c SHA256SUMS.txt)
+          lines=$(wc -l < dist/SHA256SUMS.txt | tr -d ' ')
+          [ "$lines" = "5" ] || { echo "SHA256SUMS.txt has $lines lines, expected 5"; exit 1; }
           cat dist/SHA256SUMS.txt
 
       - name: Create or refresh GitHub release

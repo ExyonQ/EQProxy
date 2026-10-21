@@ -76,7 +76,10 @@ linked` on amd64 and `statically linked` on arm64, no `NEEDED` entries, no
 interpreter), so they need no libc, no glibc version and no packages at all:
 they run on any Linux distribution of that architecture, and also on
 `FROM scratch`. Each release ships the Docker Scout report of both image
-architectures (`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`).
+architectures (`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`) and the
+matching sources as `eqproxy-<version>-src.tar.gz` (the tagged tree, exported
+with `git archive`), whose digest is a line in the same `SHA256SUMS.txt`.
+Building from them is `cargo build --release --locked` with nothing else.
 
 ```bash
 # Pick your platform artifact:
