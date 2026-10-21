@@ -40,6 +40,7 @@ use crate::balancer::{ActiveGuard, Balance, Balancer, ResolvedServer};
 use crate::dns::{self, DnsSettings, Resolving, SystemResolver};
 use crate::health::{self, HealthCheck};
 use crate::http1;
+use crate::http2;
 use crate::pool::Pool;
 use crate::proxy_proto::{self, ProxyProtocolMode};
 use crate::tls::{self, ClientTls};
@@ -51,6 +52,12 @@ pub const READ_BUF: usize = 16 * 1024;
 pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
 /// Writer of an already-split stream half (TCP or TLS).
 pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// Whole client stream before it is split (TCP or TLS): HTTP/2 needs one
+/// object that both reads and writes, HTTP/1.1 works on split halves.
+pub trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> IoStream for T {}
 
 /// Proxy mode of a listener (A1 `Tcp`, A2 `Http`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -1480,7 +1487,7 @@ async fn accept_loop(
                 };
                 // Config in force at accept time (S-CFG-01): established
                 // connections keep it until they drain.
-                let cfg = (*current_cfg(&shared)).clone();
+                let cfg = Arc::clone(&current_cfg(&shared));
                 if !metrics.try_acquire_connection(cfg.maxconn) {
                     metrics.connections_rejected.fetch_add(1, Ordering::Relaxed);
                     // Explicit refusal: immediate close, no queue.
@@ -1871,7 +1878,7 @@ pub(crate) async fn connect_backend_to(
 async fn handle_connection(
     mut client: TcpStream,
     peer: SocketAddr,
-    cfg: ResolvedListener,
+    cfg: Arc<ResolvedListener>,
     metrics: Arc<Metrics>,
 ) {
     let _guard = ConnectionGuard {
@@ -1930,9 +1937,11 @@ async fn handle_connection(
         peer
     };
 
-    // TLS termination (A11): the handshake lives in the client phase.
-    let (client_read, client_write): (BoxRead, BoxWrite) = if let Some(server_tls) = &cfg.server_tls
-    {
+    // TLS termination (A11): the handshake lives in the client phase. What
+    // the listener speaks afterwards is the negotiated ALPN; a plaintext
+    // listener cannot negotiate anything, so it looks for the h2c
+    // connection preface instead (RFC 9113 §3.4).
+    let (io, negotiated_h2): (Box<dyn IoStream>, bool) = if let Some(server_tls) = &cfg.server_tls {
         let handshake = tokio::time::timeout(
             cfg.client_header_timeout,
             server_tls.acceptor.accept(client),
@@ -1960,17 +1969,32 @@ async fn handle_connection(
                 return;
             }
         };
-        let (read, write) = tokio::io::split(stream);
-        (Box::new(read), Box::new(write))
+        // A TCP tunnel relays bytes: an `h2` ALPN hint there is the
+        // client's choice for what the *backend* speaks, never a reason to
+        // parse the stream here.
+        let negotiated_h2 =
+            cfg.mode == ProxyMode::Http && stream.get_ref().1.alpn_protocol() == Some(b"h2");
+        (Box::new(stream), negotiated_h2)
+    } else if cfg.mode == ProxyMode::Http {
+        let negotiated_h2 = http2::is_h2c(&client, cfg.client_header_timeout).await;
+        (Box::new(client), negotiated_h2)
     } else {
-        let (read, write) = client.into_split();
-        (Box::new(read), Box::new(write))
+        // TCP mode dials the backend immediately: no sniffing, no delay.
+        (Box::new(client), false)
     };
 
     if cfg.mode == ProxyMode::Http {
+        if negotiated_h2 {
+            http2::serve_h2(io, peer, local, Arc::clone(&cfg), Arc::clone(&metrics)).await;
+            return;
+        }
+        let (client_read, client_write) = tokio::io::split(io);
         http1::serve_http(client_read, client_write, peer, local, &cfg, metrics).await;
         return;
     }
+    let (client_read, client_write) = tokio::io::split(io);
+    let client_read: BoxRead = Box::new(client_read);
+    let client_write: BoxWrite = Box::new(client_write);
 
     match connect_backend(&cfg, peer, local, &metrics).await {
         Ok((server_read, server_write, _active)) => {

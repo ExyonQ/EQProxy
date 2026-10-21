@@ -11,6 +11,7 @@ pub mod auth;
 pub mod balancer;
 pub mod health;
 pub mod http1;
+pub mod http2;
 pub mod maps;
 pub mod mirror;
 pub mod pool;

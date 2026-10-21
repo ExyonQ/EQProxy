@@ -1162,21 +1162,9 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
-            // `mode = "http"` terminates TLS and then parses HTTP/1.1: an
-            // h2 entry makes the handshake succeed and every request fail
-            // (no HTTP/2 dataplane), so the gate rejects it here instead.
-            if listener.mode == ListenerMode::Http
-                && let Some(proto) = unserved_alpn(&tls.alpn)
-            {
-                err(
-                    format!("listener.{name}.tls.alpn"),
-                    format!(
-                        "ALPN protocol \"{proto}\" cannot be served: mode = \"http\" speaks HTTP/1.1 only, so the handshake would succeed and every request would then fail (no HTTP/2 dataplane yet)"
-                    ),
-                    "alpn = [\"http/1.1\"]".to_owned(),
-                    &section,
-                );
-            }
+            // v0.7: a `mode = "http"` listener serves every ALPN protocol
+            // it offers (`h2` terminates HTTP/2 and speaks HTTP/1.1 to the
+            // backend; `http/1.1` terminates HTTP/1.1). Nothing to gate.
             // SNI certificates (B-I2/B-H10/B-E9): every entry needs
             // names, each name must be a DNS name (never an IP literal)
             // and no name may be claimed twice.
@@ -1308,14 +1296,14 @@ fn sni_name_problem(raw: &str) -> Option<String> {
     None
 }
 
-/// The first ALPN protocol in `alpn` that the dataplane cannot speak.
+/// The first ALPN protocol in `alpn` that the **backend** side cannot speak.
 ///
-/// The HTTP dataplane is HTTP/1.1 only: negotiating `h2` (or `h2c`) with a
-/// `mode = "http"` listener is the trap this gate closes — rustls completes
-/// the handshake, the client starts sending HTTP/2 frames and every request
-/// fails while the proxy's own counters never see an accepted connection.
-/// `mode = "tcp"` relays bytes without interpreting them, so an `h2` hint
-/// there is a legitimate tunnel choice and is left alone.
+/// Client listeners serve `h2` since v0.7, but the backend side still sends
+/// HTTP/1.1 over TLS only: offering `h2` to a backend would make rustls
+/// complete the handshake and then hand every request to a protocol layer
+/// that was never negotiated on our side. `mode = "tcp"` relays bytes
+/// without interpreting them, so an `h2` hint there is a legitimate tunnel
+/// choice and is left alone.
 fn unserved_alpn(alpn: &[String]) -> Option<&str> {
     alpn.iter()
         .map(String::as_str)
@@ -1957,22 +1945,14 @@ server = "127.0.0.1:9000"
     }
 
     #[test]
-    fn http_listener_rejects_h2_alpn_with_actionable_reason() {
-        for proto in ["h2", "h2c"] {
+    fn http_listener_accepts_h2_alpn_because_it_terminates_it() {
+        // v0.7: the h2 gate moved from "cannot be served" to a real
+        // dataplane. Both tokens are accepted; h2 alongside http/1.1 too.
+        for alpn in ["alpn = [\"h2\"]\n", "alpn = [\"h2\", \"http/1.1\"]\n"] {
             let result = check_source(&format!(
-                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\nalpn = [\"{proto}\"]\n[backend.api]\nserver = \"127.0.0.1:1\"\n"
+                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\n{alpn}[backend.api]\nserver = \"127.0.0.1:1\"\n"
             ));
-            assert!(!result.is_valid(), "{proto} must be rejected");
-            assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
-            let error = &result.errors[0];
-            assert_eq!(error.field.as_deref(), Some("listener.web.tls.alpn"));
-            assert!(
-                error.cause.contains(&format!("\"{proto}\"")),
-                "{}",
-                error.cause
-            );
-            assert!(error.cause.contains("HTTP/1.1"), "{}", error.cause);
-            assert_eq!(error.example, "alpn = [\"http/1.1\"]");
+            assert!(result.is_valid(), "errors: {:?}", result.errors);
         }
     }
 

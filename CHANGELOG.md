@@ -5,7 +5,40 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **HTTP/2 termination on `mode = "http"` listeners (v0.7, first slice).** A
+  client that negotiates `h2` — ALPN on TLS, or the h2c connection preface on
+  a plaintext listener, detected with `peek` so an HTTP/1.1 connection is
+  never disturbed — gets real HTTP/2: framing, HPACK and flow control from the
+  `h2` crate, one stream mapped to exactly one HTTP/1.1 exchange inside the
+  existing engine (routing rules, auth, rate limiting, mirroring, redirects,
+  direct answers, retries, pool and timeouts are the same code, not a
+  copy), and the answer translated back into HEADERS/DATA. Request bodies
+  without `content-length` go upstream as `chunked`; chunked responses are
+  decoded into DATA and their trailers become trailing HEADERS; hop-by-hop
+  headers never cross in either direction. Upstream stays HTTP/1.1 in this
+  slice, so the backend gate still rejects `alpn = ["h2"]` there. Explicit
+  failures instead of silent ones: a `101` from a backend resets the stream,
+  `CONNECT` over h2 answers `501`, and a body shorter than its declared
+  `content-length` resets the stream instead of ending cleanly. Bounded by
+  design: 128 concurrent streams per connection, 16 KiB DATA reads, capacity
+  reserved before every frame. The h2 behaviour of the `h1 ⇄ h2` translation
+  is verified over real sockets with a real h2 client (6 E2E journeys,
+  including three streams that only finish if they advance together, chunked
+  bodies with trailers, TLS `h2` ALPN and the truncation reset) and through
+  the real binary with real `curl` clients (`HTTP/2 200` over h2c and over
+  TLS, plus the same listener still answering HTTP/1.1). Design rationale in
+  [ADR-0006](docs/adr/0006-http2-termination.md).
+
 ### Changed
+
+- **`alpn = ["h2"]` is accepted on a `mode = "http"` listener.** v0.6.3
+  rejected it because the dataplane could not serve it; now it can, so the
+  gate no longer refuses a configuration that works, and the CLI E2E that
+  asserted the rejection checks the acceptance instead (real fixtures, exit
+  0, `config OK`). The backend-side rejection is unchanged and still covered
+  by its own tests.
 
 - **The release pipeline now re-pulls the published image and replays the
   journeys on it.** After promotion and the Docker Hub mirror, the workflow

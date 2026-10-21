@@ -118,7 +118,7 @@ impl<W: AsyncWrite + Unpin> AsyncWrite for MirrorTee<'_, W> {
 }
 
 /// Headers forbidden in chunked trailers (T01).
-const FORBIDDEN_TRAILERS: [&str; 6] = [
+pub(crate) const FORBIDDEN_TRAILERS: [&str; 6] = [
     "host",
     "content-length",
     "transfer-encoding",
@@ -228,7 +228,7 @@ fn parse_lines(head: &[u8]) -> Result<Vec<&[u8]>, Reject> {
 }
 
 /// Validates a `name: value` line with strict rules (T02).
-fn parse_header_line(line: &[u8]) -> Result<(String, String), Reject> {
+pub(crate) fn parse_header_line(line: &[u8]) -> Result<(String, String), Reject> {
     if line.first().is_some_and(|b| *b == b' ' || *b == b'\t') {
         return Err(Reject {
             status: 400,
@@ -573,7 +573,7 @@ pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHe
 
 /// Body copy error: distinguishes framing, cut, inactivity and abort.
 #[derive(Debug)]
-enum CopyError {
+pub(crate) enum CopyError {
     Framing(Reject),
     Truncated,
     Idle,
@@ -646,7 +646,7 @@ async fn copy_to_eof<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 /// Reads a CRLF-terminated line (terminator included), strict (T02).
 /// `ponytail`: byte-by-byte reading via BufReader; optimize when Phase 9
 /// benchmarks demand it.
-async fn read_crlf_line<R: AsyncRead + Unpin>(
+pub(crate) async fn read_crlf_line<R: AsyncRead + Unpin>(
     reader: &mut R,
     idle: Duration,
     max: usize,
@@ -682,7 +682,7 @@ async fn read_crlf_line<R: AsyncRead + Unpin>(
 }
 
 /// Strict `chunk-size [chunk-ext]`: pure hex (extension without controls).
-fn parse_chunk_size(line: &[u8]) -> Result<u64, CopyError> {
+pub(crate) fn parse_chunk_size(line: &[u8]) -> Result<u64, CopyError> {
     let bad = || {
         CopyError::Framing(Reject {
             status: 400,
@@ -759,10 +759,10 @@ async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 }
 
 /// Reader that serves an already-read prefix first (head-read remainder).
-struct Prefixed<R> {
-    prefix: Vec<u8>,
-    pos: usize,
-    inner: R,
+pub(crate) struct Prefixed<R> {
+    pub(crate) prefix: Vec<u8>,
+    pub(crate) pos: usize,
+    pub(crate) inner: R,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for Prefixed<R> {

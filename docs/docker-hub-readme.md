@@ -1,12 +1,14 @@
 # EQProxy
 
-EQProxy is a reverse proxy and load balancer written in Rust. It speaks
-HTTP/1.1 with strict framing (including interim 1xx and `Expect:
-100-continue`), TLS termination and backend TLS (verification on by
-default), mTLS with client CAs, weighted round-robin with active TCP/HTTP
-health checks and passive failure detection, safe connect-phase retries,
-bounded backend queues, incoming PROXY protocol v1 with origin allowlists,
-forwarded headers, and hot config + certificate reload under traffic.
+EQProxy is a reverse proxy and load balancer written in Rust. It terminates
+HTTP/2 (ALPN `h2` over TLS, or h2c with the connection preface on a
+plaintext listener) and HTTP/1.1 with strict framing (including interim 1xx
+and `Expect: 100-continue`), speaking HTTP/1.1 to the backends; it also does
+TLS termination and backend TLS (verification on by default), mTLS with
+client CAs, weighted round-robin with active TCP/HTTP health checks and
+passive failure detection, safe connect-phase retries, bounded backend
+queues, incoming PROXY protocol v1 with origin allowlists, forwarded
+headers, and hot config + certificate reload under traffic.
 
 The image is tiny and has no OS: a statically linked (musl) binary at
 `/opt/eqproxy`, a CA bundle for operators that use the system trust store,

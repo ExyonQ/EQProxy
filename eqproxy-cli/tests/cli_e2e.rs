@@ -111,6 +111,169 @@ fn validate_accepts_a_good_config() {
     );
 }
 
+/// Origin that answers each request with its body, `Content-Length` framed.
+fn start_body_echo_origin() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind body echo");
+    let addr = listener.local_addr().expect("addr body echo");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = vec![0u8; 8192];
+                let mut total = 0usize;
+                let head_end = loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                };
+                let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                let needed = head
+                    .lines()
+                    .find_map(|line| line.strip_prefix("content-length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while total < head_end + needed {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                }
+                let body = &buf[head_end..head_end + needed];
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\nX-Origin: h1\r\n\r\n",
+                    body.len()
+                );
+                if stream.write_all(response.as_bytes()).is_err() {
+                    return;
+                }
+                let _ = stream.write_all(body);
+            });
+        }
+    });
+    addr
+}
+
+fn curl_stdout(args: &[&str]) -> String {
+    let output = Command::new("curl")
+        .args(["-sS", "--max-time", "15", "-D", "-"])
+        .args(args)
+        .output()
+        .expect("run curl (needed for the HTTP/2 e2e)");
+    assert!(
+        output.status.success(),
+        "curl {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// HTTP/2 E2E through the **real binary** with a **real client** (curl,
+/// nghttp2): cleartext h2c with prior knowledge and TLS with `h2` ALPN, plus
+/// the same TLS listener still serving HTTP/1.1 when the client asks for it.
+/// A negotiated `HTTP/2` status line in curl's dump is the proof the proxy
+/// spoke h2 on the wire, not just that it answered.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_serves_http2_to_real_clients_over_tls_and_cleartext() {
+    let origin = start_body_echo_origin();
+    let config = temp_config(
+        "h2-run",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.plain]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [listener.secure]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [listener.secure.tls]\n\
+             cert = \"{FIXTURE_CERT}\"\n\
+             key = \"{FIXTURE_KEY}\"\n\
+             alpn = [\"h2\", \"http/1.1\"]\n\
+             [backend.api]\n\
+             server = \"{origin}\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let (mut plain, mut secure) = (String::new(), String::new());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (plain.is_empty() || secure.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listener plain listening on ").nth(1) {
+            plain = addr.trim().to_owned();
+        }
+        if let Some(addr) = line.split("listener secure listening on ").nth(1) {
+            secure = addr.trim().to_owned();
+        }
+    }
+    assert!(
+        !plain.is_empty(),
+        "the cleartext listener was not announced"
+    );
+    assert!(!secure.is_empty(), "the TLS listener was not announced");
+
+    // Cleartext h2c (prior knowledge): curl sends the connection preface.
+    let h2c = curl_stdout(&["--http2-prior-knowledge", &format!("http://{plain}/h2c")]);
+    assert!(
+        h2c.starts_with("HTTP/2 200"),
+        "cleartext h2c must negotiate HTTP/2: {h2c}"
+    );
+    assert!(h2c.contains("x-origin: h1"), "origin header lost: {h2c}");
+
+    // A real request body through the h2 → h1 translation.
+    let posted = curl_stdout(&[
+        "--http2-prior-knowledge",
+        "-d",
+        "body-through-h2",
+        &format!("http://{plain}/echo"),
+    ]);
+    assert!(posted.starts_with("HTTP/2 200"), "POST must work: {posted}");
+    assert!(
+        posted.ends_with("body-through-h2"),
+        "the body must round-trip through the proxy: {posted}"
+    );
+
+    // TLS with ALPN h2: the client asks for h2 and gets it.
+    let tls_h2 = curl_stdout(&["-k", "--http2", &format!("https://{secure}/tls-h2")]);
+    assert!(
+        tls_h2.starts_with("HTTP/2 200"),
+        "TLS + ALPN h2 must negotiate HTTP/2: {tls_h2}"
+    );
+
+    // The same listener still serves HTTP/1.1 for clients that ask for it.
+    let tls_h1 = curl_stdout(&["-k", "--http1.1", &format!("https://{secure}/tls-h1")]);
+    assert!(
+        tls_h1.starts_with("HTTP/1.1 200"),
+        "the h2 listener must keep HTTP/1.1 alive: {tls_h1}"
+    );
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
 #[cfg_attr(
     miri,
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
@@ -155,39 +318,33 @@ fn validate_reports_file_line_field_cause_example() {
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
-fn validate_rejects_h2_alpn_on_an_http_listener_with_a_fix() {
-    // `alpn = ["h2"]` used to pass the gate, negotiate h2 on the wire and
-    // then fail every request: the dataplane is HTTP/1.1 only.
+fn validate_accepts_h2_alpn_on_an_http_listener() {
+    // v0.7: `alpn = ["h2"]` used to be rejected because there was no HTTP/2
+    // dataplane. It terminates h2 now, so the gate accepts it (alone or
+    // alongside `http/1.1`) and resolution must succeed with real certs.
     let backend = start_echo_backend();
-    let config = temp_config(
-        "h2-alpn",
-        &format!(
-            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"c.pem\"\nkey = \"k.pem\"\nalpn = [\"h2\"]\n[backend.api]\nserver = \"{backend}\"\n"
-        ),
-    );
-    let output = bin()
-        .args(["config", "validate", "--config"])
-        .arg(&config)
-        .output()
-        .expect("run eqproxy config validate");
-    remove_temp(&config);
+    for alpn in ["[\"h2\"]", "[\"h2\", \"http/1.1\"]"] {
+        let config = temp_config(
+            "h2-alpn",
+            &format!(
+                "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[listener.web.tls]\ncert = \"{FIXTURE_CERT}\"\nkey = \"{FIXTURE_KEY}\"\nalpn = {alpn}\n[backend.api]\nserver = \"{backend}\"\n"
+            ),
+        );
+        let output = bin()
+            .args(["config", "validate", "--config"])
+            .arg(&config)
+            .output()
+            .expect("run eqproxy config validate");
+        remove_temp(&config);
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(1),
-        "h2 must be rejected; stderr: {stderr}"
-    );
-    for expected in [
-        "field `listener.web.tls.alpn`",
-        "ALPN protocol \"h2\" cannot be served",
-        "HTTP/1.1",
-        "example:",
-        "alpn = [\"http/1.1\"]",
-    ] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains(expected),
-            "missing {expected:?} in stderr:\n{stderr}"
+            output.status.success(),
+            "alpn = {alpn} must be accepted; stderr: {stderr}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("config OK"),
+            "alpn = {alpn} must report config OK"
         );
     }
 }

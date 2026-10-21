@@ -35,8 +35,11 @@ diagnostics, configuration, administration, extensibility and security.
 > v1.34.2, and the [migration matrix](docs/migration/README.md) **65/65
 > checks** (four real source configs and their `eqproxy.toml` translation
 > routing identically; evidence in
-> [docs/evidence/v06-migration/](docs/evidence/v06-migration/)). No HTTP/2
-> yet. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
+> [docs/evidence/v06-migration/](docs/evidence/v06-migration/)). HTTP/2 is
+> terminated on the client side and translated to HTTP/1.1 upstream
+> (unreleased, on top of v0.6.3: [ADR-0006](docs/adr/0006-http2-termination.md),
+> [evidence](docs/evidence/v07-http2.md)); HTTP/2 upstream, gRPC end to end
+> and HTTP/3 (QUIC) remain v0.7 work. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100
 > backends, 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms),
@@ -50,7 +53,9 @@ diagnostics, configuration, administration, extensibility and security.
 > version-gate criteria); what remains is outside this version by design
 > and listed in the [CHANGELOG](CHANGELOG.md): the reference filters that
 > only exist as WASM (v0.9, so ecosystem extension stays WASM-only), maps
-> consumed through `equals` matching only, and HTTP/2. The 24h soak gate **passed** on
+> consumed through `equals` matching only, and HTTP/2 (client termination
+> landed on main after v0.6.3; upstream h2, gRPC and QUIC are still ahead).
+> The 24h soak gate **passed** on
 > netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
 > 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown; budgets in
 > [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) §9).

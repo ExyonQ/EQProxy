@@ -201,7 +201,9 @@ pub struct TlsServerConfig {
     /// without SNI and names no entry claims.
     #[serde(default)]
     pub certs: Vec<SniCertConfig>,
-    /// Offered ALPN protocols (e.g. `["http/1.1"]`); empty = no ALPN.
+    /// Offered ALPN protocols, e.g. `["h2", "http/1.1"]` (HTTP/2 and
+    /// HTTP/1.1 served on this listener) or `["http/1.1"]`; empty = no ALPN.
+    /// A `tcp` listener relays bytes and never parses them.
     #[serde(default)]
     pub alpn: Vec<String>,
     /// Minimum TLS version (default 1.2).
@@ -223,7 +225,9 @@ pub struct TlsClientConfig {
     pub ca_file: Option<String>,
     /// Name to verify/SNI; defaults to the host part of the address.
     pub server_name: Option<String>,
-    /// ALPN protocols to offer in the handshake; empty = no ALPN.
+    /// ALPN protocols to offer in the handshake; empty = no ALPN. The
+    /// backend side speaks HTTP/1.1 (and raw bytes in `tcp` mode), so a
+    /// `mode = "http"` listener rejects `h2` here.
     #[serde(default)]
     pub alpn: Vec<String>,
     /// Minimum TLS version (default 1.2).
