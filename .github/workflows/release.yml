@@ -583,10 +583,17 @@ jobs:
             set -e
             [ "$h2_status" = "1" ] \
               || fail "$image linux/$arch accepted alpn = [\"h2\"] (exit $h2_status)"
-            printf '%s' "$h2_out" | grep -q 'ALPN protocol "h2" cannot be served' \
-              || fail "$image linux/$arch h2 rejection lacks the cause: $h2_out"
-            printf '%s' "$h2_out" | grep -q 'alpn = \["http/1.1"\]' \
-              || fail "$image linux/$arch h2 rejection lacks the fix: $h2_out"
+            # `case` instead of `printf | grep -q`: grep exits on the first
+            # match and the writer can take SIGPIPE, which `pipefail` turns
+            # into a failed step even when the check matched.
+            case "$h2_out" in
+              *'ALPN protocol "h2" cannot be served'*) ;;
+              *) fail "$image linux/$arch h2 rejection lacks the cause: $h2_out" ;;
+            esac
+            case "$h2_out" in
+              *'alpn = ["http/1.1"]'*) ;;
+              *) fail "$image linux/$arch h2 rejection lacks the fix: $h2_out" ;;
+            esac
             # config apply used to fail with "Permission denied" because the
             # state directory resolved to / under this unprivileged image.
             log "E2E $image (linux/$arch): config apply writes state"
@@ -598,10 +605,17 @@ jobs:
           [backend.api]
           server = "127.0.0.1:9"
           EOF
-            docker run --rm --platform "linux/$arch" \
+            # Capture the output instead of piping into `grep -q`: apply
+            # keeps printing the plan after "applied:", grep closes the pipe
+            # on its first match and `pipefail` then fails the step.
+            apply_out="$(docker run --rm --platform "linux/$arch" \
               -v /tmp/e2e-apply.toml:/c.toml:ro "$image" \
-              config apply --config /c.toml | grep -q 'applied:' \
+              config apply --config /c.toml)" \
               || fail "$image linux/$arch config apply"
+            case "$apply_out" in
+              *applied:*) ;;
+              *) fail "$image linux/$arch config apply printed: $apply_out" ;;
+            esac
             verify_live_container "image artifact, linux/$arch" "$image" \
               --platform "linux/$arch"
           done
