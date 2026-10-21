@@ -5,6 +5,17 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **The release pipeline now re-pulls the published image and replays the
+  journeys on it.** After promotion and the Docker Hub mirror, the workflow
+  pulls `:<version>` from both registries on both architectures, asserts the
+  pulled image is the scanned index, and runs `--version`, the `alpn = ["h2"]`
+  rejection, `config apply` and live proxied traffic. A tag that resolves to
+  the right digest is no longer the last word: the bytes users pull have to
+  run. The step is exercised on the next tag; for v0.6.3 the same journeys
+  were run by hand against the published artifacts.
+
 ## [v0.6.3] — 2026-10-21
 
 Patch release closing the two defects found while measuring TLS parity: a

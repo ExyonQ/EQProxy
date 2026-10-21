@@ -673,6 +673,104 @@ jobs:
           done
           docker buildx imagetools inspect "ghcr.io/exyonq/eqproxy:$VERSION"
 
+      # What the candidate E2E proved is the bytes before promotion. This
+      # replays the same journeys on the image a user actually pulls, from
+      # both registries and on both architectures: a tag that resolves to the
+      # scanned digest is not proof that the published image runs.
+      - name: Re-pull the published image and replay the journeys (2 registries × 2 architectures)
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          INDEX="${{ steps.candidate.outputs.digest }}"
+          fail() { printf 'release FAILED: %s\n' "$*" >&2; exit 1; }
+          log() { printf '==> %s\n' "$*"; }
+          cat > /tmp/published-h2.toml <<'EOF'
+          schema_version = 1
+          [listener.web]
+          listen = "127.0.0.1:0"
+          mode = "http"
+          backend = "api"
+          [listener.web.tls]
+          cert = "c.pem"
+          key = "k.pem"
+          alpn = ["h2"]
+          [backend.api]
+          server = "127.0.0.1:9"
+          EOF
+          cat > /tmp/published-apply.toml <<'EOF'
+          schema_version = 1
+          [listener.web]
+          listen = "127.0.0.1:0"
+          backend = "api"
+          [backend.api]
+          server = "127.0.0.1:9"
+          EOF
+          verify_published() {
+            local ref="$1" arch="$2" net="$3" subnet="$4"
+            log "re-pull $ref (linux/$arch)"
+            docker pull -q --platform "linux/$arch" "$ref" >/dev/null \
+              || fail "docker pull $ref linux/$arch"
+            case "$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref")" in
+              *"@sha256:$INDEX"*) ;;
+              *) fail "$ref linux/$arch is not the scanned index sha256:$INDEX" ;;
+            esac
+            docker run --rm --platform "linux/$arch" "$ref" --version \
+              | grep -q "eqproxy $VERSION" \
+              || fail "$ref linux/$arch reports the wrong version"
+            set +e
+            h2_out="$(docker run --rm --platform "linux/$arch" \
+              -v /tmp/published-h2.toml:/h2.toml:ro "$ref" \
+              config validate --config /h2.toml 2>&1)"
+            h2_status=$?
+            set -e
+            [ "$h2_status" = "1" ] \
+              || fail "$ref linux/$arch accepted alpn = [\"h2\"] (exit $h2_status)"
+            case "$h2_out" in
+              *'ALPN protocol "h2" cannot be served'*) ;;
+              *) fail "$ref linux/$arch h2 rejection lacks the cause: $h2_out" ;;
+            esac
+            apply_out="$(docker run --rm --platform "linux/$arch" \
+              -v /tmp/published-apply.toml:/c.toml:ro "$ref" \
+              config apply --config /c.toml)" \
+              || fail "$ref linux/$arch config apply"
+            case "$apply_out" in
+              *applied:*) ;;
+              *) fail "$ref linux/$arch config apply printed: $apply_out" ;;
+            esac
+            log "re-pull $ref (linux/$arch): live proxied traffic"
+            docker network create --subnet "$subnet" "$net" >/dev/null
+            docker run -d --network "$net" --ip "${subnet%.0/24}.10" --name "$net-back" \
+              nginx:alpine >/dev/null
+            sleep 2
+            cat > /tmp/published-live.toml <<LIVE
+          schema_version = 1
+          [listener.web]
+          listen = "0.0.0.0:18084"
+          mode = "http"
+          backend = "api"
+          [backend.api]
+          server = "${subnet%.0/24}.10:80"
+          LIVE
+            docker run -d --network "$net" --ip "${subnet%.0/24}.20" --name "$net-prox" \
+              -p 18084:18084 --platform "linux/$arch" \
+              -v /tmp/published-live.toml:/c.toml:ro "$ref" run --config /c.toml >/dev/null
+            sleep 4
+            local code
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18084/)"
+            docker rm -f "$net-prox" "$net-back" >/dev/null
+            docker network rm "$net" >/dev/null
+            [ "$code" = "200" ] || fail "$ref linux/$arch live traffic HTTP $code"
+            log "published $ref linux/$arch: version, digest, h2 gate, config apply and live traffic OK"
+          }
+          i=0
+          for ref in "ghcr.io/exyonq/eqproxy:$VERSION" "exyonq/eqproxy:$VERSION"; do
+            for arch in amd64 arm64; do
+              i=$((i + 1))
+              verify_published "$ref" "$arch" "eqpub-$i" "172.23.$i.0/24"
+            done
+          done
+
       - name: Build multi-arch image (dry run, no push)
         if: github.ref_type != 'tag'
         run: |

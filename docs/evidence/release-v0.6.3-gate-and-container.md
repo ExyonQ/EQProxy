@@ -162,6 +162,18 @@ darwin arm64, darwin amd64 (Rosetta) and both Linux binaries inside Debian
 exits 0 without a panic; the published arm64 image serves TLS with `200` and
 runs `config apply` (exit 0); the Docker Hub `amd64` image reports 0.6.3.
 
+**Post-publication re-check is now a pipeline step, not a manual habit.**
+`Re-pull the published image and replay the journeys` was added to the release
+workflow after this release: it pulls `:<version>` from GHCR and Docker Hub on
+`linux/amd64` and `linux/arm64`, asserts the pulled image's `RepoDigests`
+contain the scanned index, and runs `--version`, the h2 rejection, `config apply`
+and live traffic. The exact script was extracted from the workflow and run on
+this host against the published v0.6.3 images: 4/4 combinations passed, and a
+wrong index made it fail at the digest assertion. It cannot run during v0.6.3
+itself (the tag predates it), so for this release the four combinations were
+executed by hand with the same commands — the pipeline enforcement is
+**NOT EXECUTED in CI** until the next tag.
+
 **Attempts that did not publish:** two earlier runs of this tag failed and
 nothing was released from them — `a6f4521` (the new image check piped
 `config apply` into `grep -q`, so `pipefail` failed on SIGPIPE while the
