@@ -69,6 +69,11 @@ clients and servers ship.
 
 ## Consequences
 
+> Update (2026-10-22, second slice): the "upstream stays HTTP/1.1" decision
+> was replaced by [ADR-0007](0007-http2-backend.md), which speaks HTTP/2 to a
+> backend that negotiates `h2`. The rest of this ADR still describes the
+> dataplane.
+
 - Every h2 request sees the same decisions and error surfaces as h1. Fixing a
   rule bug fixes it for both protocols.
 - A stream costs one extra task and one 64 KiB pipe, plus header

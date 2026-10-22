@@ -337,9 +337,9 @@ the whole service), sanitizers/concurrency tools where appropriate.
   9. (Living log: each matrix row extends it.)
   10. **HTTP/2 termination (v0.7, first slice):** a client that negotiates
       `h2` (ALPN on TLS) or starts with the h2c connection preface on a
-      plaintext listener is served as HTTP/2; the backend side still speaks
-      HTTP/1.1, so each stream is one HTTP/1.1 exchange through the same
-      engine (same rules, actions, timeouts and errors).
+      plaintext listener is served as HTTP/2; this slice keeps the backend on
+      HTTP/1.1 (item 11 lifts that), so each stream is one HTTP/1.1 exchange
+      through the same engine (same rules, actions, timeouts and errors).
       Framing translation is explicit: `content-length` preserved, a body
       without it sent upstream as `chunked`, chunked responses decoded into
       DATA and their trailers forwarded as trailing HEADERS, hop-by-hop

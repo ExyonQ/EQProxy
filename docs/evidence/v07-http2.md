@@ -1,5 +1,11 @@
 # v0.7 slice 1 — HTTP/2 termination (`h2` in, HTTP/1.1 out)
 
+> **Superseded in part** by [slice 2](v07-http2-backend.md) (2026-10-22):
+> the backend side now speaks HTTP/2 when its TLS ALPN negotiates `h2`, and
+> the configuration gate accepts `alpn = ["h2"]` on a backend. The text below
+> records what slice 1 actually delivered; its "upstream stays HTTP/1.1"
+> limitation no longer applies.
+
 Language: **English**. Evidence for the first v0.7 increment, collected on
 2026-10-21/22 (macOS 26 arm64 host, Rust 1.97.1, curl 8.7.1 with nghttp2
 1.68.1). Unreleased: it lands on top of v0.6.3.
