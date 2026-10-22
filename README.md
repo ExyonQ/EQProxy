@@ -28,7 +28,7 @@ diagnostics, configuration, administration, extensibility and security.
 > by SNI (exact name, then wildcard, then the listener default), and the `eqproxy`
 > CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
 > `schema` — the public JSON Schema for editor completion, `diff`, `plan`,
-> offline `apply`/`rollback`, `doctor`), with **365 tests**
+> offline `apply`/`rollback`, `doctor`), with **368 tests**
 > green plus two Docker-gated harnesses run before the release:
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against
 > HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy
@@ -40,13 +40,18 @@ diagnostics, configuration, administration, extensibility and security.
 > negotiates `h2` (`[backend.X.tls] alpn = ["h2"]`) — spoken to the backend
 > too, with **one session per backend server shared by concurrent
 > exchanges**, so an h2 client reaches an h2 origin through real HTTP/2 on
-> both sides and concurrent requests multiplex instead of queueing
+> both sides and concurrent requests multiplex instead of queueing. Sessions
+> close when idle, a `GOAWAY` drains their in-flight streams, and a stream
+> the peer refused before processing is replayed once on a fresh session
+> (never after processing).
 > (unreleased, on top of v0.6.3: [ADR-0006](docs/adr/0006-http2-termination.md),
 > [ADR-0007](docs/adr/0007-http2-backend.md),
-> [ADR-0008](docs/adr/0008-http2-backend-multiplexing.md), evidence
+> [ADR-0008](docs/adr/0008-http2-backend-multiplexing.md),
+> [ADR-0009](docs/adr/0009-http2-session-lifecycle.md), evidence
 > [v07-http2](docs/evidence/v07-http2.md),
-> [v07-http2-backend](docs/evidence/v07-http2-backend.md) and
-> [v07-http2-multiplexing](docs/evidence/v07-http2-multiplexing.md)); gRPC
+> [v07-http2-backend](docs/evidence/v07-http2-backend.md),
+> [v07-http2-multiplexing](docs/evidence/v07-http2-multiplexing.md) and
+> [v07-http2-session-lifecycle](docs/evidence/v07-http2-session-lifecycle.md)); gRPC
 > end to end and HTTP/3 (QUIC) remain v0.7 work. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100

@@ -6,7 +6,8 @@ plaintext listener) and HTTP/1.1 with strict framing (including interim 1xx
 and `Expect: 100-continue`), and speaks HTTP/2 to a backend that negotiates
 `h2` (opt-in with `[backend.NAME.tls] alpn = ["h2"]`; HTTP/1.1 otherwise),
 sharing **one upstream session per backend server across concurrent
-requests**; it also does
+requests**, closing it when idle and draining it on `GOAWAY` (a stream the
+peer refused before processing is replayed once); it also does
 TLS termination and backend TLS (verification on by default), mTLS with
 client CAs, weighted round-robin with active TCP/HTTP health checks and
 passive failure detection, safe connect-phase retries, bounded backend

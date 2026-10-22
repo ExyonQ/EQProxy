@@ -3,6 +3,8 @@
 Language: **English**.
 
 - State: **Accepted** (2026-10-22, third v0.7 slice)
+- Superseded in part by: [ADR-0009](0009-http2-session-lifecycle.md) (idle
+  close and GOAWAY drain replace the "no idle close yet" consequence)
 - Date: 2026-10-22
 - Related: [ADR-0007](0007-http2-backend.md) (HTTP/2 to the backend),
   [ADR-0006](0006-http2-termination.md) (client-side termination),

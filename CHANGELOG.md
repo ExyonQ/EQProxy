@@ -7,6 +7,27 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Added
 
+- **HTTP/2 backend session lifecycle (v0.7 fourth slice).** Sessions now have
+  the lifecycle their name implies. An idle session (no exchange for the
+  listener's `idle_timeout`) is removed from the hub and closed, and an
+  exchange in flight is never cut by that close: admitting an exchange and
+  closing the session are one critical section. A peer `GOAWAY` retires the
+  session (new exchanges dial a fresh one) while the streams it already
+  accepted finish — the drain. A stream the peer refused **before processing
+  it** — a received `GOAWAY`, or `RST_STREAM` with `REFUSED_STREAM` (RFC 9113
+  §8.1.4) — is replayed **once** on a fresh session with the same request
+  head, when no request body was consumed; a stream cut after processing, or
+  one whose body was already forwarded, is never replayed, so nothing runs
+  twice. New counters: `h2_sessions_idle_closed`, `h2_goaway_received`,
+  `h2_refused_retried` (rendered as the `h2[...]` METRICS group). Verified
+  with 3 dataplane E2E journeys over real sockets (an idle close that skips
+  an exchange in flight, a graceful server GOAWAY draining the accepted
+  stream while the next exchange takes a fresh session, and a refused stream
+  replayed exactly once) and two journeys through the release binary against
+  an independent Python `hyper-h2` origin. Design in
+  [ADR-0009](docs/adr/0009-http2-session-lifecycle.md), evidence in
+  [docs/evidence/v07-http2-session-lifecycle.md](docs/evidence/v07-http2-session-lifecycle.md).
+
 - **HTTP/2 backend multiplexing (v0.7 third slice).** An `h2` backend now
   serves concurrent requests on **one session**: every exchange takes its own
   stream behind a private 64 KiB pipe, and the engine's pool is bypassed on
