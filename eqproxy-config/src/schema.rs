@@ -225,9 +225,11 @@ pub struct TlsClientConfig {
     pub ca_file: Option<String>,
     /// Name to verify/SNI; defaults to the host part of the address.
     pub server_name: Option<String>,
-    /// ALPN protocols to offer in the handshake; empty = no ALPN. The
-    /// backend side speaks HTTP/1.1 (and raw bytes in `tcp` mode), so a
-    /// `mode = "http"` listener rejects `h2` here.
+    /// ALPN protocols to offer in the handshake; empty = no ALPN. Listing
+    /// `"h2"` opts this backend into HTTP/2: a `mode = "http"` listener
+    /// speaks real HTTP/2 to it when the handshake negotiates `h2`, and
+    /// keeps HTTP/1.1 when it does not. A `tcp` listener relays bytes and
+    /// never interprets ALPN.
     #[serde(default)]
     pub alpn: Vec<String>,
     /// Minimum TLS version (default 1.2).

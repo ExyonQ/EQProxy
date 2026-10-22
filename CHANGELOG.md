@@ -7,6 +7,31 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Added
 
+- **HTTP/2 to the backend (`http2_protocol_options` parity, v0.7 second
+  slice).** A backend whose TLS handshake negotiates `h2` — `[backend.X.tls]
+  alpn = ["h2"]` — is now reached with a **real HTTP/2 session** instead of
+  HTTP/1.1 bytes: framing, HPACK and flow control from the `h2` crate, one
+  HTTP/1.1 message per stream through the existing engine (same routing,
+  actions, retries, pool and errors). The h2 handshake runs in the connect
+  phase, so a backend that cannot speak h2 fails as a connect error (retried,
+  `502`) rather than an open connection that fails per request.
+  Translation, both directions: `content-length` kept only when the h1 side
+  declared one, chunked bodies sent as DATA, h1 trailers as trailing HEADERS;
+  a backend `content-length` preserved, anything else relayed as `chunked`,
+  and h2 trailers arriving as h1 trailers. `CONNECT` and host-less requests
+  are refused (`502`), and a body shorter or longer than declared cuts the
+  connection instead of ending a message cleanly. One exchange at a time per
+  session (the pool is exclusive): no h2-to-backend multiplexing yet. This
+  makes HTTP/2 end to end possible (h2 client → h2 origin) and is the
+  prerequisite for gRPC. Verified with 4 unit tests, 7 E2E journeys against a
+  real h2-over-TLS server (h1→h2, h2→h2, pooled session reuse, trailers in
+  both directions, `HEAD`, `CONNECT` refusal, failed ALPN negotiation), 1 CLI
+  E2E, and a live journey through the release binary and `curl` against an
+  independent Python `h2` origin (one backend session serving five exchanges,
+  `opened=1 reused=4 proxied=5`). Design in
+  [ADR-0007](docs/adr/0007-http2-backend.md), evidence in
+  [docs/evidence/v07-http2-backend.md](docs/evidence/v07-http2-backend.md).
+
 - **HTTP/2 termination on `mode = "http"` listeners (v0.7, first slice).** A
   client that negotiates `h2` — ALPN on TLS, or the h2c connection preface on
   a plaintext listener, detected with `peek` so an HTTP/1.1 connection is
@@ -17,8 +42,8 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   copy), and the answer translated back into HEADERS/DATA. Request bodies
   without `content-length` go upstream as `chunked`; chunked responses are
   decoded into DATA and their trailers become trailing HEADERS; hop-by-hop
-  headers never cross in either direction. Upstream stays HTTP/1.1 in this
-  slice, so the backend gate still rejects `alpn = ["h2"]` there. Explicit
+  headers never cross in either direction. (The upstream side got its own
+  HTTP/2 slice in this same release — see the entry above.) Explicit
   failures instead of silent ones: a `101` from a backend resets the stream,
   `CONNECT` over h2 answers `501`, and a body shorter than its declared
   `content-length` resets the stream instead of ending cleanly. Bounded by
@@ -33,12 +58,13 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Changed
 
-- **`alpn = ["h2"]` is accepted on a `mode = "http"` listener.** v0.6.3
-  rejected it because the dataplane could not serve it; now it can, so the
-  gate no longer refuses a configuration that works, and the CLI E2E that
-  asserted the rejection checks the acceptance instead (real fixtures, exit
-  0, `config OK`). The backend-side rejection is unchanged and still covered
-  by its own tests.
+- **`alpn = ["h2"]` is accepted on a `mode = "http"` listener and on a
+  backend used by one.** v0.6.3 rejected both because the dataplane could
+  neither serve h2 nor speak it; now it does both, so the gate no longer
+  refuses a configuration that works. The CLI E2Es that asserted the
+  rejections check the acceptance instead (real fixtures, exit 0, `config
+  OK`), and the listener-side acceptance test is unchanged. An empty backend
+  ALPN list keeps HTTP/1.1, exactly as before.
 
 - **The release pipeline now re-pulls the published image and replays the
   journeys on it.** After promotion and the Docker Hub mirror, the workflow

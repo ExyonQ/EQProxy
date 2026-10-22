@@ -830,7 +830,7 @@ async fn write_error<W: AsyncWrite + Unpin>(writer: &mut W, status: u16, reason:
 
 /// Short reason phrase for a locally generated status (C9 + v0.6
 /// rule actions).
-fn phrase(status: u16) -> &'static str {
+pub(crate) fn phrase(status: u16) -> &'static str {
     match status {
         200 => "ok",
         201 => "created",

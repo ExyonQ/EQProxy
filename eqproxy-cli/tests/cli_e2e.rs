@@ -353,6 +353,42 @@ fn validate_accepts_h2_alpn_on_an_http_listener() {
     miri,
     ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
 )]
+#[test]
+fn validate_accepts_h2_alpn_on_a_backend() {
+    // v0.6.3 rejected `alpn = ["h2"]` on a backend used by an `http`
+    // listener because the dataplane only spoke HTTP/1.1 upstream. v0.7
+    // opens a real h2 session there, so the gate accepts it and resolution
+    // keeps working (CA file + server name included).
+    let backend = start_echo_backend();
+    let config = temp_config(
+        "backend-h2-alpn",
+        &format!(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n[backend.api]\nserver = \"{backend}\"\n[backend.api.tls]\nverify = false\nalpn = [\"h2\"]\n"
+        ),
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&config);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "backend alpn = [\"h2\"] must be accepted; stderr: {stderr}"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("config OK"),
+        "stdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
 #[cfg(unix)]
 #[test]
 fn explain_piped_into_head_does_not_panic() {

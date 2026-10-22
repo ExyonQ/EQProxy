@@ -3,7 +3,9 @@
 EQProxy is a reverse proxy and load balancer written in Rust. It terminates
 HTTP/2 (ALPN `h2` over TLS, or h2c with the connection preface on a
 plaintext listener) and HTTP/1.1 with strict framing (including interim 1xx
-and `Expect: 100-continue`), speaking HTTP/1.1 to the backends; it also does
+and `Expect: 100-continue`), and speaks HTTP/2 to a backend that negotiates
+`h2` (opt-in with `[backend.NAME.tls] alpn = ["h2"]`; HTTP/1.1 otherwise); it
+also does
 TLS termination and backend TLS (verification on by default), mTLS with
 client CAs, weighted round-robin with active TCP/HTTP health checks and
 passive failure detection, safe connect-phase retries, bounded backend

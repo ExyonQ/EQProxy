@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod backend_h2;
 pub mod balancer;
 pub mod health;
 pub mod http1;

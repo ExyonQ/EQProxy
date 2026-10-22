@@ -314,7 +314,8 @@ the whole service), sanitizers/concurrency tools where appropriate.
      default certificate; an unknown name never fails the handshake), and
      only TLS 1.2/1.3 (TLS 1.0/1.1 never);
      ALPN offers only the configured protocols (`http/1.1` and, since v0.7,
-     `h2` on client listeners; the backend side still offers `http/1.1` only)
+     `h2` on client listeners; on backends `h2` opts into HTTP/2 to the
+     origin — see item 11 — and an empty list keeps `http/1.1`)
      and the handshake **fails** when there is no common protocol instead of
      negotiating nothing silently. Backend TLS verifies certificate **and
      hostname by default** (Mozilla roots + `ca_file`); `verify = false` is an
@@ -347,9 +348,26 @@ the whole service), sanitizers/concurrency tools where appropriate.
       `CONNECT` over h2 answers `501`, and a body shorter than its declared
       length resets the stream instead of ending it. At most 128 concurrent
       streams per connection, DATA read in 16 KiB units with capacity
-      reserved before every frame. Upstream HTTP/2, extended CONNECT
-      (WebSockets over h2), gRPC end to end and HTTP/3 are **not** part of
-      this slice; design in [ADR-0006](docs/adr/0006-http2-termination.md).
+      reserved before every frame. Upstream HTTP/2 is its own entry (item 11);
+      extended CONNECT (WebSockets over h2), gRPC end to end and HTTP/3 are
+      **not** part of this entry; design in
+      [ADR-0006](docs/adr/0006-http2-termination.md).
+  11. **HTTP/2 to the backend (v0.7, second slice):** a backend whose TLS
+      handshake negotiates `h2` (its `[backend.X.tls] alpn` lists it) is
+      reached with a real HTTP/2 session; an empty ALPN list keeps HTTP/1.1.
+      The handshake happens in the connect phase, so a backend that cannot
+      speak h2 is a connect failure (retried, answered `502`), never an open
+      connection that fails per request. The engine still owns routing,
+      actions, retries, the pool and the errors: one HTTP/1.1 message per h2
+      stream crosses a bounded 64 KiB pipe. `content-length` is kept only
+      when the h1 side declared one, chunked bodies become DATA and h1
+      trailers trailing HEADERS; a backend `content-length` is preserved and
+      anything else is relayed as `chunked`, with h2 trailers becoming h1
+      trailers. `CONNECT` and host-less requests are refused (`502`), and a
+      body shorter or longer than declared cuts the connection. One exchange
+      at a time per session (the pool is exclusive): no h2-to-backend
+      multiplexing yet. Design in
+      [ADR-0007](docs/adr/0007-http2-backend.md).
 
 ## 14. Project state and evidence
 
@@ -368,5 +386,6 @@ the whole service), sanitizers/concurrency tools where appropriate.
 | Envoy rule actions `hash_policy` and `request_mirror` (B-H3) | **Tested** (2026-10-20) | Unit: hash-key grammar (`source`/`path`/`host`/`cookie:NAME`/`header:NAME`, bad keys rejected), sticky+weighted+consistent selection (300 keys, equal weights give each target ~1/3, removing a target moves only its keys, 9:1 weighting), mirror sampling (exactly 25 of every 100) and a copy written to a real TCP sink plus a dead shadow backend counting a failure. E2E over real sockets: same key keeps its target, keys spread, no-key requests rotate, consistent removal; mirror copy observed on the shadow socket with the client keeping the primary answer, non-matching paths not mirrored, dead mirror without client impact. Through the real binary: stickiness and both targets served, shadow receiving the copy, `config explain` showing `hash cookie:session` and `mirror 100% -> shadow`. Gate: 3 new tests naming field/cause/example for hash without split, too few live targets, unknown key, missing mirror backend, percentage outside 1..=100 and mirror on a local action |
 | Public configuration JSON Schema and autocompletion (Q1/CE1) | **Tested** (2026-10-20) | `eqproxy config schema [--output]` renders a draft 2020-12 schema derived from the same structs the parser deserializes; 4 gates: generated schema == repository file byte for byte, documented example validated by the schema *and* by the real gate, typo (`listner`) and numeric duration rejected by the schema, every rule action present in the published properties; plus the real binary reproducing the file with `--output` |
 | v0.6 routing rules and traffic control (B-H3/B-H4/B-N2/B-N3/B-N4/B-I4/B-E17/B-N5/B-I6/B-I11/B-H5/B-N8/B-I7/B-I10/B-H8/B-N13/B-N9/B-I9/C10) | **Tested** (2026-10-20, v0.6.1) | 327 tests green across 23 suites (unit, property, E2E over real sockets and the real binary) plus two Docker-gated harnesses: differential corpus **23/23** cases (HAProxy 3.4.6, nginx, ingress-nginx data plane, static Envoy v1.34.2) and migration matrix **13/13 cases × 5 implementations = 65/65 checks** ([docs/migration/](docs/migration/README.md), evidence in `docs/evidence/v06-migration/`) |
+| HTTP/2 to the backend (B-H1/B-N1/B-I1/B-E2, v0.7 slice 2) | **Tested** (2026-10-22) | 4 unit tests (h1-only headers never cross, chunked keeps no length, `CONNECT`/host-less refused, absolute-form keeps its authority) + 7 E2E over real sockets with a real h2 server over TLS: h1 client → h2 backend (backend sees HTTP/2, `:authority` from `Host`, headers/body intact), h2 client end to end, one pooled backend session serving consecutive requests, request and response trailers in both directions, `HEAD` keeping its declared length and the session usable, `CONNECT` refused without reaching the backend, and a backend that cannot negotiate h2 producing an explicit `502` with the handshake counted; plus 1 CLI E2E (`config validate` accepting `alpn = ["h2"]` on a backend) and a journey through the real release binary and real `curl` against an independent Python `h2` origin. Evidence in [docs/evidence/v07-http2-backend.md](docs/evidence/v07-http2-backend.md) |
 | HTTP/2 client termination (B-H1/B-N1/B-I1/B-E2, v0.7 slice 1) | **Tested** (2026-10-22) | 7 unit tests (origin-form translation, `:authority`→`host`, content-length vs chunked, hop-by-hop stripping, response-header filtering) + 6 E2E over real sockets with a real h2 client: h2c prior knowledge, three streams that only complete when they advance in parallel, a body without `content-length` reaching the origin as `chunked`, chunked response with trailers arriving as trailing HEADERS, truncated backend body resetting the stream, 502 on a dead backend and a rule `308` answered locally, TLS ALPN `h2`; plus 1 E2E through the real binary with real `curl` (`HTTP/2 200` over h2c and TLS, HTTP/1.1 still served on the same listener). Evidence in [docs/evidence/v07-http2.md](docs/evidence/v07-http2.md) |
 | Non-blocking dynamic DNS (B-H13/B-N18/B-E15, CE7) | **Tested** (2026-10-19) | 8 tests: 4 balancer-slot unit + 3 resolver-loop unit (stub seam) + 2 dataplane E2E (hot re-resolution, hung DNS → immediate 503 + recovery) + 2 through the real binary with the OS resolver (broken `.invalid` name → listeners announced < 3 s + counted 503; `localhost` backend → traffic + periodic rounds in METRICS) |

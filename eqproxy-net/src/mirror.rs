@@ -21,7 +21,7 @@ use std::time::Duration;
 use eqproxy_core::metrics::Metrics;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::proxy::{BoxRead, BoxWrite, connect_backend_to};
+use crate::proxy::{BoxRead, BoxWrite, DialTimeouts, connect_backend_to};
 
 /// Largest request body copied to the mirror backend (B-H3). Beyond it the
 /// request is not mirrored (counted), never truncated.
@@ -77,8 +77,11 @@ impl MirrorCopy {
             return;
         };
         let (mut read, mut write) = match connect_backend_to(
-            &self.name,
-            self.connect_timeout,
+            DialTimeouts {
+                name: &self.name,
+                connect: self.connect_timeout,
+                idle: self.idle_timeout,
+            },
             &backend,
             addr,
             self.peer,

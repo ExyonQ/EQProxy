@@ -36,6 +36,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use eqproxy_core::{Metrics, Shutdown, ShutdownHandle};
 
+use crate::backend_h2;
 use crate::balancer::{ActiveGuard, Balance, Balancer, ResolvedServer};
 use crate::dns::{self, DnsSettings, Resolving, SystemResolver};
 use crate::health::{self, HealthCheck};
@@ -1681,8 +1682,11 @@ async fn dial_with_retries<'a>(
 
         // --- Dial the chosen server ---
         match connect_backend_to(
-            &cfg.name,
-            cfg.connect_timeout,
+            DialTimeouts {
+                name: &cfg.name,
+                connect: cfg.connect_timeout,
+                idle: cfg.idle_timeout,
+            },
             backend,
             addr,
             peer,
@@ -1791,20 +1795,36 @@ pub async fn checkout_or_connect<'a>(
     .await
 }
 
+/// Name and timeouts of one dial attempt, kept together so the signature of
+/// [`connect_backend_to`] stays readable.
+#[derive(Clone, Copy)]
+pub(crate) struct DialTimeouts<'a> {
+    /// Listener (or mirror) name used in the log lines.
+    pub name: &'a str,
+    /// Maximum for TCP connect, TLS handshake and h2 handshake alike.
+    pub connect: Duration,
+    /// Per-operation inactivity bound of the h2 backend bridge.
+    pub idle: Duration,
+}
+
 /// Variant of [`connect_backend`] against an already-chosen server (the pool
 /// needs the address before deciding between reuse and dial).
 ///
 /// The PROXY v1 header (A9) is written once per connection: pool-reused
 /// connections already carry it from their first use.
 pub(crate) async fn connect_backend_to(
-    name: &str,
-    connect_timeout: Duration,
+    timeouts: DialTimeouts<'_>,
     backend: &ResolvedBackend,
     addr: SocketAddr,
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
 ) -> Result<(BoxRead, BoxWrite), OutboundError> {
+    let DialTimeouts {
+        name,
+        connect: connect_timeout,
+        idle,
+    } = timeouts;
     let socket = match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {
@@ -1856,6 +1876,21 @@ pub(crate) async fn connect_backend_to(
         if proxy_header.is_err() {
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             return Err(OutboundError::Connect);
+        }
+        // HTTP/2 to the backend (B-H1): whatever ALPN the handshake agreed.
+        // A `h2` result is served as a real h2 session; anything else (none,
+        // `http/1.1`) keeps the h1 byte stream.
+        if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
+            return match backend_h2::bridge(stream, name, connect_timeout, idle).await {
+                Ok(pair) => Ok(pair),
+                Err(err) => {
+                    metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+                    eprintln!(
+                        "ERROR [{name}] failed HTTP/2 session to {addr} (peer {peer}): {err}"
+                    );
+                    Err(OutboundError::Connect)
+                }
+            };
         }
         let (read, write) = tokio::io::split(stream);
         Ok((Box::new(read), Box::new(write)))

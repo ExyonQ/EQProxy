@@ -28,7 +28,7 @@ diagnostics, configuration, administration, extensibility and security.
 > by SNI (exact name, then wildcard, then the listener default), and the `eqproxy`
 > CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
 > `schema` — the public JSON Schema for editor completion, `diff`, `plan`,
-> offline `apply`/`rollback`, `doctor`), with **327 tests**
+> offline `apply`/`rollback`, `doctor`), with **361 tests**
 > green plus two Docker-gated harnesses run before the release:
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against
 > HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy
@@ -36,9 +36,13 @@ diagnostics, configuration, administration, extensibility and security.
 > checks** (four real source configs and their `eqproxy.toml` translation
 > routing identically; evidence in
 > [docs/evidence/v06-migration/](docs/evidence/v06-migration/)). HTTP/2 is
-> terminated on the client side and translated to HTTP/1.1 upstream
+> terminated on client listeners and — when the backend TLS handshake
+> negotiates `h2` (`[backend.X.tls] alpn = ["h2"]`) — spoken to the backend
+> too, so an h2 client reaches an h2 origin through real HTTP/2 on both sides
 > (unreleased, on top of v0.6.3: [ADR-0006](docs/adr/0006-http2-termination.md),
-> [evidence](docs/evidence/v07-http2.md)); HTTP/2 upstream, gRPC end to end
+> [ADR-0007](docs/adr/0007-http2-backend.md), evidence
+> [v07-http2](docs/evidence/v07-http2.md) and
+> [v07-http2-backend](docs/evidence/v07-http2-backend.md)); gRPC end to end
 > and HTTP/3 (QUIC) remain v0.7 work. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100
@@ -53,8 +57,8 @@ diagnostics, configuration, administration, extensibility and security.
 > version-gate criteria); what remains is outside this version by design
 > and listed in the [CHANGELOG](CHANGELOG.md): the reference filters that
 > only exist as WASM (v0.9, so ecosystem extension stays WASM-only), maps
-> consumed through `equals` matching only, and HTTP/2 (client termination
-> landed on main after v0.6.3; upstream h2, gRPC and QUIC are still ahead).
+> consumed through `equals` matching only, and HTTP/2 (termination and
+> upstream h2 landed on main after v0.6.3; gRPC and QUIC are still ahead).
 > The 24h soak gate **passed** on
 > netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
 > 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown; budgets in

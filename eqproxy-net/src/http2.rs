@@ -53,7 +53,7 @@ pub const CLIENT_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 pub const MAX_CONCURRENT_STREAMS: u32 = 128;
 
 /// Largest DATA payload read from the h1 side per iteration.
-const DATA_CHUNK: usize = 16 * 1024;
+pub(crate) const DATA_CHUNK: usize = 16 * 1024;
 
 /// In-memory pipe between one h2 stream and the h1 engine. Bounded: a slow
 /// backend applies backpressure through it instead of buffering the body.
@@ -92,7 +92,7 @@ pub struct H1Request {
 /// Why one stream was cut. Every variant ends the stream explicitly (reset
 /// or refusal); none of them leaves a half-open stream behind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamError {
+pub(crate) enum StreamError {
     /// A body ended before its declared length.
     Truncated,
     /// Framing that cannot be translated.
@@ -103,7 +103,7 @@ enum StreamError {
     H2,
 }
 
-fn copy_error(err: CopyError) -> StreamError {
+pub(crate) fn copy_error(err: CopyError) -> StreamError {
     match err {
         CopyError::Truncated => StreamError::Truncated,
         CopyError::Idle | CopyError::Io => StreamError::Io,
@@ -111,7 +111,7 @@ fn copy_error(err: CopyError) -> StreamError {
     }
 }
 
-fn is_hop_by_hop(name: &str) -> bool {
+pub(crate) fn is_hop_by_hop(name: &str) -> bool {
     HOP_BY_HOP.contains(&name)
 }
 
@@ -625,7 +625,7 @@ where
 
 /// Waits until the h2 stream can accept more DATA and returns the capacity
 /// available now (bounded buffering: never `send_data` without capacity).
-async fn capacity(
+pub(crate) async fn capacity(
     send: &mut h2::SendStream<Bytes>,
     want: usize,
     idle: Duration,

@@ -1162,7 +1162,7 @@
       "type": "object",
       "properties": {
         "alpn": {
-          "description": "ALPN protocols to offer in the handshake; empty = no ALPN. The\nbackend side speaks HTTP/1.1 (and raw bytes in `tcp` mode), so a\n`mode = \"http\"` listener rejects `h2` here.",
+          "description": "ALPN protocols to offer in the handshake; empty = no ALPN. Listing\n`\"h2\"` opts this backend into HTTP/2: a `mode = \"http\"` listener\nspeaks real HTTP/2 to it when the handshake negotiates `h2`, and\nkeeps HTTP/1.1 when it does not. A `tcp` listener relays bytes and\nnever interprets ALPN.",
           "type": "array",
           "default": [],
           "items": {
