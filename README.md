@@ -28,7 +28,7 @@ diagnostics, configuration, administration, extensibility and security.
 > by SNI (exact name, then wildcard, then the listener default), and the `eqproxy`
 > CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
 > `schema` — the public JSON Schema for editor completion, `diff`, `plan`,
-> offline `apply`/`rollback`, `doctor`), with **361 tests**
+> offline `apply`/`rollback`, `doctor`), with **365 tests**
 > green plus two Docker-gated harnesses run before the release:
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against
 > HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy
@@ -38,12 +38,16 @@ diagnostics, configuration, administration, extensibility and security.
 > [docs/evidence/v06-migration/](docs/evidence/v06-migration/)). HTTP/2 is
 > terminated on client listeners and — when the backend TLS handshake
 > negotiates `h2` (`[backend.X.tls] alpn = ["h2"]`) — spoken to the backend
-> too, so an h2 client reaches an h2 origin through real HTTP/2 on both sides
+> too, with **one session per backend server shared by concurrent
+> exchanges**, so an h2 client reaches an h2 origin through real HTTP/2 on
+> both sides and concurrent requests multiplex instead of queueing
 > (unreleased, on top of v0.6.3: [ADR-0006](docs/adr/0006-http2-termination.md),
-> [ADR-0007](docs/adr/0007-http2-backend.md), evidence
-> [v07-http2](docs/evidence/v07-http2.md) and
-> [v07-http2-backend](docs/evidence/v07-http2-backend.md)); gRPC end to end
-> and HTTP/3 (QUIC) remain v0.7 work. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
+> [ADR-0007](docs/adr/0007-http2-backend.md),
+> [ADR-0008](docs/adr/0008-http2-backend-multiplexing.md), evidence
+> [v07-http2](docs/evidence/v07-http2.md),
+> [v07-http2-backend](docs/evidence/v07-http2-backend.md) and
+> [v07-http2-multiplexing](docs/evidence/v07-http2-multiplexing.md)); gRPC
+> end to end and HTTP/3 (QUIC) remain v0.7 work. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100
 > backends, 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms),

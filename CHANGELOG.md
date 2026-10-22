@@ -7,6 +7,29 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Added
 
+- **HTTP/2 backend multiplexing (v0.7 third slice).** An `h2` backend now
+  serves concurrent requests on **one session**: every exchange takes its own
+  stream behind a private 64 KiB pipe, and the engine's pool is bypassed on
+  that path (a pipe belongs to exactly one exchange, so it is never checked
+  in). The first exchange to a cold server handshakes under a per-address
+  gate, so simultaneous first requests share the session it installs instead
+  of dialing one each — without the gate, two concurrent requests produced
+  two backend TCP connections (measured by the dataplane test). A session
+  that dies is forgotten by its connection task and replaced by the next
+  exchange; the request that races the death fails with `502` and sends
+  nothing, so no request is delivered twice. Counters keep their meaning:
+  a stream on a live session counts as `reused`, a new session as `opened`.
+  A `tcp` listener never interprets ALPN and still relays bytes even when the
+  backend negotiates `h2`. Verified with 3 new dataplane E2E journeys (two
+  in-flight exchanges completing only on a single multiplexed session, a
+  killed session being replaced exactly once, a TCP tunnel unaffected by
+  `h2` ALPN) and a journey through the release binary: four concurrent
+  `curl` requests, each held 1.2 s by an independent hyper-h2 origin, all
+  completed in 1.20–1.21 s (1.29 s wall) on **one** connection with streams
+  1/3/5/7, over both an h1 listener and an h2/TLS listener. Design in
+  [ADR-0008](docs/adr/0008-http2-backend-multiplexing.md), evidence in
+  [docs/evidence/v07-http2-multiplexing.md](docs/evidence/v07-http2-multiplexing.md).
+
 - **HTTP/2 to the backend (`http2_protocol_options` parity, v0.7 second
   slice).** A backend whose TLS handshake negotiates `h2` — `[backend.X.tls]
   alpn = ["h2"]` — is now reached with a **real HTTP/2 session** instead of
@@ -55,6 +78,21 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   the real binary with real `curl` clients (`HTTP/2 200` over h2c and over
   TLS, plus the same listener still answering HTTP/1.1). Design rationale in
   [ADR-0006](docs/adr/0006-http2-termination.md).
+
+### Fixed
+
+- **Keep-alive idle wait used the client header-phase bound.** A connection
+  that had already served an exchange was closed after
+  `client_header_timeout` (default 5 s) of silence even though
+  `idle_timeout` (default 60 s) is the documented inactivity window: a client
+  that kept a connection idle for 5 s lost it. The wait for the next request
+  on a keep-alive connection is now bounded by `idle_timeout` and counted as
+  `idle_timeouts`; the header phase of a new connection keeps its bound and
+  still answers `408`. The hot-maps E2E test (a keep-alive connection held
+  across a data swap) exposed this as a flake that became deterministic under
+  load; it passes now because the product honours the documented window, not
+  because the test was relaxed
+  (`keepalive_wait_is_bounded_by_idle_timeout_not_the_header_one`).
 
 ### Changed
 
