@@ -705,6 +705,76 @@ async fn http1_client_header_timeout_returns_408_and_counts() {
     ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn keepalive_wait_is_bounded_by_idle_timeout_not_the_header_one() {
+    let backend = start_http_backend().await;
+    let metrics = Arc::new(Metrics::default());
+    // Header phase 150 ms, connection inactivity 1200 ms: the two bounds
+    // differ so the test can tell which one closed the connection.
+    let cfg = ResolvedListener::new(
+        "web",
+        "127.0.0.1:0".parse().expect("addr"),
+        "api",
+        backend,
+        ProxyMode::Http,
+        64,
+        Duration::from_secs(2),
+        Duration::from_millis(1200),
+        Duration::from_millis(150),
+        Duration::from_secs(5),
+    );
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .expect("first request");
+    let first = read_one_response(&mut client).await;
+    assert!(first.starts_with("HTTP/1.1 200"), "respuesta: {first}");
+
+    // Idle longer than the header phase but inside the inactivity window:
+    // the keep-alive connection must survive and serve the next request.
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: t\r\n\r\n")
+        .await
+        .expect("second request");
+    let second = read_one_response(&mut client).await;
+    assert!(second.starts_with("HTTP/1.1 200"), "respuesta: {second}");
+    assert_eq!(
+        metrics.snapshot().header_timeouts,
+        0,
+        "time between keep-alive requests is inactivity, not a header-phase failure"
+    );
+
+    // Past the inactivity window the proxy closes the connection silently:
+    // a keep-alive client that went away must never receive a 408.
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let mut buf = [0u8; 64];
+    let read = tokio::time::timeout(WAIT, client.read(&mut buf))
+        .await
+        .expect("close in time")
+        .expect("read");
+    assert_eq!(read, 0, "the idle connection must be closed by the proxy");
+    let snapshot = metrics.snapshot();
+    assert_eq!(snapshot.header_timeouts, 0);
+    assert_eq!(
+        snapshot.idle_timeouts, 1,
+        "one idle close, counted as inactivity"
+    );
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn http1_server_header_timeout_returns_504() {
     let backend = start_silent_backend().await;
     let metrics = Arc::new(Metrics::default());

@@ -107,6 +107,8 @@ fn backend_tls(alpn: &[&str]) -> tls::ClientTls {
 /// - `/trailers`: 200 chunked with a trailing header.
 /// - `/teapot`: 418 with a short body.
 /// - `/head`: 200 with `content-length: 5` and no body (a HEAD answer).
+/// - `/barrier`: answers only when **two** streams are inside the origin at
+///   the same time (a proxy that serializes them can never finish).
 async fn start_h2_origin(alpn: &[&str]) -> Origin {
     let server = tls::server_config(CERT, KEY, None, &alpn_strings(alpn), TlsVersion::V1_2)
         .expect("server tls");
@@ -116,11 +118,13 @@ async fn start_h2_origin(alpn: &[&str]) -> Origin {
     let seen = Arc::new(Mutex::new(Vec::new()));
     let accepted = Arc::clone(&connections);
     let recorded = Arc::clone(&seen);
+    let barrier = Arc::new(tokio::sync::Barrier::new(2));
     tokio::spawn(async move {
         while let Ok((socket, _)) = listener.accept().await {
             accepted.fetch_add(1, Ordering::Relaxed);
             let acceptor = server.clone();
             let recorded = Arc::clone(&recorded);
+            let barrier = Arc::clone(&barrier);
             tokio::spawn(async move {
                 // A refused handshake (no common ALPN) is a legit journey:
                 // the negative test relies on the proxy failing here.
@@ -140,8 +144,9 @@ async fn start_h2_origin(alpn: &[&str]) -> Origin {
                         break;
                     };
                     let recorded = Arc::clone(&recorded);
+                    let barrier = Arc::clone(&barrier);
                     tokio::spawn(async move {
-                        answer(request, respond, recorded).await;
+                        answer(request, respond, recorded, barrier).await;
                     });
                 }
             });
@@ -162,6 +167,7 @@ async fn answer(
     request: Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
     seen: Arc<Mutex<Vec<Seen>>>,
+    barrier: Arc<tokio::sync::Barrier>,
 ) {
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
@@ -189,6 +195,13 @@ async fn answer(
         let _ = body.flow_control().release_capacity(chunk.len());
     }
     let trailers = body.trailers().await.ok().flatten();
+    if path == "/barrier" {
+        // Only answers when both in-flight streams are here: a backend that
+        // serializes the two exchanges never gets past this point.
+        if tokio::time::timeout(WAIT, barrier.wait()).await.is_err() {
+            return;
+        }
+    }
     seen.lock().expect("seen lock").push(Seen {
         method: method.to_string(),
         path: path.clone(),
@@ -461,7 +474,7 @@ async fn h2_client_reaches_an_h2_backend_end_to_end() {
     ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn one_pooled_h2_session_serves_consecutive_requests() {
+async fn consecutive_exchanges_share_one_backend_session() {
     let origin = start_h2_origin(&["h2"]).await;
     let (proxy, handle, serve) = start_proxy(
         proxy_with_h2_backend(origin.addr, &["h2"]),
@@ -478,8 +491,8 @@ async fn one_pooled_h2_session_serves_consecutive_requests() {
     let first = read_h1_response(&mut reader, false).await;
     assert_eq!(first.status, 200);
 
-    // Same client connection: the backend connection goes back to the pool
-    // and the next exchange must reuse the *same* h2 session.
+    // Same client connection: the next exchange must take a stream on the
+    // *same* h2 session (the pipe itself is never pooled).
     reader
         .get_mut()
         .write_all(b"GET /teapot HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n")
@@ -709,5 +722,276 @@ async fn a_backend_that_cannot_negotiate_h2_is_an_explicit_502() {
     );
     assert!(origin.seen.lock().expect("seen lock").is_empty());
     drop(reader);
+    stop_proxy(handle, serve).await;
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_exchanges_multiplex_one_backend_session() {
+    // The origin's `/barrier` answer is only produced when two streams are
+    // inside it at the same time: a proxy that queues the second exchange
+    // behind the first one deadlocks here, and one that dials a second
+    // connection instead of multiplexing is caught by the connection count.
+    let origin = start_h2_origin(&["h2"]).await;
+    let (proxy, handle, serve) = start_proxy(
+        proxy_with_h2_backend(origin.addr, &["h2"]),
+        Arc::new(Metrics::default()),
+    )
+    .await;
+
+    let first = tokio::spawn(async move {
+        let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+        client
+            .write_all(b"GET /barrier HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("first request");
+        let mut reader = BufReader::new(client);
+        read_h1_response(&mut reader, false).await
+    });
+    let second = tokio::spawn(async move {
+        let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+        client
+            .write_all(b"GET /barrier HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("second request");
+        let mut reader = BufReader::new(client);
+        read_h1_response(&mut reader, false).await
+    });
+
+    let (first, second) = tokio::join!(first, second);
+    let first = first.expect("first exchange task");
+    let second = second.expect("second exchange task");
+    assert_eq!(first.status, 200, "head: {}", first.head);
+    assert_eq!(second.status, 200, "head: {}", second.head);
+    assert_eq!(
+        origin.connections.load(Ordering::Relaxed),
+        1,
+        "two in-flight exchanges must share one h2 session, not dial twice"
+    );
+    let seen = seen_requests(&origin);
+    assert_eq!(seen.len(), 2);
+    assert!(
+        seen.iter()
+            .all(|request| request.path == "/barrier" && request.version == http::Version::HTTP_2),
+        "both streams must reach the backend over HTTP/2: {seen:?}"
+    );
+    stop_proxy(handle, serve).await;
+}
+
+/// Origin that serves exactly one stream per TCP connection and then hangs
+/// up, so a test can force the backend session to die.
+struct OneShotOrigin {
+    addr: SocketAddr,
+    connections: Arc<AtomicUsize>,
+    /// Incremented when a connection task is about to close its TCP socket.
+    closed: Arc<AtomicUsize>,
+    seen: Arc<Mutex<Vec<Seen>>>,
+}
+
+async fn start_one_shot_h2_origin() -> OneShotOrigin {
+    let server = tls::server_config(CERT, KEY, None, &alpn_strings(&["h2"]), TlsVersion::V1_2)
+        .expect("server tls");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind origin");
+    let addr = listener.local_addr().expect("addr origin");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let closed = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let accepted = Arc::clone(&connections);
+    let finished = Arc::clone(&closed);
+    let recorded = Arc::clone(&seen);
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            accepted.fetch_add(1, Ordering::Relaxed);
+            let acceptor = server.clone();
+            let recorded = Arc::clone(&recorded);
+            let finished = Arc::clone(&finished);
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.acceptor.accept(socket).await else {
+                    finished.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
+                let mut connection = h2::server::handshake(stream)
+                    .await
+                    .expect("h2 server handshake");
+                let Some(Ok((request, respond))) = connection.accept().await else {
+                    finished.fetch_add(1, Ordering::Relaxed);
+                    return;
+                };
+                answer(
+                    request,
+                    respond,
+                    recorded,
+                    Arc::new(tokio::sync::Barrier::new(2)),
+                )
+                .await;
+                // Poll the session briefly so the answer is flushed, then
+                // drop it: the proxy's session must become unusable.
+                let _ = tokio::time::timeout(Duration::from_millis(100), connection.accept()).await;
+                finished.fetch_add(1, Ordering::Relaxed);
+            });
+        }
+    });
+    OneShotOrigin {
+        addr,
+        connections,
+        closed,
+        seen,
+    }
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_dead_session_is_replaced_by_a_fresh_one() {
+    let origin = start_one_shot_h2_origin().await;
+    let backend =
+        Arc::new(ResolvedBackend::single("api", origin.addr).with_tls(backend_tls(&["h2"])));
+    let cfg = h2_listener(origin.addr).with_backend(backend);
+    let (proxy, handle, serve) = start_proxy(cfg, Arc::new(Metrics::default())).await;
+
+    let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+    client
+        .write_all(b"POST /echo HTTP/1.1\r\nHost: api.test\r\nContent-Length: 4\r\nConnection: close\r\n\r\none!")
+        .await
+        .expect("first request");
+    let mut reader = BufReader::new(client);
+    let first = read_h1_response(&mut reader, false).await;
+    assert_eq!(first.status, 200, "head: {}", first.head);
+    assert_eq!(first.body, b"one!");
+    drop(reader);
+
+    // Wait for the origin to actually hang up, then for the proxy to see it.
+    let _ = tokio::time::timeout(WAIT, async {
+        while origin.closed.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        origin.closed.load(Ordering::Relaxed) >= 1,
+        "the one-shot origin must have closed its session"
+    );
+
+    // A request that races the death (the hub still believes the session is
+    // alive, `send_request` fails) is a `502`: no bytes were sent, so nothing
+    // was delivered twice. The next attempt must dial a fresh session and be
+    // served; this is the documented fail-explicit behaviour, and the loop
+    // bounds how long the proxy may take to notice.
+    let mut statuses = Vec::new();
+    let outcome = tokio::time::timeout(WAIT, async {
+        loop {
+            let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+            client
+                .write_all(b"GET /echo HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("retry request");
+            let mut reader = BufReader::new(client);
+            let response = read_h1_response(&mut reader, false).await;
+            statuses.push(response.status);
+            drop(reader);
+            if response.status == 200 {
+                return response;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    let served = match outcome {
+        Ok(response) => response,
+        Err(_) => panic!("no request was served within the bound; statuses {statuses:?}"),
+    };
+    assert!(
+        served.body.is_empty(),
+        "a GET /echo has no body to echo: {:?}",
+        served.body
+    );
+    assert_eq!(
+        origin.connections.load(Ordering::Relaxed),
+        2,
+        "exactly one replacement session: a stale session is never retried in a storm"
+    );
+    // Neither the failed attempt nor the recovery delivered the request
+    // twice: the origin saw the first exchange and the served one only.
+    assert_eq!(origin.seen.lock().expect("seen lock").len(), 2);
+    stop_proxy(handle, serve).await;
+}
+
+/// A TLS origin that echoes the bytes it receives and records the ALPN its
+/// handshake selected.
+async fn start_tls_echo(alpn: &[&str]) -> (SocketAddr, Arc<Mutex<Vec<Option<Vec<u8>>>>>) {
+    let server = tls::server_config(CERT, KEY, None, &alpn_strings(alpn), TlsVersion::V1_2)
+        .expect("server tls");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+    let addr = listener.local_addr().expect("addr echo");
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let log = Arc::clone(&recorded);
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            let acceptor = server.clone();
+            let log = Arc::clone(&log);
+            tokio::spawn(async move {
+                let Ok(stream) = acceptor.acceptor.accept(socket).await else {
+                    return;
+                };
+                let alpn = stream.get_ref().1.alpn_protocol().map(<[u8]>::to_vec);
+                log.lock().expect("alpn log").push(alpn);
+                let (mut read, mut write) = tokio::io::split(stream);
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            });
+        }
+    });
+    (addr, recorded)
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_listener_relays_bytes_even_when_the_backend_negotiates_h2() {
+    // `mode = "tcp"` is a byte tunnel: even a backend that answers ALPN `h2`
+    // must be relayed verbatim, never spoken to in h2 frames.
+    let (origin, alpn_seen) = start_tls_echo(&["h2"]).await;
+    let backend = Arc::new(ResolvedBackend::single("api", origin).with_tls(backend_tls(&["h2"])));
+    let cfg = ResolvedListener::new(
+        "tunnel",
+        "127.0.0.1:0".parse().expect("addr"),
+        "api",
+        origin,
+        ProxyMode::Tcp,
+        64,
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .with_backend(backend);
+    let (proxy, handle, serve) = start_proxy(cfg, Arc::new(Metrics::default())).await;
+
+    let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+    let payload = b"raw-bytes-through-a-tunnel";
+    client.write_all(payload).await.expect("write");
+    let mut echoed = vec![0u8; payload.len()];
+    tokio::time::timeout(WAIT, client.read_exact(&mut echoed))
+        .await
+        .expect("echo in time")
+        .expect("echo");
+    assert_eq!(echoed, payload, "a TCP tunnel must never rewrite bytes");
+    assert_eq!(
+        alpn_seen
+            .lock()
+            .expect("alpn log")
+            .first()
+            .cloned()
+            .flatten(),
+        Some(b"h2".to_vec()),
+        "the backend did negotiate h2; the tunnel still relays bytes"
+    );
+    drop(client);
     stop_proxy(handle, serve).await;
 }

@@ -49,6 +49,9 @@ pub struct ClientTls {
     /// Config-pinned SNI/verification; when `None` it is derived from the
     /// chosen server address (literal IP, no DNS SNI).
     pub server_name: Option<ServerName<'static>>,
+    /// ALPN protocols offered in the handshake, as configured. Listing `h2`
+    /// is what opts a backend into HTTP/2 (B-H1).
+    pub alpn: Vec<Vec<u8>>,
 }
 
 /// TLS acceptor of the listener (A11), with access to the negotiated (ALPN).
@@ -371,6 +374,7 @@ pub fn client_config(
     Ok(ClientTls {
         connector: TlsConnector::from(Arc::new(config)),
         server_name,
+        alpn: alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect(),
     })
 }
 

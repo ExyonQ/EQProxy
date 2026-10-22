@@ -1393,13 +1393,29 @@ pub async fn serve_http<CR, CW>(
             pos: 0,
             inner: &mut client_read,
         };
-        let (head_bytes, rest) = match read_head(&mut source, cfg.client_header_timeout).await {
+        // The bound of the wait is the phase it belongs to: the first request
+        // of a connection is the client-header phase (`client_header_timeout`,
+        // answered with 408), while a request on an already-served keep-alive
+        // connection is connection inactivity (`idle_timeout`): the proxy
+        // promises to hold the connection open for that window, and dropping
+        // it at the header-phase bound would break the documented behaviour
+        // (a client idle for 5 s loses a connection it may keep for 60 s).
+        let head_timeout = if first_exchange {
+            cfg.client_header_timeout
+        } else {
+            cfg.idle_timeout
+        };
+        let (head_bytes, rest) = match read_head(&mut source, head_timeout).await {
             Ok(pair) => pair,
             Err(HeadError::Eof) => return,
             Err(HeadError::Timeout) => {
-                metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
                 if first_exchange {
+                    metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
                     write_error(&mut client_write, 408, "request timeout").await;
+                } else {
+                    // An idle keep-alive close is normal traffic: counted as
+                    // inactivity, never as a client protocol failure.
+                    metrics.idle_timeouts.fetch_add(1, Ordering::Relaxed);
                 }
                 return;
             }
@@ -1704,6 +1720,10 @@ pub async fn serve_http<CR, CW>(
             }
         };
         let served_addr = conn.addr;
+        // An HTTP/2 exchange owns one stream: its pipe is single-use and is
+        // dropped here, never checked back in (the h2 session is shared
+        // underneath instead).
+        let poolable = conn.poolable;
         let mut backend_read = conn.read;
         let mut backend_write = conn.write;
 
@@ -2112,7 +2132,12 @@ pub async fn serve_http<CR, CW>(
         // keep-alive in HTTP/1.0). The client's hop-by-hop header reaches
         // the backend verbatim, so the backend will close too: pooling it
         // would hand the next exchange a dead connection.
-        if !request.wants_close && !response.wants_close && clean_boundary && backend_alive {
+        if poolable
+            && !request.wants_close
+            && !response.wants_close
+            && clean_boundary
+            && backend_alive
+        {
             // Clean exchange and server on keep-alive: the connection returns
             // to the pool message-aligned (A16). Every error path
             // returns early without it: after a framing failure, cut,

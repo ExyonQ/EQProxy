@@ -19,10 +19,16 @@
 //!   stays message-aligned for the pool); without one the body is relayed as
 //!   `chunked`, and h2 trailers are appended as h1 trailers.
 //!
+//! Multiplexing: a backend **server** owns one h2 session (the `Hub`) and
+//! every exchange gets its own in-memory pipe mapped to a stream on it, so
+//! concurrent exchanges share the session instead of queueing behind one
+//! connection. The `h2` crate queues a request that arrives at the server's
+//! concurrent-stream limit and opens it when capacity returns; the engine's
+//! own pool is bypassed for h2 exchanges because a pipe is per exchange.
+//!
 //! Deliberate limits of this slice, all explicit:
-//! - One exchange at a time per backend connection: the engine's pool hands a
-//!   connection to one exchange and takes it back, so streams are serialized
-//!   on the h2 session (no h2-to-backend multiplexing yet).
+//! - Sessions live while alive (one per backend server): there is no idle
+//!   close, so an unused backend keeps one TLS+h2 session open.
 //! - h2 is chosen only from the TLS ALPN result: a plaintext backend keeps
 //!   speaking HTTP/1.1 (there is no `h2c`-to-backend option yet).
 //! - `CONNECT`/protocol upgrades have no h2 backend equivalent (h2 has no
@@ -30,7 +36,11 @@
 //! - h2 interim (1xx) responses are consumed by the client library; h1
 //!   `100-continue` is answered by the proxy itself, never forwarded.
 
+use std::collections::HashMap;
 use std::io;
+use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -49,18 +59,121 @@ use crate::proxy::{BoxRead, BoxWrite};
 /// a slow backend applies backpressure through it instead of buffering.
 const PIPE_BUFFER: usize = 64 * 1024;
 
-/// Opens a real HTTP/2 session on `io` (already TLS with ALPN `h2`) and
-/// returns the h1-shaped byte stream that speaks to it.
+/// One live HTTP/2 session to a backend server, shared by every exchange
+/// that reaches it while it is alive.
+pub struct Session {
+    /// Submitter of new streams. `send_request` needs `&mut`, so the clone is
+    /// taken under the lock and used without it; the lock only guards the
+    /// handle, never the stream itself.
+    send: Mutex<h2::client::SendRequest<Bytes>>,
+    alive: AtomicBool,
+}
+
+impl Session {
+    /// A handle for one new stream, or `None` once the connection is gone.
+    fn request_handle(&self) -> Option<h2::client::SendRequest<Bytes>> {
+        if !self.alive.load(Ordering::Acquire) {
+            return None;
+        }
+        let send = self
+            .send
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Some(send.clone())
+    }
+}
+
+/// Live h2 sessions of one backend, keyed by the chosen server address.
+///
+/// This is what makes multiplexing real: the engine's pool lends a connection
+/// to one exchange, so it is bypassed for h2 — every exchange opens a stream
+/// on the session registered here instead of dialing.
+#[derive(Default)]
+pub struct Hub {
+    sessions: Mutex<HashMap<SocketAddr, Arc<Session>>>,
+    /// One gate per server address: the exchange that finds the server cold
+    /// holds it while it dials and handshakes, and the exchanges that arrive
+    /// meanwhile take a stream on the session it installs. Without the gate
+    /// two concurrent first requests each dial their own connection, which is
+    /// exactly the multiplexing this module exists to provide, lost.
+    gates: Mutex<HashMap<SocketAddr, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+impl std::fmt::Debug for Hub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The handles are not printable; the count is what a log needs.
+        f.debug_struct("Hub")
+            .field("sessions", &self.lock().len())
+            .finish()
+    }
+}
+
+impl Hub {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HashMap<SocketAddr, Arc<Session>>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Alive session for `addr`, or `None` when the caller must dial. A dead
+    /// entry is removed here, so the next exchange never trusts it.
+    pub fn lookup(&self, addr: SocketAddr) -> Option<Arc<Session>> {
+        let mut sessions = self.lock();
+        match sessions.get(&addr) {
+            Some(session) if session.alive.load(Ordering::Acquire) => Some(Arc::clone(session)),
+            Some(_) => {
+                sessions.remove(&addr);
+                None
+            }
+            None => None,
+        }
+    }
+
+    /// Gate for the initial handshake of `addr`. Callers re-check
+    /// [`Self::lookup`] after acquiring it: the session may have appeared.
+    pub fn connect_gate(&self, addr: SocketAddr) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self
+            .gates
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(gates.entry(addr).or_default())
+    }
+
+    fn install(&self, addr: SocketAddr, session: &Arc<Session>) {
+        self.lock().insert(addr, Arc::clone(session));
+    }
+
+    /// Removes `session` only when it is still the registered one (a newer
+    /// session for the same address must not be evicted by an older exit).
+    fn forget(&self, addr: SocketAddr, session: &Arc<Session>) {
+        let mut sessions = self.lock();
+        if sessions
+            .get(&addr)
+            .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            sessions.remove(&addr);
+        }
+    }
+}
+
+/// Handshakes a real HTTP/2 session on `io` (already TLS with ALPN `h2`) and
+/// registers it in `hub`.
 ///
 /// The handshake happens **before** returning: a backend that is not really
 /// h2 is a connect-phase failure (retried by B-H7, answered with `502`),
 /// never a connection that looks open and then fails per request.
-pub async fn bridge<IO>(
+pub async fn connect<IO>(
+    hub: Arc<Hub>,
     io: IO,
     name: &str,
+    addr: SocketAddr,
     connect_timeout: Duration,
-    idle: Duration,
-) -> Result<(BoxRead, BoxWrite), io::Error>
+) -> Result<Arc<Session>, io::Error>
 where
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -78,19 +191,39 @@ where
             }
             Ok(Ok(handshake)) => handshake,
         };
+    let session = Arc::new(Session {
+        send: Mutex::new(send_request),
+        alive: AtomicBool::new(true),
+    });
+    hub.install(addr, &session);
+    let session_task = Arc::clone(&session);
     let connection_name = name.to_owned();
     tokio::spawn(async move {
         if let Err(err) = connection.await {
             eprintln!("WARN [{connection_name}] HTTP/2 backend connection failed: {err}");
         }
+        session_task.alive.store(false, Ordering::Release);
+        hub.forget(addr, &session_task);
     });
+    Ok(session)
+}
 
+/// Opens one exchange on the session: a fresh in-memory pipe whose only
+/// message becomes one stream, so concurrent exchanges share the session.
+pub fn open(
+    session: &Arc<Session>,
+    name: &str,
+    idle: Duration,
+) -> Result<(BoxRead, BoxWrite), io::Error> {
+    let send = session
+        .request_handle()
+        .ok_or_else(|| io::Error::other("HTTP/2 backend session is closed"))?;
     let (engine, backend) = tokio::io::duplex(PIPE_BUFFER);
     let (engine_read, engine_write) = tokio::io::split(engine);
     let (pipe_read, pipe_write) = tokio::io::split(backend);
     let label = name.to_owned();
     tokio::spawn(async move {
-        if let Err(err) = pump(send_request, pipe_read, pipe_write, idle).await {
+        if let Err(err) = relay_exchange(send, pipe_read, pipe_write, idle).await {
             eprintln!(
                 "WARN [{label}] HTTP/2 backend exchange ended: {}",
                 describe(err)
@@ -110,9 +243,10 @@ fn describe(err: StreamError) -> &'static str {
     }
 }
 
-/// Serves h1 messages from the engine over one h2 session, forever: the pipe
-/// owner (a live exchange or the pool) decides when the connection ends.
-async fn pump<R, W>(
+/// Serves exactly one h1 message from the engine over one h2 stream. The pipe
+/// is owned by a single exchange, so the function returns as soon as its
+/// answer has been relayed (nothing is pooled behind it).
+async fn relay_exchange<R, W>(
     mut send_request: h2::client::SendRequest<Bytes>,
     pipe_read: R,
     mut pipe_write: W,
@@ -123,46 +257,41 @@ where
     W: AsyncWrite + Unpin,
 {
     let mut reader = BufReader::new(pipe_read);
-    loop {
-        // Waiting for the next request has no timeout of its own: an idle
-        // pooled connection is the pool's business (it drops the pipe, which
-        // is the EOF below), never a reason to close underneath it.
-        let mut first = [0u8; 1];
-        match reader.read_exact(&mut first).await {
-            Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(_) => return Err(StreamError::Io),
-            Ok(_) => {}
-        }
-        let mut source = Prefixed {
-            prefix: first.to_vec(),
-            pos: 0,
-            inner: &mut reader,
-        };
-        let (head, rest) = match read_head(&mut source, idle).await {
-            Ok(pair) => pair,
-            Err(HeadError::Timeout) => return Err(StreamError::Io),
-            Err(_) => return Err(StreamError::Framing),
-        };
-        // Exact stream remainder: bytes read past the head plus prefix bytes
-        // read_head never consumed.
-        let unread = source.prefix.split_off(source.pos);
-        let mut prefix = rest;
-        prefix.extend(unread);
-        let request = parse_request_head(&head).map_err(|_| StreamError::Framing)?;
-        let mut body = Prefixed {
-            prefix,
-            pos: 0,
-            inner: &mut reader,
-        };
-        exchange(
-            &mut send_request,
-            &request,
-            &mut body,
-            &mut pipe_write,
-            idle,
-        )
-        .await?;
+    let mut first = [0u8; 1];
+    match reader.read_exact(&mut first).await {
+        Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(_) => return Err(StreamError::Io),
+        Ok(_) => {}
     }
+    let mut source = Prefixed {
+        prefix: first.to_vec(),
+        pos: 0,
+        inner: &mut reader,
+    };
+    let (head, rest) = match read_head(&mut source, idle).await {
+        Ok(pair) => pair,
+        Err(HeadError::Timeout) => return Err(StreamError::Io),
+        Err(_) => return Err(StreamError::Framing),
+    };
+    // Exact stream remainder: bytes read past the head plus prefix bytes
+    // read_head never consumed.
+    let unread = source.prefix.split_off(source.pos);
+    let mut prefix = rest;
+    prefix.extend(unread);
+    let request = parse_request_head(&head).map_err(|_| StreamError::Framing)?;
+    let mut body = Prefixed {
+        prefix,
+        pos: 0,
+        inner: &mut reader,
+    };
+    exchange(
+        &mut send_request,
+        &request,
+        &mut body,
+        &mut pipe_write,
+        idle,
+    )
+    .await
 }
 
 /// One h1 message → one h2 stream → one h1 message.

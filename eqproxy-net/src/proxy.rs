@@ -93,6 +93,11 @@ pub struct ResolvedBackend {
     /// DNS re-resolution settings (B-H13/B-N18/B-E15) for
     /// `HOSTNAME:PORT` servers.
     pub dns: DnsSettings,
+    /// HTTP/2 sessions to the servers (B-H1). `Some` only when the backend
+    /// TLS offers `h2`; the session is created on the first exchange that
+    /// negotiates it and shared by every later one, which is what makes
+    /// backend multiplexing real.
+    pub h2: Option<Arc<backend_h2::Hub>>,
 }
 
 impl ResolvedBackend {
@@ -130,6 +135,7 @@ impl ResolvedBackend {
             retries: RetryPolicy::default(),
             affinity: None,
             dns: DnsSettings::default(),
+            h2: None,
         }
     }
 
@@ -167,6 +173,13 @@ impl ResolvedBackend {
     /// TLS to the servers (A12).
     #[must_use]
     pub fn with_tls(mut self, tls: ClientTls) -> Self {
+        // Offering `h2` is the opt-in: the dataplane then keeps one HTTP/2
+        // session per server and multiplexes exchanges onto it.
+        self.h2 = tls
+            .alpn
+            .iter()
+            .any(|proto| proto == b"h2")
+            .then(|| Arc::new(backend_h2::Hub::new()));
         self.tls = Some(tls);
         self
     }
@@ -1579,6 +1592,9 @@ struct DialOpts<'a> {
     ctx: RetryContext,
     affinity_cookie: Option<&'a str>,
     use_pool: bool,
+    /// `true` for `mode = "http"`: only an HTTP listener may speak HTTP/2 to
+    /// the backend (a TCP tunnel relays bytes untouched).
+    http: bool,
 }
 
 async fn dial_with_retries<'a>(
@@ -1662,7 +1678,12 @@ async fn dial_with_retries<'a>(
         };
 
         // --- Pool reuse first (A16), first attempt only ---
-        if opts.use_pool
+        // HTTP/2 has no byte-stream connection to pool: its exchanges take a
+        // stream on the shared session (`connect_backend_to`), so the pool is
+        // skipped and a pipe is never checked back in.
+        let h2 = opts.http && backend.h2.is_some();
+        if !h2
+            && opts.use_pool
             && tried.is_empty()
             && let Some((read, write)) = backend.pool.checkout(&addr, Instant::now())
         {
@@ -1675,17 +1696,19 @@ async fn dial_with_retries<'a>(
                     read,
                     write,
                     reused: true,
+                    poolable: true,
                 },
                 active,
             ));
         }
 
-        // --- Dial the chosen server ---
+        // --- Dial the chosen server (or take an h2 stream on a live session) ---
         match connect_backend_to(
             DialTimeouts {
                 name: &cfg.name,
                 connect: cfg.connect_timeout,
                 idle: cfg.idle_timeout,
+                http: opts.http,
             },
             backend,
             addr,
@@ -1695,16 +1718,24 @@ async fn dial_with_retries<'a>(
         )
         .await
         {
-            Ok((read, write)) => {
-                metrics
-                    .backend_connections_opened
-                    .fetch_add(1, Ordering::Relaxed);
+            Ok((read, write, opened)) => {
+                if opened {
+                    metrics
+                        .backend_connections_opened
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    // An h2 stream on a session that was already open.
+                    metrics
+                        .backend_connections_reused
+                        .fetch_add(1, Ordering::Relaxed);
+                }
                 return Ok((
                     BackendConn {
                         addr,
                         read: BufReader::new(read),
                         write,
-                        reused: false,
+                        reused: !opened,
+                        poolable: !h2,
                     },
                     active,
                 ));
@@ -1744,6 +1775,7 @@ pub async fn connect_backend<'a>(
             ctx: RetryContext::non_idempotent(),
             affinity_cookie: None,
             use_pool: false,
+            http: false,
         },
     )
     .await?;
@@ -1761,6 +1793,9 @@ pub struct BackendConn {
     pub write: BoxWrite,
     /// `true` when from the pool (no dial, handshake or PROXY again).
     pub reused: bool,
+    /// `false` for an HTTP/2 exchange: its pipe belongs to one stream and
+    /// must never be checked back in for another one.
+    pub poolable: bool,
 }
 
 /// Reuses an idle pool connection or dials a new one to the
@@ -1790,6 +1825,7 @@ pub async fn checkout_or_connect<'a>(
             ctx,
             affinity_cookie,
             use_pool: true,
+            http: true,
         },
     )
     .await
@@ -1803,15 +1839,54 @@ pub(crate) struct DialTimeouts<'a> {
     pub name: &'a str,
     /// Maximum for TCP connect, TLS handshake and h2 handshake alike.
     pub connect: Duration,
-    /// Per-operation inactivity bound of the h2 backend bridge.
+    /// Per-operation inactivity bound of the h2 backend exchange.
     pub idle: Duration,
+    /// `true` for `mode = "http"`: only then can the backend be spoken to in
+    /// HTTP/2. A `tcp` listener relays bytes and never interprets ALPN.
+    pub http: bool,
+}
+
+/// A dialed backend stream after TCP, the optional TLS handshake and the
+/// optional PROXY header — before splitting into message halves. HTTP/2 needs
+/// the whole object (it owns the connection), h1 works on split halves.
+enum Transport {
+    Plain(TcpStream),
+    Tls(Box<tokio_rustls::client::TlsStream<TcpStream>>),
+}
+
+impl Transport {
+    /// Did the TLS handshake agree on `h2`?
+    fn alpn_h2(&self) -> bool {
+        match self {
+            Transport::Plain(_) => false,
+            Transport::Tls(stream) => stream.get_ref().1.alpn_protocol() == Some(b"h2"),
+        }
+    }
+
+    fn split(self) -> (BoxRead, BoxWrite) {
+        match self {
+            Transport::Plain(socket) => {
+                let (read, write) = socket.into_split();
+                (Box::new(read), Box::new(write))
+            }
+            Transport::Tls(stream) => {
+                let (read, write) = tokio::io::split(*stream);
+                (Box::new(read), Box::new(write))
+            }
+        }
+    }
 }
 
 /// Variant of [`connect_backend`] against an already-chosen server (the pool
 /// needs the address before deciding between reuse and dial).
 ///
+/// The third value is `true` when this call established a new backend
+/// connection or h2 session (and `false` when it took a stream on a live h2
+/// session), so the caller's counters describe what actually happened.
+///
 /// The PROXY v1 header (A9) is written once per connection: pool-reused
-/// connections already carry it from their first use.
+/// connections already carry it from their first use, and an h2 session
+/// carries it from its handshake.
 pub(crate) async fn connect_backend_to(
     timeouts: DialTimeouts<'_>,
     backend: &ResolvedBackend,
@@ -1819,12 +1894,131 @@ pub(crate) async fn connect_backend_to(
     peer: SocketAddr,
     local: SocketAddr,
     metrics: &Metrics,
-) -> Result<(BoxRead, BoxWrite), OutboundError> {
+) -> Result<(BoxRead, BoxWrite, bool), OutboundError> {
     let DialTimeouts {
         name,
         connect: connect_timeout,
         idle,
+        http,
     } = timeouts;
+
+    // HTTP/2 (B-H1): a live session serves this exchange with its own stream,
+    // so no dial, handshake or PROXY header is needed. This is the path that
+    // multiplexes: concurrent exchanges each land here.
+    if http && let Some(hub) = &backend.h2 {
+        return open_h2_exchange(
+            hub,
+            DialTimeouts {
+                name,
+                connect: connect_timeout,
+                idle,
+                http,
+            },
+            backend,
+            addr,
+            peer,
+            local,
+            metrics,
+        )
+        .await;
+    }
+
+    let (read, write) = dial_transport(name, connect_timeout, backend, addr, peer, local, metrics)
+        .await?
+        .split();
+    Ok((read, write, true))
+}
+
+/// One exchange over HTTP/2: a stream on the live session of `addr`, or — when
+/// the server is cold — the single handshake that installs it.
+///
+/// The per-address gate is what makes multiplexing hold under concurrency:
+/// exchanges that arrive while the first handshake is in flight wait for it
+/// and then share the session, instead of each dialing a connection of their
+/// own. A failed handshake releases the gate, so the waiters retry in turn
+/// (each bounded by `connect_timeout`) instead of all failing at once.
+async fn open_h2_exchange(
+    hub: &Arc<backend_h2::Hub>,
+    timeouts: DialTimeouts<'_>,
+    backend: &ResolvedBackend,
+    addr: SocketAddr,
+    peer: SocketAddr,
+    local: SocketAddr,
+    metrics: &Metrics,
+) -> Result<(BoxRead, BoxWrite, bool), OutboundError> {
+    let DialTimeouts {
+        name,
+        connect: connect_timeout,
+        idle,
+        ..
+    } = timeouts;
+    if let Some(session) = hub.lookup(addr) {
+        let (read, write) = stream_on_session(&session, name, addr, peer, idle, metrics)?;
+        return Ok((read, write, false));
+    }
+
+    let gate = hub.connect_gate(addr);
+    let _handshake = gate.lock().await;
+    // The exchange that held the gate may have installed the session while
+    // this one waited.
+    if let Some(session) = hub.lookup(addr) {
+        let (read, write) = stream_on_session(&session, name, addr, peer, idle, metrics)?;
+        return Ok((read, write, false));
+    }
+
+    let transport =
+        dial_transport(name, connect_timeout, backend, addr, peer, local, metrics).await?;
+    // The backend is configured for HTTP/2 only: a handshake that did not
+    // select `h2` cannot be served by writing h1 bytes into it.
+    if !transport.alpn_h2() {
+        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+        eprintln!(
+            "ERROR [{name}] backend {addr} did not negotiate ALPN h2 (peer {peer}): it is configured for HTTP/2 only"
+        );
+        return Err(OutboundError::Connect);
+    }
+    let Transport::Tls(stream) = transport else {
+        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+        return Err(OutboundError::Connect);
+    };
+    let session = backend_h2::connect(Arc::clone(hub), *stream, name, addr, connect_timeout)
+        .await
+        .map_err(|err| {
+            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+            eprintln!("ERROR [{name}] failed HTTP/2 session to {addr} (peer {peer}): {err}");
+            OutboundError::Connect
+        })?;
+    let (read, write) = stream_on_session(&session, name, addr, peer, idle, metrics)?;
+    Ok((read, write, true))
+}
+
+/// Opens the exchange pipe on a live session; a failure here means the
+/// backend could not serve this request, so it counts as a connect failure.
+fn stream_on_session(
+    session: &Arc<backend_h2::Session>,
+    name: &str,
+    addr: SocketAddr,
+    peer: SocketAddr,
+    idle: Duration,
+    metrics: &Metrics,
+) -> Result<(BoxRead, BoxWrite), OutboundError> {
+    backend_h2::open(session, name, idle).map_err(|err| {
+        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+        eprintln!("ERROR [{name}] could not open an HTTP/2 stream to {addr} (peer {peer}): {err}");
+        OutboundError::Connect
+    })
+}
+
+/// TCP connect, optional TLS handshake and optional PROXY header.
+async fn dial_transport(
+    name: &str,
+    connect_timeout: Duration,
+    backend: &ResolvedBackend,
+    addr: SocketAddr,
+    peer: SocketAddr,
+    local: SocketAddr,
+    metrics: &Metrics,
+) -> Result<Transport, OutboundError> {
     let socket = match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {
@@ -1877,23 +2071,7 @@ pub(crate) async fn connect_backend_to(
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             return Err(OutboundError::Connect);
         }
-        // HTTP/2 to the backend (B-H1): whatever ALPN the handshake agreed.
-        // A `h2` result is served as a real h2 session; anything else (none,
-        // `http/1.1`) keeps the h1 byte stream.
-        if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
-            return match backend_h2::bridge(stream, name, connect_timeout, idle).await {
-                Ok(pair) => Ok(pair),
-                Err(err) => {
-                    metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-                    eprintln!(
-                        "ERROR [{name}] failed HTTP/2 session to {addr} (peer {peer}): {err}"
-                    );
-                    Err(OutboundError::Connect)
-                }
-            };
-        }
-        let (read, write) = tokio::io::split(stream);
-        Ok((Box::new(read), Box::new(write)))
+        Ok(Transport::Tls(Box::new(stream)))
     } else {
         let mut socket = socket;
         let proxy_header = match backend.proxy_protocol {
@@ -1905,8 +2083,7 @@ pub(crate) async fn connect_backend_to(
             metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
             return Err(OutboundError::Connect);
         }
-        let (read, write) = socket.into_split();
-        Ok((Box::new(read), Box::new(write)))
+        Ok(Transport::Plain(socket))
     }
 }
 

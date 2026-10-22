@@ -76,11 +76,12 @@ impl MirrorCopy {
             );
             return;
         };
-        let (mut read, mut write) = match connect_backend_to(
+        let (mut read, mut write, _opened) = match connect_backend_to(
             DialTimeouts {
                 name: &self.name,
                 connect: self.connect_timeout,
                 idle: self.idle_timeout,
+                http: true,
             },
             &backend,
             addr,

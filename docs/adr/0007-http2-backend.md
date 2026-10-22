@@ -2,7 +2,10 @@
 
 Language: **English**.
 
-- State: **Accepted** (2026-10-22, second v0.7 slice)
+- State: **Accepted, superseded in part by [ADR-0008](0008-http2-backend-multiplexing.md)**
+  (2026-10-22, third v0.7 slice): the "one exchange at a time per session"
+  decision and the pooling paragraph below no longer hold — exchanges now
+  take independent streams on a shared session.
 - Date: 2026-10-22
 - Related: [ADR-0006](0006-http2-termination.md) (client-side termination),
   SPEC §4 (use maintained protocol libraries), SPEC §13 (semantic difference
@@ -39,7 +42,8 @@ knowledge in one module that can be tested in isolation.
   `connect_backend_to`, so an h2 backend that cannot speak h2 is a connect
   failure (retried per B-H7, answered `502`), never an open connection that
   fails per request. It is bounded by `connect_timeout`.
-- **Bridge, not a second engine**: `backend_h2::bridge` publishes an in-memory
+- **Bridge, not a second engine**: `backend_h2` (originally `bridge`,
+  restructured as `connect` + `open` in ADR-0008) publishes an in-memory
   64 KiB duplex to the engine and translates one h1 message per h2 stream.
   Request: `content-length` kept only when the h1 side declared one, chunked
   bodies as DATA, h1 trailers as trailing HEADERS, hop-by-hop headers and
@@ -47,9 +51,10 @@ knowledge in one module that can be tested in isolation.
   a backend `content-length` is preserved (the h1 side copies exactly that
   many bytes and the pool stays aligned); without one the body is relayed as
   `chunked` and h2 trailers become h1 trailers.
-- **Pooling unchanged**: the pipe pair is a normal pooled connection. One
-  exchange at a time per h2 session, because the engine's pool is exclusive;
-  there is no h2-to-backend multiplexing yet.
+- **Pooling unchanged** (superseded by ADR-0008): the pipe pair is a normal
+  pooled connection, so one exchange at a time per h2 session. It was the
+  price of not touching the engine in this slice; ADR-0008 removes the pool
+  from the h2 path and multiplexes streams instead.
 - **Explicit refusals**: `CONNECT` (no `101` in h2) and a host-less request
   are refused, and the engine answers `502`; a body shorter or longer than its
   declared length cuts the pipe instead of ending a message cleanly.
