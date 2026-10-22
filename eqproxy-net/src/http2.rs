@@ -101,6 +101,14 @@ pub(crate) enum StreamError {
     Io,
     /// The h2 side is gone or refused the frame.
     H2,
+    /// The peer's GOAWAY refused the stream before processing it, and no
+    /// request body was consumed: replaying it on a fresh session is safe
+    /// (the session it belonged to is going away anyway).
+    Refused,
+    /// The peer reset the stream with `REFUSED_STREAM` without processing it
+    /// (RFC 9113 §8.1.4): replaying it is safe, and the session itself is
+    /// still healthy.
+    StreamRefused,
 }
 
 pub(crate) fn copy_error(err: CopyError) -> StreamError {

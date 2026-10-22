@@ -96,6 +96,15 @@ pub struct Metrics {
     /// Requests not mirrored because the body exceeded the mirror
     /// budget (B-H3): never a silent truncation.
     pub mirror_skipped: AtomicU64,
+    /// Backend HTTP/2 sessions closed for being idle (no exchange for the
+    /// listener's `idle_timeout`): the next exchange dials a fresh one.
+    pub h2_sessions_idle_closed: AtomicU64,
+    /// Backend HTTP/2 sessions the peer started closing with a `GOAWAY`:
+    /// in-flight streams finish, new exchanges dial a fresh session.
+    pub h2_goaway_received: AtomicU64,
+    /// Streams the peer refused with `GOAWAY` (never processed) that were
+    /// replayed on a fresh session: safe because the server said so.
+    pub h2_refused_retried: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -139,6 +148,9 @@ pub struct MetricsSnapshot {
     pub requests_mirrored: u64,
     pub mirror_failures: u64,
     pub mirror_skipped: u64,
+    pub h2_sessions_idle_closed: u64,
+    pub h2_goaway_received: u64,
+    pub h2_refused_retried: u64,
 }
 
 impl Metrics {
@@ -185,6 +197,9 @@ impl Metrics {
             requests_mirrored: self.requests_mirrored.load(Ordering::Relaxed),
             mirror_failures: self.mirror_failures.load(Ordering::Relaxed),
             mirror_skipped: self.mirror_skipped.load(Ordering::Relaxed),
+            h2_sessions_idle_closed: self.h2_sessions_idle_closed.load(Ordering::Relaxed),
+            h2_goaway_received: self.h2_goaway_received.load(Ordering::Relaxed),
+            h2_refused_retried: self.h2_refused_retried.load(Ordering::Relaxed),
         }
     }
 
@@ -281,6 +296,11 @@ impl fmt::Display for MetricsSnapshot {
             self.requests_mirrored,
             self.mirror_failures,
             self.mirror_skipped
+        )?;
+        write!(
+            f,
+            " h2[sessions_idle_closed={} goaway={} refused_retried={}]",
+            self.h2_sessions_idle_closed, self.h2_goaway_received, self.h2_refused_retried
         )
     }
 }

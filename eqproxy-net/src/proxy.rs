@@ -1602,7 +1602,7 @@ async fn dial_with_retries<'a>(
     backend: &'a ResolvedBackend,
     peer: SocketAddr,
     local: SocketAddr,
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
     opts: DialOpts<'_>,
 ) -> Result<(BackendConn, ActiveGuard<'a>), OutboundError> {
     // Affinity (B-H8/B-N13/B-I8): the preferred server of this exchange,
@@ -1760,7 +1760,7 @@ pub async fn connect_backend<'a>(
     cfg: &'a ResolvedListener,
     peer: SocketAddr,
     local: SocketAddr,
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
 ) -> Result<(BoxRead, BoxWrite, ActiveGuard<'a>), OutboundError> {
     // TCP has no replay-safety knowledge: conservative non-idempotent,
     // and no pooling (streams have no message boundaries). TCP has no
@@ -1807,7 +1807,7 @@ pub async fn checkout_or_connect<'a>(
     backend: &'a ResolvedBackend,
     peer: SocketAddr,
     local: SocketAddr,
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
     ctx: RetryContext,
     affinity_cookie: Option<&str>,
 ) -> Result<(BackendConn, ActiveGuard<'a>), OutboundError> {
@@ -1893,7 +1893,7 @@ pub(crate) async fn connect_backend_to(
     addr: SocketAddr,
     peer: SocketAddr,
     local: SocketAddr,
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
 ) -> Result<(BoxRead, BoxWrite, bool), OutboundError> {
     let DialTimeouts {
         name,
@@ -1923,9 +1923,14 @@ pub(crate) async fn connect_backend_to(
         .await;
     }
 
-    let (read, write) = dial_transport(name, connect_timeout, backend, addr, peer, local, metrics)
-        .await?
-        .split();
+    let spec = DialSpec {
+        name,
+        connect: connect_timeout,
+        tls: backend.tls.as_ref(),
+        proxy_protocol: backend.proxy_protocol,
+        metrics,
+    };
+    let (read, write) = dial_transport(spec, addr, peer, local).await?.split();
     Ok((read, write, true))
 }
 
@@ -1944,7 +1949,7 @@ async fn open_h2_exchange(
     addr: SocketAddr,
     peer: SocketAddr,
     local: SocketAddr,
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
 ) -> Result<(BoxRead, BoxWrite, bool), OutboundError> {
     let DialTimeouts {
         name,
@@ -1952,8 +1957,32 @@ async fn open_h2_exchange(
         idle,
         ..
     } = timeouts;
+    // Everything a fresh session needs. The exchange keeps it so a stream the
+    // peer refuses with GOAWAY can be replayed on a new session **without**
+    // re-running balancing: the server is already chosen and its retry budget
+    // already spent.
+    let dialer = Arc::new(H2Dialer {
+        hub: Arc::clone(hub),
+        name: name.to_owned(),
+        addr,
+        peer,
+        local,
+        connect: connect_timeout,
+        idle,
+        tls: backend.tls.clone(),
+        proxy_protocol: backend.proxy_protocol,
+        metrics: Arc::clone(metrics),
+    });
     if let Some(session) = hub.lookup(addr) {
-        let (read, write) = stream_on_session(&session, name, addr, peer, idle, metrics)?;
+        let (read, write) = stream_on_session(
+            &session,
+            Arc::clone(&dialer),
+            name,
+            addr,
+            peer,
+            idle,
+            metrics,
+        )?;
         return Ok((read, write, false));
     }
 
@@ -1962,33 +1991,20 @@ async fn open_h2_exchange(
     // The exchange that held the gate may have installed the session while
     // this one waited.
     if let Some(session) = hub.lookup(addr) {
-        let (read, write) = stream_on_session(&session, name, addr, peer, idle, metrics)?;
+        let (read, write) = stream_on_session(
+            &session,
+            Arc::clone(&dialer),
+            name,
+            addr,
+            peer,
+            idle,
+            metrics,
+        )?;
         return Ok((read, write, false));
     }
 
-    let transport =
-        dial_transport(name, connect_timeout, backend, addr, peer, local, metrics).await?;
-    // The backend is configured for HTTP/2 only: a handshake that did not
-    // select `h2` cannot be served by writing h1 bytes into it.
-    if !transport.alpn_h2() {
-        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-        eprintln!(
-            "ERROR [{name}] backend {addr} did not negotiate ALPN h2 (peer {peer}): it is configured for HTTP/2 only"
-        );
-        return Err(OutboundError::Connect);
-    }
-    let Transport::Tls(stream) = transport else {
-        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-        return Err(OutboundError::Connect);
-    };
-    let session = backend_h2::connect(Arc::clone(hub), *stream, name, addr, connect_timeout)
-        .await
-        .map_err(|err| {
-            metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-            eprintln!("ERROR [{name}] failed HTTP/2 session to {addr} (peer {peer}): {err}");
-            OutboundError::Connect
-        })?;
-    let (read, write) = stream_on_session(&session, name, addr, peer, idle, metrics)?;
+    let session = dialer.open_session().await?;
+    let (read, write) = stream_on_session(&session, dialer, name, addr, peer, idle, metrics)?;
     Ok((read, write, true))
 }
 
@@ -1996,29 +2012,132 @@ async fn open_h2_exchange(
 /// backend could not serve this request, so it counts as a connect failure.
 fn stream_on_session(
     session: &Arc<backend_h2::Session>,
+    dialer: Arc<H2Dialer>,
     name: &str,
     addr: SocketAddr,
     peer: SocketAddr,
     idle: Duration,
-    metrics: &Metrics,
+    metrics: &Arc<Metrics>,
 ) -> Result<(BoxRead, BoxWrite), OutboundError> {
-    backend_h2::open(session, name, idle).map_err(|err| {
+    backend_h2::open(session, dialer, name, idle).map_err(|err| {
         metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
         eprintln!("ERROR [{name}] could not open an HTTP/2 stream to {addr} (peer {peer}): {err}");
         OutboundError::Connect
     })
 }
 
-/// TCP connect, optional TLS handshake and optional PROXY header.
-async fn dial_transport(
-    name: &str,
-    connect_timeout: Duration,
-    backend: &ResolvedBackend,
+/// Everything one fresh h2 session needs, owned so an exchange can dial a
+/// replacement after the peer refused a stream (the relay runs detached from
+/// the exchange that created it).
+struct H2Dialer {
+    hub: Arc<backend_h2::Hub>,
+    name: String,
     addr: SocketAddr,
     peer: SocketAddr,
     local: SocketAddr,
-    metrics: &Metrics,
+    connect: Duration,
+    idle: Duration,
+    tls: Option<ClientTls>,
+    proxy_protocol: ProxyProtocolMode,
+    metrics: Arc<Metrics>,
+}
+
+impl H2Dialer {
+    /// Dials one session. The caller holds the address's connect gate when a
+    /// handshake has to be singular (the cold path) and lets [`Self::dial`]
+    /// take it otherwise.
+    async fn open_session(&self) -> Result<Arc<backend_h2::Session>, OutboundError> {
+        let spec = DialSpec {
+            name: &self.name,
+            connect: self.connect,
+            tls: self.tls.as_ref(),
+            proxy_protocol: self.proxy_protocol,
+            metrics: &self.metrics,
+        };
+        let transport = dial_transport(spec, self.addr, self.peer, self.local).await?;
+        // The backend is configured for HTTP/2 only: a handshake that did not
+        // select `h2` cannot be served by writing h1 bytes into it.
+        if !transport.alpn_h2() {
+            self.metrics
+                .connect_failures
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "ERROR [{}] backend {} did not negotiate ALPN h2 (peer {}): it is configured for HTTP/2 only",
+                self.name, self.addr, self.peer
+            );
+            return Err(OutboundError::Connect);
+        }
+        let Transport::Tls(stream) = transport else {
+            self.metrics
+                .connect_failures
+                .fetch_add(1, Ordering::Relaxed);
+            return Err(OutboundError::Connect);
+        };
+        backend_h2::connect(
+            Arc::clone(&self.hub),
+            *stream,
+            &self.name,
+            self.addr,
+            self.connect,
+            self.idle,
+            Arc::clone(&self.metrics),
+        )
+        .await
+        .map_err(|err| {
+            self.metrics
+                .connect_failures
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!(
+                "ERROR [{}] failed HTTP/2 session to {} (peer {}): {err}",
+                self.name, self.addr, self.peer
+            );
+            OutboundError::Connect
+        })
+    }
+}
+
+impl backend_h2::SessionDialer for H2Dialer {
+    fn dial(&self) -> backend_h2::DialFuture<'_> {
+        Box::pin(async move {
+            // The same single-flight rule as the first exchange: one handshake
+            // per server even when several streams are refused at once.
+            let gate = self.hub.connect_gate(self.addr);
+            let _handshake = gate.lock().await;
+            if let Some(session) = self.hub.lookup(self.addr) {
+                return Some((session, false));
+            }
+            self.open_session()
+                .await
+                .ok()
+                .map(|session| (session, true))
+        })
+    }
+}
+
+/// Destination of one transport dial: the pieces of a backend a dial needs,
+/// without borrowing the whole [`ResolvedBackend`] (the h2 dialer owns them).
+struct DialSpec<'a> {
+    name: &'a str,
+    connect: Duration,
+    tls: Option<&'a ClientTls>,
+    proxy_protocol: ProxyProtocolMode,
+    metrics: &'a Metrics,
+}
+
+/// TCP connect, optional TLS handshake and optional PROXY header.
+async fn dial_transport(
+    spec: DialSpec<'_>,
+    addr: SocketAddr,
+    peer: SocketAddr,
+    local: SocketAddr,
 ) -> Result<Transport, OutboundError> {
+    let DialSpec {
+        name,
+        connect: connect_timeout,
+        tls: backend_tls,
+        proxy_protocol,
+        metrics,
+    } = spec;
     let socket = match tokio::time::timeout(connect_timeout, TcpStream::connect(addr)).await {
         Ok(Ok(socket)) => socket,
         Ok(Err(err)) => {
@@ -2036,7 +2155,7 @@ async fn dial_transport(
     };
     let _ = socket.set_nodelay(true);
 
-    if let Some(client_tls) = &backend.tls {
+    if let Some(client_tls) = backend_tls {
         let server_name = tls::server_name_for(client_tls, addr);
         let handshake = tokio::time::timeout(
             connect_timeout,
@@ -2062,7 +2181,7 @@ async fn dial_transport(
                 return Err(OutboundError::Connect);
             }
         };
-        let proxy_header = match backend.proxy_protocol {
+        let proxy_header = match proxy_protocol {
             ProxyProtocolMode::None => Ok(()),
             ProxyProtocolMode::V1 => proxy_proto::write_v1(&mut stream, peer, local).await,
             ProxyProtocolMode::V2 => proxy_proto::write_v2(&mut stream, peer, local).await,
@@ -2074,7 +2193,7 @@ async fn dial_transport(
         Ok(Transport::Tls(Box::new(stream)))
     } else {
         let mut socket = socket;
-        let proxy_header = match backend.proxy_protocol {
+        let proxy_header = match proxy_protocol {
             ProxyProtocolMode::None => Ok(()),
             ProxyProtocolMode::V1 => proxy_proto::write_v1(&mut socket, peer, local).await,
             ProxyProtocolMode::V2 => proxy_proto::write_v2(&mut socket, peer, local).await,
