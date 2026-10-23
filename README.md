@@ -140,6 +140,7 @@ docker run --rm exyonq/eqproxy:0.6.3 --version
 | [docs/differential-corpus.md](docs/differential-corpus.md) | Declared shared-semantics corpus vs HAProxy, nginx, ingress-nginx and Envoy |
 | [docs/migration/README.md](docs/migration/README.md) | Migration matrix: the same deployment in the four source formats and in EQProxy |
 | [docs/adr/](docs/adr/) | Architecture decision records |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | How to build, test, document and submit a change, including the audit stack a change must pass |
 
 ## Key decisions
 

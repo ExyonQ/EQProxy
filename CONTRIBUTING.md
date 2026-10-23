@@ -1,0 +1,170 @@
+# Contributing to EQProxy
+
+EQProxy is a reverse proxy and load balancer in Rust. It is pre-1.0: v0.6.3 is
+released and the v0.7 work (HTTP/2 to backends, gRPC, WebSockets over h2,
+HTTP/3) lands on `main`. Issues and pull requests are welcome; for a change
+that touches behaviour, configuration or the wire protocol, open an issue
+first so the scope can be agreed before code is written.
+
+## Development setup
+
+Install a stable Rust toolchain: the workspace uses edition 2024, so **Rust
+1.85 or newer** is required. CI runs stable and the release image pins 1.97.
+
+```bash
+git clone https://github.com/ExyonQ/EQProxy.git
+cd EQProxy
+cargo build --workspace
+cargo test --workspace
+```
+
+Run the proxy against the example configuration, which is also the quickest
+smoke test of a change:
+
+```bash
+cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
+cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
+```
+
+`config validate` is offline and binds nothing; `run` serves with the example
+listeners until `SIGINT`.
+
+## Before opening a PR
+
+Run exactly what CI runs, with the same flags:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+```
+
+Then exercise the behaviour you changed the way a user would: start the
+binary with a configuration that reaches your code path and check the
+observable result (status, body, headers, log line, metric, clean shutdown).
+A green build or a process that starts is not evidence that a feature works.
+Request a review before merge; do not assume an automatic review.
+
+## Tests and evidence
+
+- Every fix or feature arrives with the smallest test that demonstrates the
+  contract or observable effect. Name the level honestly: unit, contract,
+  integration or E2E.
+- When a change crosses sockets, TLS, HTTP/2 or QUIC frames, the test uses the
+  real dependency (a real origin, a real client) — a mock presented as
+  integration is not accepted.
+- Cover the error and boundary cases, and state what must happen when a
+  dependency fails or invalid input arrives.
+- Never weaken an assertion, skip a test or change an expected result to make
+  a check pass. If a test has to change, explain why in the PR.
+- Report checks that could not run as **not executed**, never as a pass.
+
+## Audits
+
+A change is not finished until it has been audited on four independent legs.
+Each one answers a different question, and none of them substitutes another:
+
+| Leg | Question | Tool |
+|---|---|---|
+| Toolchain | Does the workspace build, lint and pass the whole suite? | `veyra audit . --profile standard` |
+| Static | Are there stubs, fake tests, swallowed errors, panic/`unsafe` misuse or invented dependencies? | Rust Audit `scan` |
+| Structure | Is the change where it says it is, and what else does it reach? | CodeGraph Rust (`codegraph-rust`) |
+| Memory | What must the next session know? | Hindsight note |
+
+The toolchain and static legs are blocking: a rejected verdict or a scan
+finding is diagnosed, never silenced. CodeGraph is evidence of structure only
+— its graph citations are checked against the source and its prose is
+advisory, so it never counts as proof that something works. EvoForge is no
+longer part of this process (removed 2026-10-24); the slice eval it ran could
+not say anything about the real programme that the suite had not already
+said.
+
+## Scope discipline
+
+- [`SPEC.md`](SPEC.md) is the product contract. Behaviour that is not in the
+  spec needs a spec change first.
+- Design decisions live in [`docs/adr/`](docs/adr/): a change to a module
+  interface, the configuration format, the wire behaviour or a dependency
+  needs a new or amended ADR.
+- All code is safe Rust: `unsafe_code = "forbid"` is set at the workspace
+  level and there are no exceptions. `unsafe` and FFI may only come from
+  dependencies.
+- New dependencies are justified in an ADR, pinned in `Cargo.lock`, audited
+  with `cargo deny` and must not pull in a second crypto provider or a C
+  toolchain for compression.
+- Version numbers are pinned: no unpinned "latest" enters `Cargo.lock`.
+- HTTP/3, gRPC and WebSockets over h2 are on `main` but stay labelled
+  experimental until their evidence says otherwise; do not present them as
+  production-verified beyond what `docs/evidence/` documents.
+
+## Local-only paths (do not commit)
+
+Some material is maintainer-local and never published: internal roadmap and
+server notes, the release and benchmark harnesses, local analysis output and
+the agent instructions. It lives in the working tree but not in the
+repository — the maintainer's `.git/info/exclude` keeps it out of every
+commit, release, image and remote. Specific paths that must never enter a
+commit: `ROADMAP EQPROXY/`, `SERVIDORES.md`, `.dockerignore`, `scripts/`,
+`report/`, `AGENTS.md` and the local wizard scripts.
+
+Before pushing, both checks must print nothing:
+
+```bash
+# No co-authorship trailers: commits are authored by Doken-Tokuyama only.
+git log origin/main..HEAD --format=%b | grep -iE '^co-authored-by:'
+
+# No added or modified local-only path (a deletion is how one leaves the tree).
+git log origin/main..HEAD --diff-filter=AM --name-only \
+  | grep -E '^(ROADMAP EQPROXY/|SERVIDORES\.md$|\.dockerignore$|scripts/)'
+```
+
+Also keep credentials, private notes and generated artifacts out of the diff.
+
+## Commit style
+
+Subject in the imperative, prefixed with the area it touches, body explaining
+why:
+
+```
+feat(net): close idle backend h2 sessions and replay refused streams
+
+docs: record the backend HTTP/2 session lifecycle slice
+```
+
+Use `feat`, `fix`, `docs`, `ci`, `test` or `refactor` as the prefix and the
+crate or area in the scope. Do not add AI co-authorship footers; commits are
+authored by the contributor alone.
+
+## Documentation and changelog
+
+- Documentation is published in **English only**.
+- Public docs live under `docs/` (ADRs, migration guides, differential
+  corpus) and the top-level `SPEC.md`, `THREAT_MODEL.md` and
+  `BENCHMARK_PLAN.md`.
+- Every user-visible change gets a `CHANGELOG.md` entry under `[Unreleased]`,
+  in the Keep-a-Changelog style the file already uses, naming what was
+  verified and linking its evidence.
+- Evidence goes under `docs/evidence/` with the commands, the artifact under
+  test (binary or image digest) and the raw data. A conclusion without raw
+  data is not evidence.
+
+## Benchmarks
+
+Scenario IDs and methodology come from [`BENCHMARK_PLAN.md`](BENCHMARK_PLAN.md)
+§3–§5: same backends and topology for both products, at least five
+repetitions, medians with the full range, and every scenario published —
+including the ones EQProxy loses. Never cherry-pick the best run, and never
+compare numbers taken on a host whose load you did not record.
+
+## License
+
+EQProxy is dual-licensed under the **MIT** and **Apache-2.0** licenses
+(`LICENSE-MIT`, `LICENSE-APACHE`). By submitting a contribution you agree
+that it is licensed under both, with no additional terms.
+
+## Security
+
+Do not open a public issue with a working exploit. Describe the affected
+surface and the impact, and ask the maintainers for a private channel; the
+threat model in [`THREAT_MODEL.md`](THREAT_MODEL.md) is the reference for what
+is in scope.
