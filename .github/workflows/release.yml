@@ -833,13 +833,13 @@ jobs:
           chmod 0644 /tmp/pub-c.pem /tmp/pub-k.pem
           verify_published() {
             local ref="$1" arch="$2" net="$3" subnet="$4"
+            local repo="${ref%:*}" image
             log "re-pull $ref (linux/$arch)"
-            docker pull -q --platform "linux/$arch" "$ref" >/dev/null \
-              || fail "docker pull $ref linux/$arch"
-            # A platform pull records either the index digest or the platform
-            # manifest digest in RepoDigests, depending on what the daemon
-            # already had. Both belong to the scanned index; resolve the tag
-            # and the platform manifest from the raw index and accept either.
+            # A platform pull by tag is not deterministic: when the tag
+            # already resolves to the index, the daemon may keep the image it
+            # had for the other architecture. Resolve the linux/$arch
+            # manifest from the raw index and pull that digest, so the bytes
+            # that run are exactly the ones Scout scanned.
             raw_index="$(docker buildx imagetools inspect --raw "$ref")" \
               || fail "inspect $ref"
             got_index="$(printf '%s' "$raw_index" | sha256sum | cut -d' ' -f1)"
@@ -849,17 +849,17 @@ jobs:
               | jq -r --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' \
               | head -1)"
             [ -n "$platform_digest" ] || fail "$ref has no linux/$arch manifest"
-            case "$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref")" in
-              *"@sha256:$got_index"*|*"@$platform_digest"*) ;;
-              *) fail "$ref linux/$arch is neither the scanned index nor its manifest $platform_digest" ;;
-            esac
-            docker run --rm --platform "linux/$arch" "$ref" --version \
+            image="$repo@$platform_digest"
+            log "re-pull $image (linux/$arch)"
+            docker pull -q --platform "linux/$arch" "$image" >/dev/null \
+              || fail "docker pull $image"
+            docker run --rm --platform "linux/$arch" "$image" --version \
               | grep -q "eqproxy $VERSION" \
               || fail "$ref linux/$arch reports the wrong version"
             h2_out="$(docker run --rm --platform "linux/$arch" \
               -v /tmp/published-h2.toml:/h2.toml:ro \
               -v /tmp/pub-c.pem:/c.pem:ro -v /tmp/pub-k.pem:/k.pem:ro \
-              "$ref" config validate --config /h2.toml 2>&1)" \
+              "$image" config validate --config /h2.toml 2>&1)" \
               || fail "$ref linux/$arch rejected alpn = [\"h2\"]: $h2_out"
             case "$h2_out" in
               "config OK: 1 listener(s), 1 backend(s)"*) ;;
@@ -870,7 +870,7 @@ jobs:
             h3_out="$(docker run --rm --platform "linux/$arch" \
               -v /tmp/published-h3.toml:/h3.toml:ro \
               -v /tmp/pub-c.pem:/c.pem:ro -v /tmp/pub-k.pem:/k.pem:ro \
-              "$ref" config validate --config /h3.toml 2>&1)"
+              "$image" config validate --config /h3.toml 2>&1)"
             h3_status=$?
             set -e
             [ "$h3_status" = "1" ] \
@@ -880,7 +880,7 @@ jobs:
               *) fail "$ref linux/$arch h3 rejection lacks the cause: $h3_out" ;;
             esac
             apply_out="$(docker run --rm --platform "linux/$arch" \
-              -v /tmp/published-apply.toml:/c.toml:ro "$ref" \
+              -v /tmp/published-apply.toml:/c.toml:ro "$image" \
               config apply --config /c.toml)" \
               || fail "$ref linux/$arch config apply"
             case "$apply_out" in
@@ -903,7 +903,7 @@ jobs:
           LIVE
             docker run -d --network "$net" --ip "${subnet%.0/24}.20" --name "$net-prox" \
               -p 18084:18084 --platform "linux/$arch" \
-              -v /tmp/published-live.toml:/c.toml:ro "$ref" run --config /c.toml >/dev/null
+              -v /tmp/published-live.toml:/c.toml:ro "$image" run --config /c.toml >/dev/null
             sleep 4
             local code
             code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18084/)"
