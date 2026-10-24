@@ -1232,6 +1232,11 @@ impl std::fmt::Debug for BoundProxy {
     }
 }
 
+/// Retries an ephemeral QUIC listener when the kernel hands out a TCP port
+/// that is already bound on UDP; 8 attempts make the race vanishingly small
+/// without masking a real clash on an explicit port.
+const QUIC_BIND_ATTEMPTS: u32 = 8;
+
 /// Opens all listeners and starts their accept loops. Fails whole when
 /// any one cannot open (SPEC §7.2): the already-opened ones close and an
 /// error returns — never partially started.
@@ -1245,14 +1250,37 @@ pub async fn bind(
         let addr = cfg.listen;
         // On error `entries` drops: its Drop impls stop the loops opened
         // so far (all-or-nothing).
-        let listener = TcpListener::bind(addr)
-            .await
-            .map_err(|source| ProxyError::Bind { name, addr, source })?;
-        let endpoint = if cfg.quic {
+        //
+        // A port-0 listener asks the kernel for the pair TCP+UDP. The two
+        // port spaces are independent, so the TCP ephemeral port can already
+        // be taken on UDP by a listener that is still dropping its endpoint;
+        // retry the pair instead of failing startup. An explicit port still
+        // fails closed: there the clash is a configuration error.
+        let mut attempts = 0;
+        let (listener, endpoint) = loop {
+            let listener = TcpListener::bind(addr)
+                .await
+                .map_err(|source| ProxyError::Bind {
+                    name: name.clone(),
+                    addr,
+                    source,
+                })?;
+            if !cfg.quic {
+                break (listener, None);
+            }
             let local = listener.local_addr().unwrap_or(addr);
-            Some(open_quic(&cfg, local)?)
-        } else {
-            None
+            match open_quic(&cfg, local) {
+                Ok(endpoint) => break (listener, Some(endpoint)),
+                Err(ProxyError::QuicBind { source, .. })
+                    if addr.port() == 0
+                        && source.kind() == std::io::ErrorKind::AddrInUse
+                        && attempts < QUIC_BIND_ATTEMPTS =>
+                {
+                    attempts += 1;
+                    drop(listener);
+                }
+                Err(err) => return Err(err),
+            }
         };
         entries.push(make_entry(cfg, listener, endpoint, Arc::clone(&metrics)));
     }
