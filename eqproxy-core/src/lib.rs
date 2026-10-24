@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod compression;
 pub mod expectation;
 pub mod maps;
 pub mod metrics;
