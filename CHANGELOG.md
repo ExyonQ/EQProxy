@@ -5,7 +5,128 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+## [v0.7.0] — 2026-10-24
+
 ### Added
+
+- **HTTP/3 over QUIC (v0.7 slice 9, B-H2/B-E2/B-E13).** A listener with
+  `quic = true` and a `[listener.X.tls]` table serves real **h3** on its own
+  address and port over UDP (QUIC, TLS 1.3, ALPN `h3` forced; the same
+  certificate, SNI entries and client CA as TCP). The configuration gate
+  requires `mode = "http"`, rejects `alpn = ["h3"]` on the TCP table and
+  rejects `proxy_receive` (QUIC has no preamble). Each h3 request becomes one
+  HTTP/1.1 exchange through the existing engine — routing rules, auth, rate
+  limiting, header actions, mirroring, retries, the keep-alive pool and
+  compression decide exactly once — with `:authority` → `host`, hop-by-hop
+  headers stripped, `content-length` preserved, bodies without a length sent
+  upstream as `chunked` and no-body requests kept unframed; h3 trailers map
+  to h1 trailers and back. `CONNECT` answers `501`, a backend `101` resets
+  the stream, a truncated body resets instead of ending cleanly, interim 1xx
+  are skipped (h3 0.0.8 has no informational frame) and a dead backend is the
+  engine's `502`. QUIC connections count in `maxconn` (explicit refusal when
+  full); startup is fail-closed (the UDP endpoint opens before traffic); a
+  hot reload keeps a kept endpoint and can turn QUIC on/off, but a **TLS
+  material change on a live endpoint needs a restart** (the swap is rejected,
+  never half-applied). h3's server grease is disabled for interoperability:
+  aioquic 1.2.0 lost the end of stream when an unknown frame followed DATA.
+  Verified with 8 new tests (7 real-socket dataplane E2E with a real `h3`
+  client + 1 configuration-gate test) and independent `aioquic` 1.2.0
+  through the release binary (GET, 256 KiB streaming POST, trailers, gzip,
+  a rule `418`, `CONNECT` `501`, clean SIGINT). The interop gate closed with a
+  second independent implementation: `quic-go` 0.64.1 (its own QUIC/h3/QPACK
+  stack) repeated the HTTP journeys through the same binary — GET, 256 KiB
+  streaming POST without a length, trailers, gzip and a rule `418`, with
+  `proxied=4` — and the aioquic run was repeated after the harness change;
+  both pass. WebSocket over h3, gRPC over h3, 0-RTT, connection migration and
+  HTTP/3 to backends stay out. Design in
+  `docs/adr/0013-http3-quic.md`, evidence in `docs/evidence/v07-http3.md`.
+- **WebSockets over HTTP/2 (RFC 8441 extended CONNECT, v0.7 slice 8).** An
+  h2 client opens the socket with `CONNECT` + `:protocol = websocket`; the
+  proxy advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`, renders the stream as
+  the real h1 handshake (`GET`, `Upgrade: websocket`, a generated
+  `Sec-WebSocket-Key`, the client's subprotocols) and runs it through the
+  same h1 engine, so routing rules, auth, rate limiting, header actions,
+  `forwarded_headers` and the tunnel stay one implementation. A backend
+  `101` becomes an h2 `200` (never a `101`, and never the internal
+  `Sec-WebSocket-Accept`); bytes are relayed both ways with the client's
+  flow-control window as the only buffer. A non-`101` answer is relayed as a
+  normal HTTP/2 response (status, headers, body), an unknown `:protocol` and
+  a classic CONNECT stay `501`, and a silent tunnel is cut by
+  `idle_timeout`. New counters: `ws[tunnels=… failures=…]`. Verified with 10
+  new tests (4 unit + 6 real-socket dataplane E2E) and `hyper-h2` 4.2.0
+  through the release binary. Backends that speak **only** h2 and
+  `permessage-deflate` negotiation are out of this slice.
+- **gRPC over HTTP/2, end to end (v0.7 slice 7).** A `POST` whose
+  `content-type` is `application/grpc` (or `application/grpc+…`, never
+  `grpc-web`) is relayed as a real HTTP/2 stream when the chosen backend
+  negotiated ALPN `h2`, instead of the h1 translation that cannot answer
+  before the client half-closes. The request HEADERS are built from the same
+  h1 head the engine would forward, so routing rules, the rate limiter,
+  authentication, rule header actions, forwarded headers and `rewrite`
+  behave identically; `te: trailers` is sent to the backend; DATA and
+  trailers are relayed in both directions at once with HTTP/2 flow control
+  as the only buffer, and `grpc-status` reaches the client in trailing
+  HEADERS (including a trailers-only answer). `idle_timeout` cuts a silent
+  stream (counted as inactivity) and `max_stream_duration` ends a running
+  one with `grpc-status: 4` (DEADLINE_EXCEEDED) trailers, or a `504` before
+  the response head. A refused stream is never replayed (gRPC is not
+  idempotent); connect-phase failures keep the B-H7 rule. Compression and
+  mirroring do not apply to gRPC streams, and a redirect/direct rule or a
+  backend without `h2` keeps the h1 translation. New counters:
+  `grpc[streams=… errors=…]`. Verified with 12 new tests (4 unit + 8
+  real-socket dataplane E2E: bidi echo before half-close, 256 KiB across
+  both flow-control windows, two concurrent streams on one backend session,
+  idle cut, deadline status, forwarded headers, h1 fallback and a dead
+  backend's explicit `502`) and with the real `grpcio` 1.66.1 stack: a TLS
+  server and a client through the release binary exercise bidi, 256 KiB,
+  `NOT_FOUND` in trailers and a 6-minute stream with a message every 20 s.
+  <!-- soak:gate:start -->
+  The 24-hour soak of the version gate **passed** on 2026-10-23T23:09:55Z:
+  86400.0 s, 4267 messages,
+  0 broken streams and 0 failed probes, final `grpc-status: OK`
+  (binary `0672763af6af`). Evidence in
+  `docs/evidence/v07-grpc-soak-24h.md`.
+  **The soak criterion is met; the remaining gate items are listed in
+  the roadmap.**
+<!-- soak:gate:end -->
+- **Response compression: gzip and Brotli, streaming and measured (v0.7
+  slices 5–6).** A `http` listener can opt in with
+  `[listener.X.compression]`: `gzip = true` (`level` 1–9, default 6) and/or
+  `brotli = true` (`brotli_quality` 0–11, default 5), plus `min_size` (default
+  1 KiB) and `types` (text/JSON/JS/XML/SVG). Negotiation follows RFC 9110
+  §12.5.3: explicit entries decide, `q=0` refuses, `*` covers the coding,
+  malformed q-values refuse; the higher q-value wins and a tie goes to Brotli,
+  and a coding the listener did not enable is never selected. Eligible bodies
+  are compressed **while they are relayed** (nothing buffered whole) and sent
+  as a chunked response: `Content-Length` is dropped, `Content-Encoding:
+  gzip`/`br` and `Transfer-Encoding: chunked` are added, `Vary:
+  Accept-Encoding` appears once, and the status line is presented as HTTP/1.1.
+  gzip is a member written by EQProxy over `flate2` raw deflate; Brotli is the
+  pure-Rust `brotli` crate's streaming writer, flushed after every relayed
+  block so nothing is held back. Nothing is re-encoded: bodies with
+  `Content-Encoding`/`Content-Range`/`Cache-Control: no-transform`, `HEAD`,
+  1xx/204/206/304, HTTP/1.0 clients, media types outside the list and declared
+  bodies below `min_size` stay identity. Backend chunked trailers are
+  validated and re-emitted after the compressed stream. h2 clients receive the
+  same bytes as DATA through the existing h1⇄h2 translation (no second
+  compressor). The gate rejects either coding on a `tcp` listener, gzip levels
+  outside 1–9, Brotli qualities outside 0–11 and media types that are not
+  `type/subtype`, `type/*` or `*/*`, using the runtime grammar. New counters:
+  `compression[gzip=… brotli=… bytes_in=… bytes_out=…]`. Verified with 16
+  compression tests (3 core unit on negotiation, 8 dataplane on both encoders
+  and the response decision, 5 CLI E2E through the real binary: every gzip
+  refusal case, Brotli preference/q-values/refusals/trailers with the decoded
+  body compared, validate/explain for both codings, and h2c with real curl for
+  each). Measured with the release binary against an independent Python origin
+  over loopback (`docs/evidence/v07-compression/bench.py`, raw data
+  committed): 771 214 B of text → 49 799 B with gzip 6 (ratio 0.065) and
+  12 726 B with Brotli 5 (0.017); 1 037 124 B of JSON → 77 132 B (0.074) and
+  30 380 B (0.029); a 256 KiB `application/octet-stream` body stays at 1.000
+  because the type is not eligible. Every compressed response was decoded with
+  an independent decoder (zlib, Brotli reference module) and compared with the
+  origin's bytes. Design in
+  [ADR-0010](docs/adr/0010-response-compression.md); evidence in
+  [docs/evidence/v07-compression.md](docs/evidence/v07-compression.md).
 
 - **HTTP/2 backend session lifecycle (v0.7 fourth slice).** Sessions now have
   the lifecycle their name implies. An idle session (no exchange for the
@@ -100,50 +221,35 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   TLS, plus the same listener still answering HTTP/1.1). Design rationale in
   [ADR-0006](docs/adr/0006-http2-termination.md).
 
-### Fixed
-
-- **A clean HTTP/3 close is no longer counted as a protocol error, and no
-  longer floods the log (S-H3-02).** The h3 error alone does not say whether a
-  peer ended the session normally, so EQProxy wrote
-  `WARN [h3] HTTP/3 connection error … ApplicationClose: 0x0` for every
-  connection a client closed the way RFC 9114 §8.1 describes and counted it in
-  `h3_connection_errors`: a 10 s handshake run produced **13 859–15 123** such
-  lines, one per handshake. `classify_h3_close` now reads the QUIC close reason
-  kept next to the connection: `H3_NO_ERROR` or application code `0` (what
-  aioquic and quic-go send) counts `h3_clean_closes` and logs nothing, while a
-  protocol code, a transport error, a stateless reset or a timeout still
-  counts `h3_connection_errors` and logs the cause — at both ends, the h3
-  handshake and the session. The periodic line reads
-  `h3[clean_closes=… connection_errors=…]`. Verified with 4 new unit tests
-  (one close code at a time, the transport errors that must stay errors, and
-  the two operator lines verbatim), 3 new dataplane E2E tests (application
-  code `0`, `H3_NO_ERROR`, and a protocol-error close that still counts and
-  logs while the listener keeps serving) and the release binary against
-  `aioquic` 1.2.0: two clean closes leave **0** WARN, an
-  `H3_GENERAL_PROTOCOL_ERROR` close leaves
-  exactly **1**, and the proxy serves again afterwards
-  (`h3[clean_closes=3 connection_errors=1]`). The S-H3-02 before/after
-  campaign on `netcup-bench` (two amd64 images built from one tree, five
-  repetitions each) measures **15 227 → 26 WARN lines** and **1.67 MiB →
-  5.08 KiB** of log per run at the same offered load, i.e. the noise is gone;
-  handshakes/s moved 1 251.5 → 1 331.7 (**+6.4 %**), which is inside the
-  −4.4 % drift the HAProxy control shows on the same scenario and is therefore
-  **not** claimed as a speedup. Evidence in
-  [docs/evidence/v07-h3-close.md](docs/evidence/v07-h3-close.md).
-- **Keep-alive idle wait used the client header-phase bound.** A connection
-  that had already served an exchange was closed after
-  `client_header_timeout` (default 5 s) of silence even though
-  `idle_timeout` (default 60 s) is the documented inactivity window: a client
-  that kept a connection idle for 5 s lost it. The wait for the next request
-  on a keep-alive connection is now bounded by `idle_timeout` and counted as
-  `idle_timeouts`; the header phase of a new connection keeps its bound and
-  still answers `408`. The hot-maps E2E test (a keep-alive connection held
-  across a data swap) exposed this as a flake that became deterministic under
-  load; it passes now because the product honours the documented window, not
-  because the test was relaxed
-  (`keepalive_wait_is_bounded_by_idle_timeout_not_the_header_one`).
-
 ### Changed
+
+- **The container image runs on Wolfi.** The runtime stage is
+  `cgr.dev/chainguard/wolfi-base` pinned by index digest (ADR-0016) instead of
+  `scratch`: 36 packages, **0 critical / 0 high** from Docker Scout on
+  linux/amd64 and linux/arm64, and `docker exec … sh` works for operators. The
+  binary is still a statically linked musl executable (the Dockerfile's `file`
+  gate fails the build otherwise), it runs as 65532, and `config apply` still
+  writes its state directory. The release workflow repeats the journeys on
+  both architectures and promotes only the scanned digest.
+- **HTTP/3 per-request cost cut by 60 % (B-H2, S-H3-01).** Profiling the
+  released HTTP/3 artifact (`perf` on a DWARF build plus a counting-allocator
+  build) put ~18 % of CPU in musl's malloc lock and ~11 % more in the kernel
+  spinlock/futex path it drives, at **108 allocations and 44 KiB of zeroed
+  memory per proxied request**. Three changes follow the measurement: the
+  process uses **mimalloc** as its global allocator (ADR-0014), body-less h3
+  requests relay the answer directly onto the stream (no relay task, no
+  command channel, no timer per step) and answer chunks are read into
+  exact-size `BytesMut`s instead of a 16 KiB zeroed scratch buffer plus a
+  second copy, with a 16 KiB pipe instead of 64 KiB. Same host and generator,
+  S-H3-01: 18 403.7 → **32 587.4 req/s** (+77 %), p50 3.26 → **1.73 ms**, CPU
+  per request 205 → **88 µs**. The full 5×2 campaign re-measured 32 941.3 vs
+  HAProxy's 49 279.1 req/s (**0.668×**, up from 0.341×), p99 5.42 vs 4.39 ms;
+  **peak memory rose from 9.23 to 44.93 MiB** (mimalloc per-thread heaps, now
+  above HAProxy's 32.55 MiB — the one metric that regressed) and S-H3-02 is
+  unchanged (0.707×). Still classified **Worse**, not Comparable. Evidence in
+  [v07-h3-profile.md](docs/evidence/v07-h3-profile.md), decision in
+  [ADR-0014](docs/adr/0014-global-allocator.md).
+
 
 - **`alpn = ["h2"]` is accepted on a `mode = "http"` listener and on a
   backend used by one.** v0.6.3 rejected both because the dataplane could
@@ -187,6 +293,88 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   characters for v0.6.3 — and a tag whose version has no section fails the
   release instead of publishing a stale body. The published v0.6.3 page was
   corrected the same way.
+
+### Fixed
+
+- **A clean HTTP/3 close is no longer counted as a protocol error, and no
+  longer floods the log (S-H3-02).** The h3 error alone does not say whether a
+  peer ended the session normally, so EQProxy wrote
+  `WARN [h3] HTTP/3 connection error … ApplicationClose: 0x0` for every
+  connection a client closed the way RFC 9114 §8.1 describes and counted it in
+  `h3_connection_errors`: a 10 s handshake run produced **13 859–15 123** such
+  lines, one per handshake. `classify_h3_close` now reads the QUIC close reason
+  kept next to the connection: `H3_NO_ERROR` or application code `0` (what
+  aioquic and quic-go send) counts `h3_clean_closes` and logs nothing, while a
+  protocol code, a transport error, a stateless reset or a timeout still
+  counts `h3_connection_errors` and logs the cause — at both ends, the h3
+  handshake and the session. The periodic line reads
+  `h3[clean_closes=… connection_errors=…]`. Verified with 4 new unit tests
+  (one close code at a time, the transport errors that must stay errors, and
+  the two operator lines verbatim), 3 new dataplane E2E tests (application
+  code `0`, `H3_NO_ERROR`, and a protocol-error close that still counts and
+  logs while the listener keeps serving) and the release binary against
+  `aioquic` 1.2.0: two clean closes leave **0** WARN, an
+  `H3_GENERAL_PROTOCOL_ERROR` close leaves
+  exactly **1**, and the proxy serves again afterwards
+  (`h3[clean_closes=3 connection_errors=1]`). The S-H3-02 before/after
+  campaign on `netcup-bench` (two amd64 images built from one tree, five
+  repetitions each) measures **15 227 → 26 WARN lines** and **1.67 MiB →
+  5.08 KiB** of log per run at the same offered load, i.e. the noise is gone;
+  handshakes/s moved 1 251.5 → 1 331.7 (**+6.4 %**), which is inside the
+  −4.4 % drift the HAProxy control shows on the same scenario and is therefore
+  **not** claimed as a speedup. Evidence in
+  [docs/evidence/v07-h3-close.md](docs/evidence/v07-h3-close.md).
+- **Backend idle pool sized from the load actually in flight (S-H2-01).** The
+  A16 pool kept at most 64 idle connections per server, so a workload with
+  **400 streams in flight** parked 64 of them per wave and re-dialled the
+  other 336: the S-H2-01 campaign measured **141 155 backend connections**
+  (192.85 per 1 000 requests) against HAProxy's 6 106 (1.22), exhausted the
+  ephemeral port range and answered **7 473 × `502`**. The cap now follows
+  the peak of exchanges in flight on that server, reported by the balancer
+  when a connection is borrowed (never at check-in, which would race a burst
+  that is still starting), clamped between the previous 64 and **4 096**;
+  the 60 s idle expiry is unchanged, so a burst's leftovers are released.
+  A new dataplane E2E (`pool_sizing_keeps_a_400_stream_burst_without_churn`)
+  drives 4 h2 connections × 100 streams against a keep-alive h1 origin that
+  holds every request while a wave is open (so the 400 exchanges really are
+  concurrent instead of depending on scheduling) and asserts that the first
+  wave dials exactly 400, that the second dials **zero** new connections
+  while reusing all 400, and that the origin accepts no new connection during
+  the second wave; with the cap fixed at 64 it fails (wave 2 dials 336 more:
+  736 vs 400).
+  The S-H2-01/02 campaign was repeated with the new image on the same host:
+  S-H2-01 **5 704.0 → 40 872.0 req/s** (0.099× → **0.742×** HAProxy), backend
+  connections per 1 000 requests **192.85 → 0.55**, **7 473 → 0** `502`s, p99
+  470.39 → 22.51 ms; S-H2-02 **0.975× → 1.081×** (still 1.24× the CPU and 3.2×
+  the memory). Design in
+  [ADR-0015](docs/adr/0015-backend-idle-pool-sizing.md), evidence in
+  [docs/evidence/v07-h2-pool-sizing.md](docs/evidence/v07-h2-pool-sizing.md).
+- **Keep-alive idle wait used the client header-phase bound.** A connection
+  that had already served an exchange was closed after
+  `client_header_timeout` (default 5 s) of silence even though
+  `idle_timeout` (default 60 s) is the documented inactivity window: a client
+  that kept a connection idle for 5 s lost it. The wait for the next request
+  on a keep-alive connection is now bounded by `idle_timeout` and counted as
+  `idle_timeouts`; the header phase of a new connection keeps its bound and
+  still answers `408`. The hot-maps E2E test (a keep-alive connection held
+  across a data swap) exposed this as a flake that became deterministic under
+  load; it passes now because the product honours the documented window, not
+  because the test was relaxed
+  (`keepalive_wait_is_bounded_by_idle_timeout_not_the_header_one`).
+
+### Documentation
+
+- **HTTP/3 benchmarked against HAProxy 3.4.6 (S-H3-01/S-H3-02), with the
+  loss published.** Both products served h3 on the same port, certificate,
+  congestion controller and origin, on an idle Linux host, 5 repetitions
+  each, raw data in `docs/evidence/v07-h3-bench/run-20261023T134656Z/`.
+  EQProxy is **Worse** on both scenarios: S-H3-01 16 838.6 vs 49 323.8 req/s
+  (0.341×), p50 3.58 vs 1.06 ms, 351 % vs 198 % of one core (5.2× CPU per
+  request); S-H3-02 1 209 vs 1 637 handshakes/s (0.739×), p50 13.0 vs
+  8.8 ms. Memory is lower (9.2 vs 32.7 MiB peak). The handshake path is
+  single-core bound and every peer close logs a warning (13.9k–15.1k lines
+  per 10 s run), both disclosed in `docs/evidence/v07-h3-bench.md`; no
+  favourable scenario is omitted and no claim of parity is made.
 
 ## [v0.6.3] — 2026-10-21
 

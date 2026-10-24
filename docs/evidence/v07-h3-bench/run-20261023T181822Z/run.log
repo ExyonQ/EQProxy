@@ -1,0 +1,30 @@
+[build] load sha256=f02af496e1951f598d6048c3d31926d1ea2a6995ce2cdb6765251840d142eade probe sha256=bb546e7e235850a919620ba984d3eed6f49ed01902bb75858dd192318b4da864
+[build] eqproxy image 3bca2612e90d3f74 binary b4db9260ef34a2b8
+[host] Linux-6.8.0-147-generic-x86_64-with-glibc2.39 · cpus=8 memory=16767594496 · client 29.6.1 / server 29.6.1 · load [0.58837890625, 2.50390625, 2.806640625]
+[calibration] load_c8s8: 45250.51421391144 req/s or hs/s, generator cpu 268% of one core
+[calibration] handshake_c16: 1465.42417983219 req/s or hs/s, generator cpu 201% of one core
+[scenario] S-H3-01 {"mode": "load", "conns": 8, "streams": 8, "warmup": 3, "duration": 15}
+[run] S-H3-01 eqproxy rep1: rps=32941.3 p50=1.69ms cpu=270% gen_cpu=229%
+[run] S-H3-01 haproxy rep1: rps=47710.6 p50=1.08ms cpu=192% gen_cpu=299%
+[run] S-H3-01 haproxy rep2: rps=48837.9 p50=1.05ms cpu=209% gen_cpu=295%
+[run] S-H3-01 eqproxy rep2: rps=28878.3 p50=1.92ms cpu=266% gen_cpu=227%
+[run] S-H3-01 eqproxy rep3: rps=30680.6 p50=1.84ms cpu=266% gen_cpu=226%
+[run] S-H3-01 haproxy rep3: rps=50448.1 p50=1.02ms cpu=194% gen_cpu=300%
+[run] S-H3-01 haproxy rep4: rps=49279.1 p50=1.05ms cpu=198% gen_cpu=302%
+[run] S-H3-01 eqproxy rep4: rps=35052.9 p50=1.61ms cpu=269% gen_cpu=227%
+[run] S-H3-01 eqproxy rep5: rps=36142.6 p50=1.55ms cpu=269% gen_cpu=228%
+[run] S-H3-01 haproxy rep5: rps=51015.3 p50=1.02ms cpu=203% gen_cpu=301%
+[scenario] S-H3-02 {"mode": "handshake", "conns": 16, "warmup": 2, "duration": 10}
+[run] S-H3-02 eqproxy rep1: hs/s=1298.3 p50=12.20ms cpu=114% gen_cpu=188%
+[run] S-H3-02 haproxy rep1: hs/s=1835.2 p50=7.82ms cpu=204% gen_cpu=248%
+[run] S-H3-02 haproxy rep2: hs/s=1849.4 p50=7.75ms cpu=206% gen_cpu=249%
+[run] S-H3-02 eqproxy rep2: hs/s=1330.3 p50=11.88ms cpu=114% gen_cpu=188%
+[run] S-H3-02 eqproxy rep3: hs/s=1286.7 p50=12.29ms cpu=115% gen_cpu=190%
+[run] S-H3-02 haproxy rep3: hs/s=1809.3 p50=7.92ms cpu=207% gen_cpu=249%
+[run] S-H3-02 haproxy rep4: hs/s=1885.5 p50=7.63ms cpu=207% gen_cpu=249%
+[run] S-H3-02 eqproxy rep4: hs/s=1349.7 p50=11.76ms cpu=113% gen_cpu=186%
+[run] S-H3-02 eqproxy rep5: hs/s=1239.0 p50=12.72ms cpu=114% gen_cpu=191%
+[run] S-H3-02 haproxy rep5: hs/s=1680.1 p50=8.50ms cpu=204% gen_cpu=252%
+[gaps] S-H3-01: {"metric_eq_over_ha": 0.668, "latency_p50_ha_over_eq": 0.618, "latency_p99_ha_over_eq": 0.809, "cpu_ratio_eq_over_ha": 1.358, "note": "metric ratios > 1 favour EQProxy; latency ratios > 1 mean EQProxy had the lower end-to-end latency; cpu ratio > 1 means EQProxy spent more CPU per second for the same offered load."}
+[gaps] S-H3-02: {"metric_eq_over_ha": 0.707, "latency_p50_ha_over_eq": 0.641, "latency_p99_ha_over_eq": 0.742, "cpu_ratio_eq_over_ha": 0.553, "note": "metric ratios > 1 favour EQProxy; latency ratios > 1 mean EQProxy had the lower end-to-end latency; cpu ratio > 1 means EQProxy spent more CPU per second for the same offered load."}
+report: /root/h3src/docs/evidence/v07-h3-bench/run-20261023T181822Z/report.json

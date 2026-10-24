@@ -7,7 +7,7 @@ authors.workspace = true
 description = "EQProxy dataplane: listeners, connections and bounded TCP proxy"
 
 [dependencies]
-eqproxy-core = { path = "../eqproxy-core", version = "0.6.1" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.7.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 rustls = "0.23"
@@ -17,6 +17,18 @@ webpki-roots = "1"
 h2 = "0.4"
 http = "1"
 bytes = "1"
+# Compression responses (B-N6/H6): pure-Rust backends, no C zlib.
+flate2 = "1"
+brotli = "9"
+# HTTP/3 (B-H2): QUIC transport + h3 framing. aws-lc-rs is the only crypto
+# provider in the build (ADR-0004), so quinn must not pull `ring` in.
+quinn = { version = "0.11", default-features = false, features = [
+    "runtime-tokio",
+    "rustls-aws-lc-rs",
+    "log",
+] }
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
 
 [dev-dependencies]
 base64 = { workspace = true }

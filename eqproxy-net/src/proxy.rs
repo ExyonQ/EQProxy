@@ -773,6 +773,9 @@ pub struct ResolvedListener {
     pub max_stream_duration: Duration,
     /// TLS termination at this listener (A11). `None` = plain TCP.
     pub server_tls: Option<tls::ServerTls>,
+    /// HTTP/3 over QUIC on the same address (UDP), when `quic = true`
+    /// (B-H2). Needs [`server_tls`](Self::server_tls): QUIC is TLS 1.3.
+    pub quic: bool,
     /// PROXY v1 reception with origin allowlist (B-H9/B-E10): strict
     /// front door — every connection must come from an allowlisted
     /// origin and carry a valid PROXY v1 line.
@@ -781,6 +784,8 @@ pub struct ResolvedListener {
     pub forwarded_headers: ForwardedMode,
     /// Custom response for the "no server available" class (C9).
     pub local_response: Option<LocalResponse>,
+    /// Response compression (B-N6/H6). `None` = identity only.
+    pub compression: Option<crate::compression::ResolvedCompression>,
     /// Data maps in force (C10/PP-02): what `map` rule conditions
     /// consult; the file watchers swap their data in hot.
     pub maps: Arc<eqproxy_core::maps::MapRegistry>,
@@ -819,11 +824,23 @@ impl ResolvedListener {
             server_header_timeout,
             max_stream_duration: Duration::ZERO,
             server_tls: None,
+            quic: false,
             proxy_receive: None,
             forwarded_headers: ForwardedMode::Off,
             local_response: None,
+            compression: None,
             maps: Arc::new(eqproxy_core::maps::MapRegistry::new()),
         }
+    }
+
+    /// Response compression (B-N6/H6): gzip negotiated per request.
+    #[must_use]
+    pub fn with_compression(
+        mut self,
+        compression: crate::compression::ResolvedCompression,
+    ) -> Self {
+        self.compression = Some(compression);
+        self
     }
 
     /// Replaces the backend with a full one (multi-server, TLS, PROXY, …).
@@ -925,6 +942,14 @@ impl ResolvedListener {
         self
     }
 
+    /// Serves HTTP/3 over QUIC on the same address over UDP (B-H2).
+    /// Requires TLS and `http` mode (enforced by config validation).
+    #[must_use]
+    pub fn with_quic(mut self, quic: bool) -> Self {
+        self.quic = quic;
+        self
+    }
+
     /// PROXY v1 reception with origin allowlist (B-H9/B-E10).
     #[must_use]
     pub fn with_proxy_receive(mut self, allowlist: eqproxy_core::expectation::IpAllowlist) -> Self {
@@ -972,6 +997,31 @@ pub enum ProxyError {
     },
     #[error("listener \"{name}\" uses {addr}, already used by another listener")]
     DuplicateListener { name: String, addr: SocketAddr },
+    #[error("listener \"{name}\": could not open the QUIC endpoint on {addr} (UDP): {source}")]
+    QuicBind {
+        name: String,
+        addr: SocketAddr,
+        source: io::Error,
+    },
+    #[error("listener \"{name}\": invalid QUIC configuration: {reason}")]
+    QuicConfig { name: String, reason: String },
+    #[error(
+        "listener \"{name}\": changing the TLS material of a live QUIC endpoint needs a process restart; the running config keeps serving"
+    )]
+    QuicTlsReload { name: String },
+}
+
+/// What a hot swap prepared for one listener: a kept TCP socket (whose QUIC
+/// endpoint may start) or a fresh socket with its already-bound UDP side.
+/// Everything fallible happens in phase 1 (fail-closed).
+enum PreparedSocket {
+    Kept {
+        start_quic: Option<quinn::Endpoint>,
+    },
+    Fresh {
+        listener: TcpListener,
+        endpoint: Option<quinn::Endpoint>,
+    },
 }
 
 /// Why the stream to the backend could not open.
@@ -1090,10 +1140,10 @@ pub struct LocalResponse {
 /// Current configuration of one listener, shared between its accept loop
 /// (read per accept) and the hot swap (write). Established connections
 /// keep the `ResolvedListener` they were accepted with (drain).
-type SharedCfg = Arc<RwLock<Arc<ResolvedListener>>>;
+pub(crate) type SharedCfg = Arc<RwLock<Arc<ResolvedListener>>>;
 
 /// The config in force right now (poison-recovered lock).
-fn current_cfg(shared: &SharedCfg) -> Arc<ResolvedListener> {
+pub(crate) fn current_cfg(shared: &SharedCfg) -> Arc<ResolvedListener> {
     Arc::clone(
         &shared
             .read()
@@ -1112,6 +1162,25 @@ struct Entry {
     cfg: SharedCfg,
     stop: ShutdownHandle,
     task: JoinHandle<()>,
+    /// HTTP/3 endpoint (B-H2), when the listener serves QUIC.
+    quic: Option<QuicEntry>,
+}
+
+/// The UDP side of one listener: QUIC endpoint + h3 accept task. Dropping
+/// it stops the task and sends CONNECTION_CLOSE to every live connection.
+struct QuicEntry {
+    /// A second handle so a stop closes the endpoint immediately instead of
+    /// waiting for the accept loop to drop its own clone.
+    endpoint: quinn::Endpoint,
+    stop: ShutdownHandle,
+    task: JoinHandle<()>,
+}
+
+impl Drop for QuicEntry {
+    fn drop(&mut self) {
+        self.stop.trigger();
+        self.endpoint.close(0u32.into(), b"listener stopped");
+    }
 }
 
 impl Drop for Entry {
@@ -1179,7 +1248,13 @@ pub async fn bind(
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|source| ProxyError::Bind { name, addr, source })?;
-        entries.push(make_entry(cfg, listener, Arc::clone(&metrics)));
+        let endpoint = if cfg.quic {
+            let local = listener.local_addr().unwrap_or(addr);
+            Some(open_quic(&cfg, local)?)
+        } else {
+            None
+        };
+        entries.push(make_entry(cfg, listener, endpoint, Arc::clone(&metrics)));
     }
     let (bg_stop, _bg_shutdown) = eqproxy_core::shutdown::channel();
     let mut proxy = BoundProxy {
@@ -1205,7 +1280,12 @@ impl BoundProxy {
 }
 
 /// One entry: socket + shared config + its accept loop task.
-fn make_entry(cfg: ResolvedListener, listener: TcpListener, metrics: Arc<Metrics>) -> Entry {
+fn make_entry(
+    cfg: ResolvedListener,
+    listener: TcpListener,
+    endpoint: Option<quinn::Endpoint>,
+    metrics: Arc<Metrics>,
+) -> Entry {
     let listen = cfg.listen;
     let local = listener.local_addr().unwrap_or(listen);
     let name = cfg.name.clone();
@@ -1215,14 +1295,64 @@ fn make_entry(cfg: ResolvedListener, listener: TcpListener, metrics: Arc<Metrics
     let task = tokio::spawn(accept_loop(
         Arc::clone(&listener),
         Arc::clone(&shared),
-        name,
-        metrics,
+        name.clone(),
+        Arc::clone(&metrics),
         shutdown,
     ));
+    let quic = endpoint.map(|endpoint| spawn_quic(Arc::clone(&shared), endpoint, name, metrics));
     Entry {
         listen,
         local,
         cfg: shared,
+        stop,
+        task,
+        quic,
+    }
+}
+
+/// Opens the QUIC endpoint on the listener's real address: HTTP/3 is UDP on
+/// the same IP and port as the TCP socket (never a second, implicit port).
+/// Building the QUIC server config from the listener TLS is where a TLS 1.3
+/// problem surfaces, before anything accepts a datagram.
+fn open_quic(cfg: &ResolvedListener, local: SocketAddr) -> Result<quinn::Endpoint, ProxyError> {
+    let name = cfg.name.clone();
+    let server_tls = cfg
+        .server_tls
+        .as_ref()
+        .ok_or_else(|| ProxyError::QuicConfig {
+            name: name.clone(),
+            reason: "quic = true needs [listener.<name>.tls]".to_owned(),
+        })?;
+    let server = server_tls
+        .quic_server_config(cfg.idle_timeout)
+        .map_err(|err| ProxyError::QuicConfig {
+            name: name.clone(),
+            reason: err.to_string(),
+        })?;
+    quinn::Endpoint::server(server, local).map_err(|source| ProxyError::QuicBind {
+        name,
+        addr: local,
+        source,
+    })
+}
+
+/// Starts the h3 accept loop for one endpoint.
+fn spawn_quic(
+    shared: SharedCfg,
+    endpoint: quinn::Endpoint,
+    name: String,
+    metrics: Arc<Metrics>,
+) -> QuicEntry {
+    let (stop, shutdown) = eqproxy_core::shutdown::channel();
+    let task = tokio::spawn(crate::http3::serve_endpoint(
+        endpoint.clone(),
+        shared,
+        name,
+        metrics,
+        shutdown,
+    ));
+    QuicEntry {
+        endpoint,
         stop,
         task,
     }
@@ -1261,23 +1391,50 @@ impl BoundProxy {
         }
 
         // Phase 1 — prepare resources: bind what we do not hold yet.
-        // `None` = the socket is kept. On failure nothing has mutated.
-        let mut prepared: Vec<(ResolvedListener, Option<TcpListener>)> = Vec::new();
+        // `Kept` = the TCP socket stays; its QUIC endpoint may still start or
+        // stop. On failure nothing has mutated.
+        let mut prepared: Vec<(ResolvedListener, PreparedSocket)> = Vec::new();
         for cfg in listeners {
             let kept = self
                 .entries
                 .iter()
-                .any(|e| e.listen == cfg.listen && current_cfg(&e.cfg).name == cfg.name);
-            if kept {
-                prepared.push((cfg, None));
+                .find(|e| e.listen == cfg.listen && current_cfg(&e.cfg).name == cfg.name);
+            let Some(entry) = kept else {
+                let name = cfg.name.clone();
+                let addr = cfg.listen;
+                let listener = match TcpListener::bind(addr).await {
+                    Ok(listener) => listener,
+                    Err(source) => return Err(ProxyError::Bind { name, addr, source }),
+                };
+                let local = listener.local_addr().unwrap_or(addr);
+                let endpoint = if cfg.quic {
+                    Some(open_quic(&cfg, local)?)
+                } else {
+                    None
+                };
+                prepared.push((cfg, PreparedSocket::Fresh { listener, endpoint }));
                 continue;
-            }
-            let name = cfg.name.clone();
-            let addr = cfg.listen;
-            match TcpListener::bind(addr).await {
-                Ok(listener) => prepared.push((cfg, Some(listener))),
-                Err(source) => return Err(ProxyError::Bind { name, addr, source }),
-            }
+            };
+            // A live QUIC endpoint froze its TLS material when it was built:
+            // a certificate/key/ALPN/mTLS change cannot be applied to it, and
+            // silently serving the old one would diverge from the TCP side.
+            // Fail closed (the running config keeps serving) until restart.
+            let running = current_cfg(&entry.cfg);
+            let start_quic = if !cfg.quic {
+                None
+            } else if running.quic {
+                let old = running.server_tls.as_ref().map(tls::ServerTls::fingerprint);
+                let new = cfg.server_tls.as_ref().map(tls::ServerTls::fingerprint);
+                if old != new {
+                    return Err(ProxyError::QuicTlsReload {
+                        name: cfg.name.clone(),
+                    });
+                }
+                None
+            } else {
+                Some(open_quic(&cfg, entry.local)?)
+            };
+            prepared.push((cfg, PreparedSocket::Kept { start_quic }));
         }
 
         // Phase 2 — commit: only infallible steps from here on.
@@ -1286,10 +1443,13 @@ impl BoundProxy {
             added: 0,
             removed: 0,
         };
-        // Stop what is not kept (the Drop impl stops the accept loop).
+        // Stop what is not kept (the Drop impl stops the accept loop and
+        // closes the QUIC endpoint).
         self.entries.retain(|e| {
-            let kept = prepared.iter().any(|(cfg, fresh)| {
-                fresh.is_none() && cfg.listen == e.listen && cfg.name == current_cfg(&e.cfg).name
+            let kept = prepared.iter().any(|(cfg, prepared)| {
+                matches!(prepared, PreparedSocket::Kept { .. })
+                    && cfg.listen == e.listen
+                    && cfg.name == current_cfg(&e.cfg).name
             });
             if kept {
                 true
@@ -1298,25 +1458,50 @@ impl BoundProxy {
                 false
             }
         });
-        for (cfg, fresh) in prepared {
+        for (cfg, prepared) in prepared {
             let name = cfg.name.clone();
-            match fresh {
-                None => {
+            match prepared {
+                PreparedSocket::Kept { start_quic } => {
                     // Kept socket: swap the config new connections see.
                     let entry = self
                         .entries
                         .iter_mut()
                         .find(|e| e.listen == cfg.listen && current_cfg(&e.cfg).name == name)
                         .expect("kept entry present (phase 1 matched it)");
-                    *entry
-                        .cfg
-                        .write()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(cfg);
+                    let stop_quic = current_cfg(&entry.cfg).quic && !cfg.quic;
+                    if let Some(endpoint) = start_quic {
+                        // The endpoint reads the new config from the shared
+                        // slot for every connection it accepts.
+                        *entry
+                            .cfg
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(cfg);
+                        entry.quic = Some(spawn_quic(
+                            Arc::clone(&entry.cfg),
+                            endpoint,
+                            name,
+                            Arc::clone(&self.metrics),
+                        ));
+                    } else {
+                        *entry
+                            .cfg
+                            .write()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(cfg);
+                        if stop_quic {
+                            // Dropping the QUIC entry stops its loop, sends
+                            // CONNECTION_CLOSE and releases the UDP port.
+                            entry.quic = None;
+                        }
+                    }
                     summary.kept += 1;
                 }
-                Some(listener) => {
-                    self.entries
-                        .push(make_entry(cfg, listener, Arc::clone(&self.metrics)));
+                PreparedSocket::Fresh { listener, endpoint } => {
+                    self.entries.push(make_entry(
+                        cfg,
+                        listener,
+                        endpoint,
+                        Arc::clone(&self.metrics),
+                    ));
                     summary.added += 1;
                 }
             }
@@ -1433,19 +1618,30 @@ impl BoundProxy {
             }
         }
 
-        // Accept loops return instantly on the triggered signal.
+        // Accept loops return instantly on the triggered signal; QUIC
+        // connections receive an explicit CONNECTION_CLOSE.
         for entry in &self.entries {
             entry.stop.trigger();
+            if let Some(quic) = &entry.quic {
+                quic.stop.trigger();
+                quic.endpoint.close(0u32.into(), b"shutdown");
+            }
         }
         self.bg_stop.trigger();
         let _ = tokio::time::timeout(grace, async {
             for entry in &mut self.entries {
                 let _ = (&mut entry.task).await;
+                if let Some(quic) = &mut entry.quic {
+                    let _ = (&mut quic.task).await;
+                }
             }
         })
         .await;
         for entry in &mut self.entries {
             entry.task.abort();
+            if let Some(quic) = &entry.quic {
+                quic.task.abort();
+            }
         }
         self.bg_tasks.abort_all();
 
@@ -1519,8 +1715,15 @@ async fn accept_loop(
 }
 
 /// RAII guard: releases the connection slot no matter what.
-struct ConnectionGuard {
+pub(crate) struct ConnectionGuard {
     metrics: Arc<Metrics>,
+}
+
+impl ConnectionGuard {
+    /// Takes ownership of an already-acquired slot (TCP and QUIC both use it).
+    pub(crate) fn new(metrics: Arc<Metrics>) -> Self {
+        Self { metrics }
+    }
 }
 
 impl Drop for ConnectionGuard {
@@ -1548,6 +1751,55 @@ fn select_server<'a>(
         .balancer
         .pick_pinned_tracked(preferred, exclude)
         .ok_or(OutboundError::NoServer)
+}
+
+/// Selects a server, waiting in the backend's bounded queue when nothing is
+/// up (`tried` carries the exclusion list). One implementation for every
+/// outbound path: the HTTP exchange and the gRPC pass-through must queue,
+/// count and reject the same way.
+async fn pick_server<'a>(
+    backend: &'a ResolvedBackend,
+    tried: &[SocketAddr],
+    preferred: Option<SocketAddr>,
+    metrics: &Arc<Metrics>,
+) -> Result<(SocketAddr, ActiveGuard<'a>), OutboundError> {
+    match select_server(backend, tried, preferred) {
+        Ok(picked) => Ok(picked),
+        Err(OutboundError::NoServer) if !tried.is_empty() => {
+            // Every candidate already failed this exchange: the class is
+            // "the chosen server failed" (HTTP → 502), not "nothing up".
+            Err(OutboundError::Connect)
+        }
+        Err(OutboundError::NoServer) => {
+            // Nothing up/drained now: bounded queue (B-H7) or reject.
+            let Some(queue) = &backend.queue else {
+                metrics.no_available_server.fetch_add(1, Ordering::Relaxed);
+                return Err(OutboundError::NoServer);
+            };
+            let Some(_permit) = queue.enter() else {
+                metrics.queue_full.fetch_add(1, Ordering::Relaxed);
+                return Err(OutboundError::QueueFull);
+            };
+            let deadline = tokio::time::Instant::now() + queue.settings.timeout;
+            let result = tokio::time::timeout_at(deadline, async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    if let Ok(picked) = select_server(backend, &[], preferred) {
+                        return picked;
+                    }
+                }
+            })
+            .await;
+            match result {
+                Ok(picked) => Ok(picked),
+                Err(_) => {
+                    metrics.queue_timeout.fetch_add(1, Ordering::Relaxed);
+                    Err(OutboundError::QueueTimeout)
+                }
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// Stable-enough hash of the client IP for source affinity (B-N13).
@@ -1639,43 +1891,7 @@ async fn dial_with_retries<'a>(
         // The pick holds one in-flight slot (B-H5); it is released with
         // the guard when the attempt fails and travels with the
         // connection on success.
-        let (addr, active) = match select_server(backend, &tried, preferred) {
-            Ok(picked) => picked,
-            Err(OutboundError::NoServer) if !tried.is_empty() => {
-                // Every candidate already failed this exchange: the class is
-                // "the chosen server failed" (HTTP → 502), not "nothing up".
-                return Err(OutboundError::Connect);
-            }
-            Err(OutboundError::NoServer) => {
-                // Nothing up/drained now: bounded queue (B-H7) or reject.
-                let Some(queue) = &backend.queue else {
-                    metrics.no_available_server.fetch_add(1, Ordering::Relaxed);
-                    return Err(OutboundError::NoServer);
-                };
-                let Some(_permit) = queue.enter() else {
-                    metrics.queue_full.fetch_add(1, Ordering::Relaxed);
-                    return Err(OutboundError::QueueFull);
-                };
-                let deadline = tokio::time::Instant::now() + queue.settings.timeout;
-                let result = tokio::time::timeout_at(deadline, async {
-                    loop {
-                        tokio::time::sleep(Duration::from_millis(50)).await;
-                        if let Ok(picked) = select_server(backend, &[], preferred) {
-                            return picked;
-                        }
-                    }
-                })
-                .await;
-                match result {
-                    Ok(picked) => picked,
-                    Err(_) => {
-                        metrics.queue_timeout.fetch_add(1, Ordering::Relaxed);
-                        return Err(OutboundError::QueueTimeout);
-                    }
-                }
-            }
-            Err(err) => return Err(err),
-        };
+        let (addr, active) = pick_server(backend, &tried, preferred, metrics).await?;
 
         // --- Pool reuse first (A16), first attempt only ---
         // HTTP/2 has no byte-stream connection to pool: its exchanges take a
@@ -1687,6 +1903,12 @@ async fn dial_with_retries<'a>(
             && tried.is_empty()
             && let Some((read, write)) = backend.pool.checkout(&addr, Instant::now())
         {
+            // The pool sizes its idle cap from the concurrency it sees while
+            // a connection is borrowed (never at check-in, which would race a
+            // burst that is still starting up).
+            backend
+                .pool
+                .note_in_flight(addr, active.in_flight() as usize);
             metrics
                 .backend_connections_reused
                 .fetch_add(1, Ordering::Relaxed);
@@ -1719,6 +1941,11 @@ async fn dial_with_retries<'a>(
         .await
         {
             Ok((read, write, opened)) => {
+                if !h2 {
+                    backend
+                        .pool
+                        .note_in_flight(addr, active.in_flight() as usize);
+                }
                 if opened {
                     metrics
                         .backend_connections_opened
@@ -1973,39 +2200,166 @@ async fn open_h2_exchange(
         proxy_protocol: backend.proxy_protocol,
         metrics: Arc::clone(metrics),
     });
-    if let Some(session) = hub.lookup(addr) {
-        let (read, write) = stream_on_session(
-            &session,
-            Arc::clone(&dialer),
-            name,
-            addr,
-            peer,
-            idle,
-            metrics,
-        )?;
-        return Ok((read, write, false));
-    }
+    let (session, opened) = session_for(hub, &dialer, addr).await?;
+    let (read, write) = stream_on_session(&session, dialer, name, addr, peer, idle, metrics)?;
+    Ok((read, write, opened))
+}
 
+/// The live session of `addr`, or the single handshake that installs it.
+///
+/// The per-address gate is what makes multiplexing hold under concurrency:
+/// exchanges that arrive while the first handshake is in flight wait for it
+/// and then share the session, instead of each dialing a connection of their
+/// own. A failed handshake releases the gate, so the waiters retry in turn
+/// (each bounded by `connect_timeout`) instead of all failing at once.
+async fn session_for(
+    hub: &Arc<backend_h2::Hub>,
+    dialer: &H2Dialer,
+    addr: SocketAddr,
+) -> Result<(Arc<backend_h2::Session>, bool), OutboundError> {
+    if let Some(session) = hub.lookup(addr) {
+        return Ok((session, false));
+    }
     let gate = hub.connect_gate(addr);
     let _handshake = gate.lock().await;
     // The exchange that held the gate may have installed the session while
     // this one waited.
     if let Some(session) = hub.lookup(addr) {
-        let (read, write) = stream_on_session(
-            &session,
-            Arc::clone(&dialer),
-            name,
+        return Ok((session, false));
+    }
+    let session = dialer.open_session().await?;
+    Ok((session, true))
+}
+
+/// One admitted gRPC exchange on a backend HTTP/2 session.
+///
+/// Both halves of the stream stay open at once: `send` accepts the client's
+/// DATA/trailers while `response` waits for the backend's HEADERS, so a
+/// bidirectional stream never waits for its own other direction.
+pub(crate) struct GrpcStream<'a> {
+    /// Request direction of the stream.
+    pub send: h2::SendStream<bytes::Bytes>,
+    /// Response HEADERS of the same stream.
+    pub response: h2::client::ResponseFuture,
+    /// Keeps the session from closing while the stream runs.
+    _slot: backend_h2::ExchangeSlot,
+    /// Holds the leastconn in-flight slot until the exchange ends.
+    _active: ActiveGuard<'a>,
+}
+
+/// Opens one gRPC stream on the backend's HTTP/2 session: server selection,
+/// the single-flight handshake, and the request HEADERS. The caller keeps the
+/// request body and relays both directions; nothing here buffers the stream.
+///
+/// Retry rule is the HTTP one (B-H7): only connect-phase failures before the
+/// stream exists are retried, and only when the backend's policy allows it. A
+/// stream the peer refused after opening it is never replayed, because a gRPC
+/// exchange is not idempotent.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn open_grpc_stream<'a>(
+    cfg: &ResolvedListener,
+    backend: &'a ResolvedBackend,
+    peer: SocketAddr,
+    local: SocketAddr,
+    metrics: &Arc<Metrics>,
+    request: http::Request<()>,
+    end_of_stream: bool,
+    affinity_cookie: Option<&str>,
+) -> Result<GrpcStream<'a>, OutboundError> {
+    let Some(hub) = &backend.h2 else {
+        // Callers only take this path for an h2 backend; a config that lost
+        // the hub is a connect-phase failure, never an h1 fallback here.
+        return Err(OutboundError::Connect);
+    };
+    let preferred = match backend.affinity.as_ref().map(|affinity| affinity.mode) {
+        Some(AffinityMode::Cookie) => affinity_cookie
+            .and_then(|token| token.parse::<usize>().ok())
+            .and_then(|idx| backend.balancer.addr_of_slot(idx)),
+        Some(AffinityMode::Source) => {
+            let count = backend.balancer.slot_count();
+            (count > 0)
+                .then(|| {
+                    backend
+                        .balancer
+                        .addr_of_slot(affinity_hash(peer.ip()) % count)
+                })
+                .flatten()
+        }
+        None => None,
+    };
+    let max_attempts = if backend.retries.allows(false) {
+        backend.retries.max
+    } else {
+        0
+    };
+    let mut tried: Vec<SocketAddr> = Vec::new();
+    loop {
+        let (addr, active) = pick_server(backend, &tried, preferred, metrics).await?;
+        let dialer = Arc::new(H2Dialer {
+            hub: Arc::clone(hub),
+            name: cfg.name.clone(),
             addr,
             peer,
-            idle,
-            metrics,
-        )?;
-        return Ok((read, write, false));
+            local,
+            connect: cfg.connect_timeout,
+            idle: cfg.idle_timeout,
+            tls: backend.tls.clone(),
+            proxy_protocol: backend.proxy_protocol,
+            metrics: Arc::clone(metrics),
+        });
+        let reached = session_for(hub, &dialer, addr).await;
+        let (session, opened) = match reached {
+            Ok(pair) => pair,
+            Err(OutboundError::Connect) => {
+                tried.push(addr);
+                report_passive(backend, addr);
+                if tried.len() as u32 > max_attempts {
+                    return Err(OutboundError::Connect);
+                }
+                metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
+        let Some((slot, mut send_request)) = session.enter() else {
+            // The session closed between the lookup and the admission.
+            tried.push(addr);
+            report_passive(backend, addr);
+            if tried.len() as u32 > max_attempts {
+                return Err(OutboundError::Connect);
+            }
+            metrics.retry_attempts.fetch_add(1, Ordering::Relaxed);
+            continue;
+        };
+        match send_request.send_request(request.clone(), end_of_stream) {
+            Ok((response, send)) => {
+                if opened {
+                    metrics
+                        .backend_connections_opened
+                        .fetch_add(1, Ordering::Relaxed);
+                } else {
+                    metrics
+                        .backend_connections_reused
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                return Ok(GrpcStream {
+                    send,
+                    response,
+                    _slot: slot,
+                    _active: active,
+                });
+            }
+            Err(err) => {
+                // The stream never existed: nothing reached the server, so
+                // this is a connect-phase failure, reported explicitly.
+                eprintln!(
+                    "WARN [{}] could not open a gRPC stream to {} (peer {peer}): {err}",
+                    cfg.name, addr
+                );
+                return Err(OutboundError::Connect);
+            }
+        }
     }
-
-    let session = dialer.open_session().await?;
-    let (read, write) = stream_on_session(&session, dialer, name, addr, peer, idle, metrics)?;
-    Ok((read, write, true))
 }
 
 /// Opens the exchange pipe on a live session; a failure here means the
@@ -2212,9 +2566,7 @@ async fn handle_connection(
     cfg: Arc<ResolvedListener>,
     metrics: Arc<Metrics>,
 ) {
-    let _guard = ConnectionGuard {
-        metrics: Arc::clone(&metrics),
-    };
+    let _guard = ConnectionGuard::new(Arc::clone(&metrics));
     let _ = client.set_nodelay(true);
     let local = client.local_addr().unwrap_or(cfg.listen);
 

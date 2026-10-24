@@ -2,7 +2,7 @@
 #
 # Usage:
 #   docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
-#     --tag ghcr.io/exyonq/eqproxy:0.6.3 --tag ghcr.io/exyonq/eqproxy:latest \
+#     --tag ghcr.io/exyonq/eqproxy:0.7.0 --tag ghcr.io/exyonq/eqproxy:latest \
 #     --provenance=mode=max --sbom=true --push .
 #
 # The binary runs with `docker run ghcr.io/exyonq/eqproxy --help`.
@@ -10,15 +10,15 @@
 #   docker buildx build --file docker/Dockerfile --target export \
 #     --platform linux/amd64 --output type=local,dest=docker-out-amd64 .
 #
-# Runtime base is `scratch` (v0.6.3): the release binary is linked against
-# musl and is fully static, so the published image carries **no** OS
-# packages — no shell, no package manager, no perl/openssl/util-linux from a
-# Debian base. Docker Scout scanned the previous Debian-bookworm-slim image
-# with 4 critical + 13 high findings, all inherited from that base and none
-# in EQProxy; this removes the source instead of hiding the count. The only
-# files in the image are the binary, a CA bundle for operators that point
+# Runtime base is **Wolfi** (`cgr.dev/chainguard/wolfi-base`, pinned by index
+# digest; ADR-0016). The release binary is still linked against musl and is
+# fully static (enforced by the `file` gate below), so it does not use the
+# Wolfi libc; the distro supplies the CA bundle for operators that point
 # `ca_file` at the system trust store (default verification uses the
-# compiled-in Mozilla roots) and the writable state directory below.
+# compiled-in Mozilla roots), the `nonroot` user (65532) and a shell for
+# `docker exec` debugging. The previous base was `scratch` (0 packages);
+# Wolfi trades that for debuggability and must keep Scout at 0 critical/0
+# high, which the release workflow gates on before promoting the digest.
 ARG RUST_VERSION=1.97
 
 FROM rust:${RUST_VERSION}-alpine AS builder
@@ -61,19 +61,16 @@ RUN cargo build --release --locked -p eqproxy-cli \
 FROM scratch AS export
 COPY --from=builder /opt/eqproxy /eqproxy
 
-# State directory for `config apply`/`config rollback` (v0.6.3). The
-# default `./.eqproxy` resolves to `/` in this image, which uid 65532 cannot
-# write, so the documented offline state commands used to fail with
-# "Permission denied" inside the container. It is created here (scratch has
-# no RUN) and mounted as a volume by operators that want it to survive a
-# container replacement.
-FROM builder AS state
-RUN mkdir -p /var/lib/eqproxy && chown 65532:65532 /var/lib/eqproxy
-
-# Minimal runtime (default stage): no OS packages at all, unprivileged user.
-FROM scratch AS runtime
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
-COPY --from=state --chown=65532:65532 /var/lib/eqproxy /var/lib/eqproxy
+# Runtime (default stage): Wolfi base, static binary, unprivileged user.
+#
+# State directory for `config apply`/`config rollback` (v0.6.3). The default
+# `./.eqproxy` resolves to `/` here, which uid 65532 cannot write, so the
+# documented offline state commands used to fail with "Permission denied"
+# inside the container. It is created here and mounted as a volume by
+# operators that want it to survive a container replacement.
+FROM cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7 AS runtime
+RUN mkdir -p /var/lib/eqproxy \
+    && chown 65532:65532 /var/lib/eqproxy
 COPY --from=builder /opt/eqproxy /opt/eqproxy
 ENV EQPROXY_STATE_DIR=/var/lib/eqproxy
 USER 65532:65532

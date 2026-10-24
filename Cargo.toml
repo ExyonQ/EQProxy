@@ -3,7 +3,7 @@ resolver = "2"
 members = ["eqproxy-core", "eqproxy-config", "eqproxy-net", "eqproxy-cli"]
 
 [workspace.package]
-version = "0.6.3"
+version = "0.7.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["The EQProxy Authors"]

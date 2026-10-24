@@ -1,0 +1,8 @@
+{"session_opened": 1}
+{"t": 1792698663.662, "connection": 1, "stream": 1, "method": "GET", "path": "/echo", "x_req": "replay-me", "content_length": null}
+{"t": 1792698663.662, "connection": 1, "stream": 1, "x_req": "replay-me", "refused": true}
+{"session_opened": 2}
+{"session_closed": 1}
+{"t": 1792698663.671, "connection": 2, "stream": 1, "method": "GET", "path": "/echo", "x_req": "replay-me", "content_length": null}
+{"t": 1792698663.671, "connection": 2, "stream": 1, "x_req": "replay-me", "phase": "answered"}
+{"session_closed": 2}

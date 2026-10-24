@@ -1,0 +1,135 @@
+{
+  "scenario": "S-H2-02",
+  "product": "haproxy",
+  "rep": 4,
+  "order_index": 0,
+  "url": "https://haproxy:19443/1048576",
+  "started_utc": "2026-10-23T20:12:30Z",
+  "ended_utc": "2026-10-23T20:12:49Z",
+  "wall_seconds": 18.406,
+  "host_load_average": [
+    12.67,
+    7.98,
+    7.07
+  ],
+  "upstream_connections_opened": 108,
+  "generator": {
+    "mode": "load",
+    "target": "https://haproxy:19443/1048576",
+    "conns": 4,
+    "streams": 8,
+    "payload_bytes": 1048576,
+    "warmup_s": 3,
+    "duration_s": 15,
+    "wall_s": 18.01231336,
+    "requests": 28835,
+    "ok": 28835,
+    "errors": 0,
+    "status_codes": {
+      "200": 28835
+    },
+    "proto": "HTTP/2.0",
+    "bytes": 25476202496,
+    "rps": 1619.723122166845,
+    "mib_per_sec": 1619.723122166845,
+    "latency_ms": {
+      "count": 24296,
+      "min": 2.704851,
+      "p50": 20.149608,
+      "p95": 29.521072,
+      "p99": 34.020461,
+      "max": 55.883172,
+      "mean": 19.751202948509903,
+      "histogram": [
+        {
+          "upper_ms": 0.5,
+          "count": 0
+        },
+        {
+          "upper_ms": 1,
+          "count": 0
+        },
+        {
+          "upper_ms": 2,
+          "count": 0
+        },
+        {
+          "upper_ms": 3,
+          "count": 5
+        },
+        {
+          "upper_ms": 5,
+          "count": 64
+        },
+        {
+          "upper_ms": 7.5,
+          "count": 400
+        },
+        {
+          "upper_ms": 10,
+          "count": 1013
+        },
+        {
+          "upper_ms": 15,
+          "count": 4481
+        },
+        {
+          "upper_ms": 20,
+          "count": 5978
+        },
+        {
+          "upper_ms": 30,
+          "count": 11322
+        },
+        {
+          "upper_ms": 50,
+          "count": 1031
+        },
+        {
+          "upper_ms": 75,
+          "count": 2
+        },
+        {
+          "upper_ms": 100,
+          "count": 0
+        },
+        {
+          "upper_ms": 200,
+          "count": 0
+        },
+        {
+          "upper_ms": 500,
+          "count": 0
+        },
+        {
+          "upper_ms": 0,
+          "count": 0
+        }
+      ]
+    },
+    "sanity": "ok",
+    "generator_cpu_seconds": 66566.928,
+    "generator_cpu_pct_one_core": 369.5163716751976
+  },
+  "resources": {
+    "proxy": {
+      "cpu_percent_one_core": 240.4,
+      "cpu_seconds": 44.242,
+      "memory_bytes": 31883264,
+      "memory_peak_bytes": 51957760
+    },
+    "origin": {
+      "cpu_percent_one_core": 61.4,
+      "cpu_seconds": 11.295,
+      "memory_bytes": 27336704,
+      "memory_peak_bytes": 47435776
+    },
+    "sink": {
+      "cpu_percent_one_core": 0.1,
+      "cpu_seconds": 0.026,
+      "memory_bytes": 30388224,
+      "memory_peak_bytes": 44617728
+    }
+  },
+  "valid": true
+}

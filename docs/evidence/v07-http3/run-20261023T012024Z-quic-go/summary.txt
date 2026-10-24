@@ -1,0 +1,21 @@
+HTTP/3 (B-H2) E2E — FAIL
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+sha256: f1d0aecb0ea1b3fbeec081ddd8661ae786fbeeb08038cee39787b8916ceb3982
+client: github.com/quic-go/quic-go v0.64.1 (independent QUIC + h3 implementation)
+config: /Volumes/Lexar/Cursor/EQProxy/docs/evidence/v07-http3/run-20261023T012024Z-quic-go/eqproxy.toml
+plan exit: 0
+proxy exit: 0 in 12.50s
+
+journeys:
+  get              status=200 body=17B trailers={}
+  post_streaming   status=200 body=12B trailers={}
+  chunked_trailers status=200 body=13B trailers={'X-Origin': ['yes']}
+  compression      status=200 body=44B trailers={}
+  direct_rule      status=418 body=13B trailers={}
+
+origin saw 4 request(s)
+metrics: METRICS client[accepted=1 active=0 completed=1 rejected_maxconn=0 protocol_errors=0] proxy[no_server=0 queue_full=0 queue_timeout=0 retries=0 local_responses=0 redirects=0 direct=1] network[idle_timeouts=0 bytes_c2b=262144 bytes_b2c=106] backend[connect_failures=0 tls_failures=0 discarded=0 reused=0 opened=4 proxied=4] phases[header_timeouts=0] proxy_proto[denied=0 invalid=0] cfg[reloads=0 reload_failures=0 last_swap_us=0] auth[denied=0 service_errors=0] dns[ok=0 failures=0 updates=0] maps[reloads=0 failures=0] mirror[sent=0 failures=0 skipped=0] h2[sessions_idle_closed=0 goaway=0 refused_retried=0] grpc[streams=0 errors=0] ws[tunnels=0 failures=0] compression[gzip=2 brotli=0 bytes_in=8205 bytes_out=77] (final)
+
+failures: GET /trailers: 200 {'X-Origin': ['yes']}; GET /compress: status=200 encoding='' plain=8192; h3 :authority did not become host
+
+not covered here: WebSocket/Extended CONNECT over h3, gRPC over h3, interim 1xx responses (h3 0.0.8 has no informational frame), 0-RTT, connection migration.

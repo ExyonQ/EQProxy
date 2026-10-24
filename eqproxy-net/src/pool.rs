@@ -11,10 +11,18 @@
 //! else drops the connection. A pooled connection is therefore byte-aligned
 //! at a message boundary when checked out.
 //!
-//! Bounds: at most [`MAX_IDLE_PER_SERVER`] idle connections per server and
-//! an idle expiry ([`DEFAULT_POOL_IDLE_TIMEOUT`]); excess and stale
-//! connections are dropped, never queued without limit. A poisoned lock is
-//! recovered (never panics), treating the pool as momentarily empty.
+//! Sizing: the idle cap per server follows the peak concurrency the balancer
+//! reports when a connection is borrowed (`note_in_flight`). A burst of N
+//! concurrent exchanges therefore parks up to N idle connections instead of
+//! the floor of [`IDLE_FLOOR_PER_SERVER`], which is what stopped the h1 pool
+//! from re-dialling every request once a workload kept more than 64
+//! exchanges open (measured at 400 streams in flight: ~28 000 backend
+//! connections per benchmark cell). The cap is clamped to
+//! [`IDLE_CEILING_PER_SERVER`] so a pathological workload cannot pin sockets
+//! without limit. An idle expiry ([`DEFAULT_POOL_IDLE_TIMEOUT`]) still
+//! releases what the burst left behind; excess and stale connections are
+//! dropped, never queued without limit. A poisoned lock is recovered (never
+//! panics), treating the pool as momentarily empty.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -26,8 +34,15 @@ use tokio::io::BufReader;
 
 use crate::proxy::{BoxRead, BoxWrite};
 
-/// Idle cap per backend server: burst headroom without unbounded memory.
-pub const MAX_IDLE_PER_SERVER: usize = 64;
+/// Idle floor per backend server: burst headroom even when no concurrency
+/// was observed (a cold workload still keeps some keep-alive headroom).
+pub const IDLE_FLOOR_PER_SERVER: usize = 64;
+
+/// Idle ceiling per backend server: the adaptive cap never grows past this,
+/// so one workload cannot pin an unbounded number of sockets and file
+/// descriptors. Above it the pool falls back to the pre-existing behaviour
+/// (the excess is dropped on check-in and re-dialled later).
+pub const IDLE_CEILING_PER_SERVER: usize = 4096;
 
 /// How long an idle backend connection is kept. Under typical origin
 /// keep-alive timeouts (60–75 s); a server-side idle close racing a checkout
@@ -41,31 +56,46 @@ pub struct IdleConn {
     idle_since: Instant,
 }
 
+/// Idle queue of one server plus the peak concurrency observed on it.
+#[derive(Default)]
+struct ServerPool {
+    idle: VecDeque<IdleConn>,
+    /// Most exchanges the balancer ever reported in flight on this server
+    /// (this one included), which is what the idle cap follows.
+    peak_in_flight: usize,
+}
+
 /// Per-server idle queues, shared across listeners of the same backend.
 pub struct Pool {
-    inner: Mutex<HashMap<SocketAddr, VecDeque<IdleConn>>>,
-    max_idle_per_server: usize,
+    inner: Mutex<HashMap<SocketAddr, ServerPool>>,
+    /// Idle cap when no concurrency is observed (see
+    /// [`IDLE_FLOOR_PER_SERVER`]).
+    floor: usize,
+    /// Hard cap the adaptive sizing never exceeds ([`IDLE_CEILING_PER_SERVER`]).
+    ceiling: usize,
     idle_timeout: Duration,
 }
 
 impl Pool {
-    /// Pool with explicit bounds (production uses the module defaults).
+    /// Pool with an explicit floor and expiry (production uses the module
+    /// defaults). The ceiling stays at [`IDLE_CEILING_PER_SERVER`].
     #[must_use]
     pub fn new(max_idle_per_server: usize, idle_timeout: Duration) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
-            max_idle_per_server,
+            floor: max_idle_per_server,
+            ceiling: IDLE_CEILING_PER_SERVER.max(max_idle_per_server),
             idle_timeout,
         }
     }
 
-    /// Production defaults: bounded and expiring.
+    /// Production defaults: adaptive, bounded and expiring.
     #[must_use]
     pub fn with_defaults() -> Self {
-        Self::new(MAX_IDLE_PER_SERVER, DEFAULT_POOL_IDLE_TIMEOUT)
+        Self::new(IDLE_FLOOR_PER_SERVER, DEFAULT_POOL_IDLE_TIMEOUT)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SocketAddr, VecDeque<IdleConn>>> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<SocketAddr, ServerPool>> {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -80,7 +110,7 @@ impl Pool {
         now: Instant,
     ) -> Option<(BufReader<BoxRead>, BoxWrite)> {
         let mut inner = self.lock();
-        let queue = inner.get_mut(addr)?;
+        let queue = &mut inner.get_mut(addr)?.idle;
         while let Some(conn) = queue.pop_back() {
             if now.duration_since(conn.idle_since) > self.idle_timeout {
                 continue;
@@ -91,6 +121,17 @@ impl Pool {
             return Some((conn.read, conn.write));
         }
         None
+    }
+
+    /// Records how many exchanges are in flight on `addr` (this one
+    /// included) when a connection is borrowed, pooled or freshly dialled.
+    /// The idle cap follows the peak of that number: a connection that is
+    /// handed out during a burst is parked at check-in, not dropped and
+    /// re-dialled by the next wave.
+    pub fn note_in_flight(&self, addr: SocketAddr, in_flight: usize) {
+        let mut inner = self.lock();
+        let entry = inner.entry(addr).or_default();
+        entry.peak_in_flight = entry.peak_in_flight.max(in_flight);
     }
 
     /// Park a connection after a clean exchange. Silently drops when full,
@@ -106,11 +147,12 @@ impl Pool {
             return;
         }
         let mut inner = self.lock();
-        let queue = inner.entry(addr).or_default();
-        if queue.len() >= self.max_idle_per_server {
+        let entry = inner.entry(addr).or_default();
+        let cap = entry.peak_in_flight.clamp(self.floor, self.ceiling);
+        if entry.idle.len() >= cap {
             return;
         }
-        queue.push_back(IdleConn {
+        entry.idle.push_back(IdleConn {
             read,
             write,
             idle_since: now,
@@ -120,13 +162,19 @@ impl Pool {
     /// Idle connections held for `addr` (tests and diagnostics).
     #[must_use]
     pub fn idle_count(&self, addr: &SocketAddr) -> usize {
-        self.lock().get(addr).map_or(0, VecDeque::len)
+        self.lock().get(addr).map_or(0, |pool| pool.idle.len())
     }
 
     /// Total idle connections held (diagnostics).
     #[must_use]
     pub fn idle_total(&self) -> usize {
-        self.lock().values().map(VecDeque::len).sum()
+        self.lock().values().map(|pool| pool.idle.len()).sum()
+    }
+
+    /// Peak concurrency recorded for `addr` (tests and diagnostics).
+    #[must_use]
+    pub fn peak_in_flight(&self, addr: &SocketAddr) -> usize {
+        self.lock().get(addr).map_or(0, |pool| pool.peak_in_flight)
     }
 }
 
@@ -140,7 +188,8 @@ impl fmt::Debug for Pool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Pool")
             .field("idle_total", &self.idle_total())
-            .field("max_idle_per_server", &self.max_idle_per_server)
+            .field("floor", &self.floor)
+            .field("ceiling", &self.ceiling)
             .field("idle_timeout", &self.idle_timeout)
             .finish()
     }
@@ -175,6 +224,7 @@ mod tests {
         let now = Instant::now();
         assert!(pool.checkout(&addr(), now).is_none());
         let (read, write, _far) = pair();
+        pool.note_in_flight(addr(), 1);
         pool.checkin(addr(), read, write, now);
         assert_eq!(pool.idle_count(&addr()), 1);
         assert!(pool.checkout(&addr(), now).is_some());
@@ -182,9 +232,10 @@ mod tests {
     }
 
     #[test]
-    fn idle_cap_drops_excess() {
+    fn idle_cap_drops_excess_at_the_floor() {
         let pool = Pool::new(2, Duration::from_secs(60));
         let now = Instant::now();
+        pool.note_in_flight(addr(), 1);
         for _ in 0..5 {
             let (read, write, _far) = pair();
             pool.checkin(addr(), read, write, now);
@@ -192,10 +243,45 @@ mod tests {
         assert_eq!(pool.idle_count(&addr()), 2);
     }
 
+    /// A burst of concurrent exchanges raises the idle cap to the peak the
+    /// balancer reported: the connections that served the burst stay parked
+    /// and are reused, instead of being dropped and re-dialled by the next
+    /// wave (the churn measured at 400 streams in flight).
+    #[test]
+    fn idle_cap_follows_the_peak_in_flight() {
+        let pool = Pool::with_defaults();
+        let now = Instant::now();
+        pool.note_in_flight(addr(), 400);
+        for _ in 0..400 {
+            let (read, write, _far) = pair();
+            pool.checkin(addr(), read, write, now);
+        }
+        assert_eq!(
+            pool.idle_count(&addr()),
+            400,
+            "400 exchanges in flight must keep 400 connections, not 64"
+        );
+    }
+
+    /// The adaptive cap is clamped to the ceiling: an absurd concurrency
+    /// report cannot pin sockets without bound.
+    #[test]
+    fn idle_cap_never_exceeds_the_ceiling() {
+        let pool = Pool::with_defaults();
+        let now = Instant::now();
+        pool.note_in_flight(addr(), IDLE_CEILING_PER_SERVER + 100);
+        for _ in 0..(IDLE_CEILING_PER_SERVER + 100) {
+            let (read, write, _far) = pair();
+            pool.checkin(addr(), read, write, now);
+        }
+        assert_eq!(pool.idle_count(&addr()), IDLE_CEILING_PER_SERVER);
+    }
+
     #[test]
     fn stale_entries_are_never_handed_out() {
         let pool = Pool::new(4, Duration::from_millis(50));
         let (read, write, _far) = pair();
+        pool.note_in_flight(addr(), 1);
         pool.checkin(addr(), read, write, Instant::now());
         std::thread::sleep(Duration::from_millis(80));
         assert!(pool.checkout(&addr(), Instant::now()).is_none());
@@ -242,6 +328,7 @@ mod tests {
         let now = Instant::now();
         let other: SocketAddr = "127.0.0.1:9001".parse().expect("addr");
         let (read, write, _far) = pair();
+        pool.note_in_flight(addr(), 1);
         pool.checkin(addr(), read, write, now);
         assert!(pool.checkout(&other, now).is_none());
         assert!(pool.checkout(&addr(), now).is_some());

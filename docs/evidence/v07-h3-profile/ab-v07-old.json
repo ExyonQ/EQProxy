@@ -1,0 +1,95 @@
+{
+  "mode": "load",
+  "target": "https://old-eq:19443/",
+  "conns": 8,
+  "streams": 8,
+  "warmup_s": 2,
+  "duration_s": 12,
+  "wall_s": 14.007719574,
+  "requests": 250084,
+  "ok": 250084,
+  "errors": 0,
+  "status_codes": {
+    "200": 250084
+  },
+  "bytes": 256086016,
+  "rps": 18403.724910588604,
+  "latency_ms": {
+    "count": 220847,
+    "min": 0.24284,
+    "p50": 3.257737,
+    "p95": 6.031601,
+    "p99": 8.062961,
+    "max": 14.423887,
+    "mean": 3.4771551730971617,
+    "histogram": [
+      {
+        "upper_ms": 0.5,
+        "count": 77
+      },
+      {
+        "upper_ms": 1,
+        "count": 980
+      },
+      {
+        "upper_ms": 2,
+        "count": 20179
+      },
+      {
+        "upper_ms": 3,
+        "count": 68402
+      },
+      {
+        "upper_ms": 5,
+        "count": 105607
+      },
+      {
+        "upper_ms": 7.5,
+        "count": 22110
+      },
+      {
+        "upper_ms": 10,
+        "count": 3138
+      },
+      {
+        "upper_ms": 15,
+        "count": 354
+      },
+      {
+        "upper_ms": 20,
+        "count": 0
+      },
+      {
+        "upper_ms": 30,
+        "count": 0
+      },
+      {
+        "upper_ms": 50,
+        "count": 0
+      },
+      {
+        "upper_ms": 75,
+        "count": 0
+      },
+      {
+        "upper_ms": 100,
+        "count": 0
+      },
+      {
+        "upper_ms": 200,
+        "count": 0
+      },
+      {
+        "upper_ms": 500,
+        "count": 0
+      },
+      {
+        "upper_ms": 0,
+        "count": 0
+      }
+    ]
+  },
+  "sanity": "ok",
+  "generator_cpu_seconds": 23887.795000000002,
+  "generator_cpu_pct_one_core": 170.20403406337329
+}

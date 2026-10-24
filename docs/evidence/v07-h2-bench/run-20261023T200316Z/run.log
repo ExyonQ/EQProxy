@@ -1,0 +1,23 @@
+[build] load sha256=d29516bc592e3395cf3a754387f302fec1ea983896040628f9c87caa5cc5f45b probe sha256=c0c2f77d3ff405eb324494c9a84200d0be19e05a18024ba859a5650e2123cc45
+[build] eqproxy image af9e57c5ed53e2a8 binary b4db9260ef34a2b8
+[host] Linux-6.8.0-147-generic-x86_64-with-glibc2.39 · cpus=8 memory=16767594496 · client 29.6.1 / server 29.6.1 · load [0.27001953125, 3.9443359375, 6.34375]
+[calibration] load_c4s100_1k: 86514.7 req/s, 84.5 MiB/s, generator cpu 329% of one core
+[calibration] load_c4s8_1m: 1590.5 req/s, 1590.5 MiB/s, generator cpu 356% of one core
+[scenario] S-H2-01 {"conns": 4, "streams": 100, "payload": 1024, "warmup": 3, "duration": 15}
+[run] S-H2-01 eqproxy rep1: 1716 client errors ['status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0']
+[run] S-H2-01 eqproxy rep1: rps=6010.2 mib_s=5.8 p50=41.99ms cpu=665% gen_cpu=48% errors=1716 backend_conns_per_1k=187.04
+[run] S-H2-01 haproxy rep1: rps=57453.2 mib_s=56.1 p50=6.45ms cpu=210% gen_cpu=246% errors=0 backend_conns_per_1k=0.84
+[run] S-H2-01 haproxy rep2: rps=58614.4 mib_s=57.2 p50=6.29ms cpu=212% gen_cpu=249% errors=0 backend_conns_per_1k=1.79
+[run] S-H2-01 eqproxy rep2: 2749 client errors ['status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0']
+[run] S-H2-01 eqproxy rep2: rps=5704.0 mib_s=5.4 p50=41.16ms cpu=663% gen_cpu=46% errors=2749 backend_conns_per_1k=190.03
+[run] S-H2-01 eqproxy rep3: 207 client errors ['status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0']
+[run] S-H2-01 eqproxy rep3: rps=5676.4 mib_s=5.5 p50=57.24ms cpu=659% gen_cpu=50% errors=207 backend_conns_per_1k=199.07
+[run] S-H2-01 haproxy rep3: rps=58061.1 mib_s=56.7 p50=6.38ms cpu=211% gen_cpu=249% errors=0 backend_conns_per_1k=0.78
+[run] S-H2-01 haproxy rep4: rps=55299.4 mib_s=54.0 p50=6.74ms cpu=211% gen_cpu=247% errors=0 backend_conns_per_1k=0.89
+[run] S-H2-01 eqproxy rep4: 1727 client errors ['status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0']
+[run] S-H2-01 eqproxy rep4: rps=5869.8 mib_s=5.6 p50=46.84ms cpu=666% gen_cpu=45% errors=1727 backend_conns_per_1k=194.96
+[run] S-H2-01 eqproxy rep5: 1074 client errors ['status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0', 'status 502 body 0 proto HTTP/2.0']
+[run] S-H2-01 eqproxy rep5: rps=5244.6 mib_s=5.1 p50=59.44ms cpu=668% gen_cpu=47% errors=1074 backend_conns_per_1k=193.61
+[run] S-H2-01 haproxy rep5: rps=53574.8 mib_s=52.3 p50=6.95ms cpu=210% gen_cpu=247% errors=0 backend_conns_per_1k=1.80
+[gaps] S-H2-01: {"metric_eq_over_ha": 0.099, "bandwidth_eq_over_ha": 0.099, "latency_p50_ha_over_eq": 0.138, "latency_p99_ha_over_eq": 0.038, "cpu_ratio_eq_over_ha": 3.154, "note": "metric ratios > 1 favour EQProxy; latency ratios > 1 mean EQProxy had the lower end-to-end latency; cpu ratio > 1 means EQProxy spent more CPU per second for the same offered load."}
+report: /root/eqproxy-h2/docs/evidence/v07-h2-bench/run-20261023T200316Z/report.json

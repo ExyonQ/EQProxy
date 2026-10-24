@@ -6,9 +6,10 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: v0.6.3 (2026-10-21) — patch over v0.6.2: the config gate rejects
-> ALPN h2/h2c where the HTTP/1.1 dataplane cannot serve it, and the image can
-> run `config apply`/`rollback` (writable state directory).** A real TCP and HTTP/1.1 proxy (crates
+> **Status: v0.7.0 (2026-10-24) — modern protocols: HTTP/2 termination and
+> upstream h2, end-to-end gRPC, WebSockets over HTTP/2, HTTP/3 over QUIC and
+> gzip/Brotli compression, each with published raw evidence.**
+> A real TCP and HTTP/1.1 proxy (crates
 > `eqproxy-core/config/net/cli`) with **typed routing rules per listener** —
 > host/path/method/header/cookie/map/IP
 > conditions, first match wins — and four rule actions: `use_backend`,
@@ -28,8 +29,9 @@ diagnostics, configuration, administration, extensibility and security.
 > by SNI (exact name, then wildcard, then the listener default), and the `eqproxy`
 > CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
 > `schema` — the public JSON Schema for editor completion, `diff`, `plan`,
-> offline `apply`/`rollback`, `doctor`), with **368 tests**
-> green plus two Docker-gated harnesses run before the release:
+> offline `apply`/`rollback`, `doctor`), with **424 tests**
+> green plus two Docker-gated harnesses (evidence from the v0.6 gate, not
+> re-run for v0.7.0):
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against
 > HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy
 > v1.34.2, and the [migration matrix](docs/migration/README.md) **65/65
@@ -43,32 +45,77 @@ diagnostics, configuration, administration, extensibility and security.
 > both sides and concurrent requests multiplex instead of queueing. Sessions
 > close when idle, a `GOAWAY` drains their in-flight streams, and a stream
 > the peer refused before processing is replayed once on a fresh session
-> (never after processing).
-> (unreleased, on top of v0.6.3: [ADR-0006](docs/adr/0006-http2-termination.md),
+> (never after processing). **gRPC streams are relayed end to end**: both
+> directions stay open at once, `grpc-status` travels in trailers, routing,
+> auth and header rules apply through the same decision path, and
+> `idle_timeout`/`max_stream_duration` cut a stream explicitly instead of
+> hanging it. **WebSockets over HTTP/2** use an RFC 8441 extended CONNECT
+> (`:protocol = websocket`): the proxy translates the stream into the real
+> h1 handshake (with its own `Sec-WebSocket-Key`), answers the h2 client with
+> `200` (never `101`, and never the internal `Sec-WebSocket-Accept`) and
+> relays bytes with flow control as the only buffer; routing, auth and header
+> rules apply through the same h1 decision path, a refused upgrade is relayed
+> as a normal response, and a silent tunnel is cut by `idle_timeout`.
+> **HTTP/3 over QUIC** is served by a listener with `quic = true` and TLS, on
+> the same `IP:PORT` over UDP (TLS 1.3, ALPN `h3`, same certificate/SNI/mTLS);
+> each h3 request becomes one h1 exchange through the same engine, so routing,
+> auth, limits, header actions, mirroring, retries and compression decide
+> exactly once. Request bodies without a length stream upstream as chunked,
+> trailers cross in both directions, `CONNECT` answers `501`, QUIC connections
+> count in `maxconn`, and a TLS change on a live QUIC endpoint needs a restart
+> (the reload is rejected, never half-applied). Verified with a real `h3`
+> client and with two independent implementations, `aioquic` 1.2.0 and
+> `quic-go` 0.64.1, through the release binary.
+> Responses can be **gzip- or Brotli-compressed**
+> per listener when the client accepts it (streamed, never buffered,
+> negotiated from `Accept-Encoding`; wire bytes for both codings published in
+> [the raw benchmark](docs/evidence/v07-compression/bench.md)). Request bodies
+> are **never decompressed**: a client's `Content-Encoding` is forwarded
+> untouched, so there is no decompression surface for a zip bomb
+> ([THREAT_MODEL](THREAT_MODEL.md) T09).
+> (design in [ADR-0006](docs/adr/0006-http2-termination.md),
 > [ADR-0007](docs/adr/0007-http2-backend.md),
 > [ADR-0008](docs/adr/0008-http2-backend-multiplexing.md),
-> [ADR-0009](docs/adr/0009-http2-session-lifecycle.md), evidence
+> [ADR-0009](docs/adr/0009-http2-session-lifecycle.md),
+> [ADR-0010](docs/adr/0010-response-compression.md), evidence
 > [v07-http2](docs/evidence/v07-http2.md),
 > [v07-http2-backend](docs/evidence/v07-http2-backend.md),
-> [v07-http2-multiplexing](docs/evidence/v07-http2-multiplexing.md) and
-> [v07-http2-session-lifecycle](docs/evidence/v07-http2-session-lifecycle.md)); gRPC
-> end to end and HTTP/3 (QUIC) remain v0.7 work. Release v0.6.3 (binaries for darwin/linux amd64+arm64 and multi-arch
+> [v07-http2-multiplexing](docs/evidence/v07-http2-multiplexing.md),
+> [v07-http2-session-lifecycle](docs/evidence/v07-http2-session-lifecycle.md),
+> [v07-compression](docs/evidence/v07-compression.md),
+> [v07-grpc](docs/evidence/v07-grpc.md),
+> [v07-ws](docs/evidence/v07-ws.md) and
+> [v07-http3](docs/evidence/v07-http3.md), with the soak in
+> [v07-grpc-soak-24h](docs/evidence/v07-grpc-soak-24h.md); [ADR-0011](docs/adr/0011-grpc-http2-passthrough.md)
+> covers gRPC, [ADR-0012](docs/adr/0012-websockets-over-h2.md) covers
+> WebSockets over h2 and [ADR-0013](docs/adr/0013-http3-quic.md) covers
+> HTTP/3 over QUIC).
+> Release v0.7.0 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
-> of 5, [evidence](docs/evidence/v06-bench/)): S-H1-04 (10 listeners, 100
-> backends, 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms),
-> S-H1-05 (500 backends + health checks) **15 624 vs 3 466 rps** (p95 5.16
-> vs 31.4 ms); the arm64 campaign
-> ([evidence](docs/evidence/v06-bench-arm64/)) leads in both scenarios with
-> S-H1-04 gaps within noise.
+> of 5): the v0.6 HTTP/1.1 scenarios S-H1-04 (10 listeners, 100 backends,
+> 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms) and S-H1-05
+> (500 backends + health checks) **15 624 vs 3 466 rps** (p95 5.16 vs
+> 31.4 ms) ([evidence](docs/evidence/v06-bench/)), with the arm64 campaign
+> ([evidence](docs/evidence/v06-bench-arm64/)) leading in both and S-H1-04
+> gaps within noise. The v0.7 gate scenarios, with h2/h3 active on both
+> sides, are published including the losses: S-H2-02 **1.081×** (Better),
+> S-H2-01 **0.742×** (Worse, up from 0.099× once the pool stopped churning),
+> and with HTTP/3 active S-H3-01 **0.668×** and S-H3-02 **0.768×**, both
+> Worse ([pool sizing](docs/evidence/v07-h2-pool-sizing.md),
+> [offload](docs/evidence/v07-h3-profile.md),
+> [close fix](docs/evidence/v07-h3-close.md)).
 >
-> **Scope honesty:** v0.6.3 is not declared production ready (Phase 9 gate
-> pending). The whole v0.6 roadmap is delivered (32/32 scope boxes, 6/6
-> version-gate criteria); what remains is outside this version by design
-> and listed in the [CHANGELOG](CHANGELOG.md): the reference filters that
-> only exist as WASM (v0.9, so ecosystem extension stays WASM-only), maps
-> consumed through `equals` matching only, and HTTP/2 (termination and
-> upstream h2 landed on main after v0.6.3; gRPC and QUIC are still ahead).
-> The 24h soak gate **passed** on
+> **Scope honesty:** v0.7.0 is not declared production ready (Phase 9 gate
+> pending). Its gate is met: 11/11 boxes of the v0.7 roadmap, the 24-hour
+> gRPC bidi soak **PASS** (2026-10-23: 86 400 s, 4 267 messages, 0 broken
+> streams, 0 failed probes) and HTTP/3 interop with two independent clients
+> (`aioquic` 1.2.0 and `quic-go` 0.64.1). HTTP/3 stays **experimental**:
+> browsers and `curl` over h3 are unverified and the QUIC adversarial tests
+> of THREAT_MODEL T19 are not executed. Outside this version by design and
+> listed in the [CHANGELOG](CHANGELOG.md): the reference filters that only
+> exist as WASM (v0.9, so ecosystem extension stays WASM-only) and maps
+> consumed through `equals` matching only.
+> The v0.6 24h soak gate **passed** on
 > netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
 > 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown; budgets in
 > [BENCHMARK_PLAN.md](BENCHMARK_PLAN.md) §9).
@@ -82,10 +129,10 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.6.3
+## Install from release v0.7.0
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.6.3).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.7.0).
 
 Every release carries **four prebuilt binaries**: `eqproxy-darwin-arm64`,
 `eqproxy-darwin-amd64`, `eqproxy-linux-arm64` and `eqproxy-linux-amd64`. The
@@ -103,8 +150,8 @@ Building from them is `cargo build --release --locked` with nothing else.
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64   (static, musl)
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.3/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.6.3/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.7.0/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.7.0/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # Linux: sha256sum -c --ignore-missing SHA256SUMS.txt
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 --version
@@ -122,12 +169,12 @@ EOF
 ./eqproxy-linux-amd64 config validate --config eqproxy.toml
 ```
 
-Docker (linux/amd64 + linux/arm64), same digests on both registries:
+Docker (linux/amd64 + linux/arm64, Wolfi base), same digests on both registries:
 
 ```bash
-docker pull exyonq/eqproxy:0.6.3           # Docker Hub (docs + examples on the repo page)
-docker pull ghcr.io/exyonq/eqproxy:0.6.3   # GitHub Container Registry
-docker run --rm exyonq/eqproxy:0.6.3 --version
+docker pull exyonq/eqproxy:0.7.0           # Docker Hub (docs + examples on the repo page)
+docker pull ghcr.io/exyonq/eqproxy:0.7.0   # GitHub Container Registry
+docker run --rm exyonq/eqproxy:0.7.0 --version
 ```
 
 ## Documentation
@@ -151,8 +198,9 @@ docker run --rm exyonq/eqproxy:0.6.3 --version
   [ADR-0001](docs/adr/0001-production-platform.md).
 - **Configuration format:** study in
   [ADR-0002](docs/adr/0002-configuration-format.md), decision pending approval.
-- **Network stack:** tokio + hyper 1.x + rustls; **HTTP/3 is mandatory scope**
-  (Phase 5, experimental until interop is passed). See
+- **Network stack:** tokio + hyper 1.x + rustls, and quinn + h3 for HTTP/3;
+  **HTTP/3 is mandatory scope** (Phase 5; two-client interop passed on
+  2026-10-23, still experimental pending the QUIC adversarial tests). See
   [ADR-0004](docs/adr/0004-network-stack-and-crate-layout.md).
 - **Performance goal:** match or beat the reference proxy 3.4.6 LTS on
   connections, memory,

@@ -1,0 +1,6 @@
+plan: 1 listener(s), 1 backend(s) — nothing started (dry run)
+listener "h3": bind 127.0.0.1:50130 mode=http maxconn=1024 tls=yes(alpn=[h2,http/1.1]) backend="api" quic=h3/udp
+  timeouts: connect=5s idle=10s client_header=5s server_header=30s max_stream=0ns shutdown_grace=10s
+backend "api": servers=1 tls=no proxy_protocol=none health_check=none
+  server 127.0.0.1:50129 weight=1
+

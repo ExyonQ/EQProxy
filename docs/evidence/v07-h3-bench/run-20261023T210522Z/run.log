@@ -1,0 +1,8 @@
+[build] load sha256=f02af496e1951f598d6048c3d31926d1ea2a6995ce2cdb6765251840d142eade probe sha256=bb546e7e235850a919620ba984d3eed6f49ed01902bb75858dd192318b4da864
+[build] eqproxy image 26baca13a64a043d binary 1a18bc662f8fbffa
+[host] macOS-26.5.1-arm64-arm-64bit · cpus=10 memory=8319504384 · client 29.8.2 / server 29.8.2 · load [74.0732421875, 81.3583984375, 77.73046875]
+[calibration] load_c8s8: 4002.218293940555 req/s or hs/s, generator cpu 282% of one core
+[calibration] handshake_c16: 191.22185470319144 req/s or hs/s, generator cpu 207% of one core
+[scenario] S-H3-01 {"mode": "load", "conns": 8, "streams": 8, "warmup": 3, "duration": 15}
+[run] S-H3-01 eqproxy rep1: rps=8332.0 p50=6.00ms cpu=80% gen_cpu=429%
+[run] S-H3-01 haproxy rep1: rps=7760.5 p50=6.02ms cpu=55% gen_cpu=394%

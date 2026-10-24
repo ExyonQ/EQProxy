@@ -1,0 +1,25 @@
+schema_version = 1
+
+[listener.h3]
+listen = "127.0.0.1:55082"
+mode = "http"
+backend = "api"
+quic = true
+idle_timeout = "10s"
+
+[listener.h3.compression]
+gzip = true
+types = ["text/*"]
+
+[[listener.h3.rules]]
+name = "shed"
+path = "/shed"
+direct_response = { status = 418, content_type = "application/json", body = '{"shed":true}' }
+
+[listener.h3.tls]
+cert = "/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/fixtures/cert.pem"
+key = "/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/fixtures/key.pem"
+alpn = ["h2", "http/1.1"]
+
+[backend.api]
+server = "127.0.0.1:55081"

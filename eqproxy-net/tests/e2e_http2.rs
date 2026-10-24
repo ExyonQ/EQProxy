@@ -11,6 +11,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -508,5 +509,193 @@ async fn tls_alpn_h2_terminates_a_real_http2_connection() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body, b"tls-h2");
     drop(send);
+    stop_proxy(handle, serve).await;
+}
+
+// ------------------------------------------------- pool sizing at 400 streams ---
+
+/// Real HTTP/1.1 origin that keeps each connection alive, counts the
+/// connections it accepted and the requests it served, and answers every GET
+/// with `200` and a 2-byte body after holding the request for `hold`. This is
+/// the backend shape of S-H2-01 (h2 to the proxy, h1 to the origin): every
+/// in-flight h2 stream holds one backend h1 exchange at a time, and the hold
+/// keeps them all open at once instead of letting the fastest ones finish and
+/// park their connection before the rest have started (which would make the
+/// observed concurrency depend on scheduling).
+async fn start_keepalive_origin(
+    hold: Duration,
+) -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind keepalive origin");
+    let addr = listener.local_addr().expect("addr keepalive origin");
+    let connections = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(AtomicUsize::new(0));
+    let conns = Arc::clone(&connections);
+    let served = Arc::clone(&requests);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            conns.fetch_add(1, Ordering::Relaxed);
+            let served = Arc::clone(&served);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    let mut total = 0usize;
+                    let head_end = loop {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                        if let Some(pos) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
+                            break pos + 4;
+                        }
+                        if total == buf.len() {
+                            return;
+                        }
+                    };
+                    let head = String::from_utf8_lossy(&buf[..head_end]).to_ascii_lowercase();
+                    let body_needed = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    while total < head_end + body_needed {
+                        match socket.read(&mut buf[total..]).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => total += n,
+                        }
+                    }
+                    served.fetch_add(1, Ordering::Relaxed);
+                    if !hold.is_zero() {
+                        tokio::time::sleep(hold).await;
+                    }
+                    if socket
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    (addr, connections, requests)
+}
+
+/// Sends 100 concurrent streams on every client (400 in flight in total)
+/// without awaiting the answers: that is the S-H2-01 shape, where the proxy
+/// must hold 400 backend exchanges at once.
+async fn send_wave(
+    clients: &mut [h2::client::SendRequest<Bytes>],
+    id: usize,
+) -> Vec<JoinHandle<(StatusCode, Vec<u8>)>> {
+    let mut tasks = Vec::new();
+    for client in clients.iter_mut() {
+        for idx in 0..100 {
+            let request = Request::builder()
+                .uri(format!("https://h2.test/wave{id}/{idx}"))
+                .body(())
+                .expect("request");
+            let (response, _stream) = client.send_request(request, true).expect("send");
+            tasks.push(tokio::spawn(async move {
+                let response = tokio::time::timeout(WAIT, response)
+                    .await
+                    .expect("response in time")
+                    .expect("response");
+                let (status, _headers, body, _trailers) = read_response(response).await;
+                (status, body)
+            }));
+        }
+    }
+    tasks
+}
+
+/// 400 h2 streams in flight (4 connections x 100 streams) must keep their 400
+/// backend connections parked; a second identical wave reuses all of them
+/// instead of re-dialling the 336 that a fixed 64-slot pool dropped. The
+/// origin holds every request while the wave is open, so the 400 exchanges
+/// really are concurrent; the observables are the binary's own counters (the
+/// whole wave dials, then every exchange of the second wave is a pool hit,
+/// nothing is discarded) and the origin's accept count, which does not move
+/// during the second wave.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn pool_sizing_keeps_a_400_stream_burst_without_churn() {
+    use std::sync::atomic::Ordering;
+
+    let (origin, origin_connections, origin_requests) =
+        start_keepalive_origin(Duration::from_millis(750)).await;
+    let metrics = Arc::new(Metrics::default());
+    let bound: BoundProxy = bind(vec![http_listener(origin)], Arc::clone(&metrics))
+        .await
+        .expect("bind proxy");
+    let proxy_addr = bound.local_addrs()[0].1;
+    let (handle, signal) = shutdown::channel();
+    let serve = tokio::spawn(async move {
+        bound.serve(signal, WAIT).await.expect("serve");
+    });
+
+    let mut clients = Vec::new();
+    for _ in 0..4 {
+        clients.push(h2_connect(proxy_addr).await);
+    }
+
+    let first = send_wave(&mut clients, 1).await;
+    for task in first {
+        let (status, body) = task.await.expect("join");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"ok");
+    }
+    // The check-in happens after the last body is forwarded: give it a moment
+    // so wave 2 measures the pool, not the race at the end of wave 1.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let after_first = metrics.snapshot();
+    assert_eq!(
+        after_first.backend_connections_opened, 400,
+        "with an empty pool the whole first wave dials one connection each"
+    );
+    assert_eq!(
+        after_first.backend_connections_reused, 0,
+        "nothing was parked before the first wave"
+    );
+    let origin_after_first = origin_connections.load(Ordering::Relaxed);
+    assert_eq!(
+        origin_after_first, 400,
+        "the origin accepted exactly the connections the proxy dialled"
+    );
+
+    let second = send_wave(&mut clients, 2).await;
+    for task in second {
+        let (status, body) = task.await.expect("join");
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, b"ok");
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let after_second = metrics.snapshot();
+
+    assert_eq!(
+        after_second.backend_connections_opened, after_first.backend_connections_opened,
+        "wave 2 must not dial: the 400 parked connections cover it (churn would add ~336)"
+    );
+    assert_eq!(
+        after_second.backend_connections_reused - after_first.backend_connections_reused,
+        400,
+        "every wave-2 exchange must be a pool hit"
+    );
+    assert_eq!(after_second.backend_connections_discarded, 0);
+    assert_eq!(
+        origin_connections.load(Ordering::Relaxed),
+        origin_after_first,
+        "wave 2 must not reach the origin with a new connection either"
+    );
+    assert_eq!(origin_requests.load(Ordering::Relaxed), 800);
+
+    drop(clients);
     stop_proxy(handle, serve).await;
 }

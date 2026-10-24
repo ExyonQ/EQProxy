@@ -113,6 +113,20 @@ pub struct ActiveGuard<'a> {
     idx: usize,
 }
 
+impl ActiveGuard<'_> {
+    /// Exchanges the balancer currently counts on the guarded server, this
+    /// one included. The keep-alive pool sizes its idle cap from it, so a
+    /// burst of N exchanges keeps N connections instead of re-dialling all
+    /// but the floor.
+    #[must_use]
+    pub fn in_flight(&self) -> u32 {
+        self.balancer
+            .state()
+            .get(self.idx)
+            .map_or(1, |server| server.active)
+    }
+}
+
 impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
         let mut state = self.balancer.state();

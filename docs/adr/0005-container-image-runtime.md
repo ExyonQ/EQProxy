@@ -4,7 +4,10 @@ Language: **English**.
 
 - State: **Accepted** (2026-10-20, owner request: scan the image with Docker
   Scout before publishing, after the v0.6.0 images showed findings on Docker
-  Hub)
+  Hub) · **Superseded in part** by
+  [ADR-0016](0016-wolfi-runtime-base.md) (2026-10-24): the runtime base is
+  Wolfi; the static-musl binary, the unprivileged `65532` user, the writable
+  state directory and the 0-critical/high Scout gate stand unchanged
 - Date: 2026-10-20
 - Related: [ADR-0001](0001-production-platform.md) (support tiers),
   [ADR-0004](0004-network-stack-and-crate-layout.md) (rustls/aws-lc-rs)

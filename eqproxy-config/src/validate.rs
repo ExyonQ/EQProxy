@@ -285,6 +285,51 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             }
         }
 
+        // HTTP/3 (B-H2): QUIC terminates HTTP over TLS 1.3 on the same
+        // address, over UDP. There is no connection preamble to carry a
+        // PROXY v1 line, and a byte tunnel never parses HTTP.
+        if listener.quic {
+            if listener.tls.is_none() {
+                err(
+                    field("quic"),
+                    "quic = true requires TLS: QUIC always runs over TLS 1.3".to_owned(),
+                    format!("add [listener.{name}.tls] with cert/key, or quic = false"),
+                    &section,
+                );
+            }
+            if listener.mode != ListenerMode::Http {
+                err(
+                    field("quic"),
+                    "quic = true requires mode = \"http\" (HTTP/3 is an HTTP transport)".to_owned(),
+                    "mode = \"http\"".to_owned(),
+                    &section,
+                );
+            }
+            if listener.proxy_receive {
+                err(
+                    field("quic"),
+                    "quic = true cannot receive a PROXY v1 header: QUIC has no connection preamble"
+                        .to_owned(),
+                    "quic = false or proxy_receive = false".to_owned(),
+                    &section,
+                );
+            }
+        }
+        if let Some(tls) = &listener.tls
+            && tls
+                .alpn
+                .iter()
+                .any(|proto| proto.eq_ignore_ascii_case("h3"))
+        {
+            err(
+                field("tls.alpn"),
+                "alpn \"h3\" belongs to the QUIC endpoint and is offered there automatically"
+                    .to_owned(),
+                "remove \"h3\" from tls.alpn (list \"h2\" and \"http/1.1\" for TCP)".to_owned(),
+                &section,
+            );
+        }
+
         if listener.forwarded_headers != ForwardedHeaders::Off
             && listener.mode != ListenerMode::Http
         {
@@ -334,6 +379,59 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     "mode = \"http\" or remove local_response".to_owned(),
                     &section,
                 );
+            }
+        }
+
+        // Response compression (B-N6/H6): an http-only feature whose options
+        // are validated with the same grammar the dataplane applies.
+        if listener.compression.gzip || listener.compression.brotli {
+            if listener.mode != ListenerMode::Http {
+                err(
+                    field("compression"),
+                    "compression is only meaningful in mode = \"http\"".to_owned(),
+                    "mode = \"http\" or remove [listener.<name>.compression]".to_owned(),
+                    &section,
+                );
+            }
+            if !(1..=9).contains(&listener.compression.level) {
+                err(
+                    field("compression.level"),
+                    format!(
+                        "compression.level = {} is outside 1-9 (rule: 1 fastest to 9 smallest)",
+                        listener.compression.level
+                    ),
+                    "level = 6".to_owned(),
+                    &section,
+                );
+            }
+            if listener.compression.brotli_quality > 11 {
+                err(
+                    field("compression.brotli_quality"),
+                    format!(
+                        "compression.brotli_quality = {} is outside 0-11 (rule: 0 fastest to 11 smallest)",
+                        listener.compression.brotli_quality
+                    ),
+                    "brotli_quality = 5".to_owned(),
+                    &section,
+                );
+            }
+            if listener.compression.types.is_empty() {
+                err(
+                    field("compression.types"),
+                    "compression.types is empty: no response could ever be compressed".to_owned(),
+                    "types = [\"text/*\", \"application/json\"] or disable compression".to_owned(),
+                    &section,
+                );
+            }
+            for spec in &listener.compression.types {
+                if let Err(why) = eqproxy_core::compression::MediaType::parse(spec) {
+                    err(
+                        field("compression.types"),
+                        why,
+                        "types = [\"text/*\", \"application/json\"]".to_owned(),
+                        &section,
+                    );
+                }
             }
         }
 
@@ -1386,10 +1484,12 @@ mod tests {
                     server_header_timeout: Duration::from_secs(30),
                     max_stream_duration: Duration::ZERO,
                     tls: None,
+                    quic: false,
                     proxy_receive: false,
                     proxy_allow: Vec::new(),
                     forwarded_headers: ForwardedHeaders::default(),
                     local_response: None,
+                    compression: crate::schema::CompressionConfig::default(),
                     rules: Vec::new(),
                 },
             );
@@ -2380,6 +2480,121 @@ server = "127.0.0.1:9000"
                 && e.cause.contains("cookie name")),
             "errors: {:?}",
             bad_cookie.errors
+        );
+    }
+
+    /// HTTP/3 (B-H2) is TLS 1.3 over UDP on an HTTP listener: the gate names
+    /// the exact missing piece instead of failing at bind time.
+    #[test]
+    fn quic_requires_tls_http_mode_and_no_proxy_header() {
+        let no_tls = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8443\"\n\
+             backend = \"api\"\n\
+             quic = true\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            no_tls
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("listener.web.quic")
+                    && e.cause.contains("requires TLS")),
+            "errors: {:?}",
+            no_tls.errors
+        );
+
+        let tcp_mode = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8443\"\n\
+             mode = \"tcp\"\n\
+             backend = \"api\"\n\
+             quic = true\n\
+             [listener.web.tls]\n\
+             cert = \"cert.pem\"\n\
+             key = \"key.pem\"\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            tcp_mode
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("listener.web.quic")
+                    && e.cause.contains("mode = \"http\"")),
+            "errors: {:?}",
+            tcp_mode.errors
+        );
+
+        let proxy_header = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8443\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             quic = true\n\
+             proxy_receive = true\n\
+             proxy_allow = [\"10.0.0.0/8\"]\n\
+             [listener.web.tls]\n\
+             cert = \"cert.pem\"\n\
+             key = \"key.pem\"\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            proxy_header
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("listener.web.quic")
+                    && e.cause.contains("PROXY v1")),
+            "errors: {:?}",
+            proxy_header.errors
+        );
+
+        // `h3` is the QUIC endpoint's ALPN, never a TCP one.
+        let h3_alpn = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8443\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             [listener.web.tls]\n\
+             cert = \"cert.pem\"\n\
+             key = \"key.pem\"\n\
+             alpn = [\"h2\", \"h3\"]\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            h3_alpn.errors.iter().any(|e| {
+                e.field.as_deref() == Some("listener.web.tls.alpn")
+                    && e.cause.contains("QUIC endpoint")
+            }),
+            "errors: {:?}",
+            h3_alpn.errors
+        );
+
+        let valid = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:8443\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             quic = true\n\
+             [listener.web.tls]\n\
+             cert = \"cert.pem\"\n\
+             key = \"key.pem\"\n\
+             alpn = [\"h2\", \"http/1.1\"]\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n",
+        );
+        assert!(
+            valid.errors.is_empty(),
+            "a TLS + http listener must accept quic: {:?}",
+            valid.errors
         );
     }
 }

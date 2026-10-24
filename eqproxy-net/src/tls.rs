@@ -10,6 +10,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::{DigitallySignedStruct, RootCertStore, SignatureScheme};
@@ -62,9 +63,48 @@ pub struct ServerTls {
     /// SNI names of the additional certificates, in declaration order
     /// (empty when the listener serves a single certificate).
     sni_names: Vec<Vec<String>>,
+    /// Digest of the material this acceptor was built from (certificates,
+    /// keys, client CA, ALPN and minimum version). A hot reload compares it
+    /// to decide whether a live QUIC endpoint — whose TLS is fixed at
+    /// creation — still matches the new configuration.
+    fingerprint: u64,
 }
 
 impl ServerTls {
+    /// Digest of the TLS material (equality only; not a cryptographic hash).
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        self.fingerprint
+    }
+
+    /// QUIC server configuration for HTTP/3 (B-H2), derived from this
+    /// acceptor: same certificates, SNI entries, mTLS verifier and TLS 1.3,
+    /// with ALPN forced to `h3` (RFC 9114 §3.1) and the listener's
+    /// `idle_timeout` as the QUIC idle timeout. Returning `Err` refuses to
+    /// start the UDP endpoint rather than serving HTTP/3 with wrong TLS.
+    pub fn quic_server_config(&self, idle: Duration) -> Result<quinn::ServerConfig, TlsError> {
+        let mut config = (*self.config).clone();
+        config.alpn_protocols = vec![b"h3".to_vec()];
+        let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(config).map_err(|_| {
+            TlsError::Config(
+                "QUIC needs TLS 1.3 cipher suites (aws-lc-rs provides them; check min_version)"
+                    .to_owned(),
+            )
+        })?;
+        // `IdleTimeout` is a QUIC varint of milliseconds: a zero or huge
+        // value is not representable, so the listener timeout is clamped to
+        // the protocol's window instead of failing the whole bind.
+        let mut transport = quinn::TransportConfig::default();
+        let millis = idle.as_millis().clamp(1, (1_u128 << 62) - 1) as u64;
+        if let Ok(timeout) = quinn::IdleTimeout::try_from(Duration::from_millis(millis)) {
+            transport.max_idle_timeout(Some(timeout));
+        }
+        transport.max_concurrent_bidi_streams(crate::http3::MAX_CONCURRENT_STREAMS.into());
+        let mut server = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+        server.transport_config(Arc::new(transport));
+        Ok(server)
+    }
+
     /// ALPN protocols configured on the listener (A14).
     #[must_use]
     pub fn alpn(&self) -> &[Vec<u8>] {
@@ -313,12 +353,40 @@ pub fn server_config_with_sni(
         builder.with_no_client_auth().with_cert_resolver(resolver)
     };
     config.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
+    let fingerprint = material_fingerprint(cert_chain_pem, key_pem, sni, client_ca_pem, alpn, min);
     let config = Arc::new(config);
     Ok(ServerTls {
         acceptor: TlsAcceptor::from(Arc::clone(&config)),
         config,
         sni_names,
+        fingerprint,
     })
+}
+
+/// Digest of everything that changes what the endpoint asserts: the default
+/// chain and key, every SNI chain/key/name set, the client CA, ALPN and the
+/// minimum version. Two acceptors with the same digest serve the same TLS.
+fn material_fingerprint(
+    cert_chain_pem: &[u8],
+    key_pem: &[u8],
+    sni: &[SniCertPem],
+    client_ca_pem: Option<&[u8]>,
+    alpn: &[String],
+    min: TlsVersion,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    cert_chain_pem.hash(&mut hasher);
+    key_pem.hash(&mut hasher);
+    for entry in sni {
+        entry.names.hash(&mut hasher);
+        entry.cert_chain_pem.hash(&mut hasher);
+        entry.key_pem.hash(&mut hasher);
+    }
+    client_ca_pem.hash(&mut hasher);
+    alpn.hash(&mut hasher);
+    (min == TlsVersion::V1_3).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Parses one certificate chain + key into the signer rustls needs.

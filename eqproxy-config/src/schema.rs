@@ -203,7 +203,9 @@ pub struct TlsServerConfig {
     pub certs: Vec<SniCertConfig>,
     /// Offered ALPN protocols, e.g. `["h2", "http/1.1"]` (HTTP/2 and
     /// HTTP/1.1 served on this listener) or `["http/1.1"]`; empty = no ALPN.
-    /// A `tcp` listener relays bytes and never parses them.
+    /// A `tcp` listener relays bytes and never parses them. `"h3"` is
+    /// reserved for the QUIC endpoint, which offers it automatically when
+    /// `quic = true`: listing it here is rejected.
     #[serde(default)]
     pub alpn: Vec<String>,
     /// Minimum TLS version (default 1.2).
@@ -846,6 +848,12 @@ pub struct ListenerConfig {
     /// TLS termination at this listener (A11). Absent = plain TCP.
     #[serde(default)]
     pub tls: Option<TlsServerConfig>,
+    /// Serve **HTTP/3 over QUIC** (B-H2) on the same address and port, over
+    /// UDP. Requires `[listener.<name>.tls]` (QUIC is always TLS 1.3) and
+    /// `mode = "http"`; the UDP endpoint offers ALPN `h3` with the same
+    /// certificate, SNI entries and client CA as the TCP listener.
+    #[serde(default)]
+    pub quic: bool,
     /// Receive PROXY protocol v1 from trusted proxies (B-H9/B-E10).
     #[serde(default)]
     pub proxy_receive: bool,
@@ -859,10 +867,80 @@ pub struct ListenerConfig {
     /// Custom response when no server is available (C9 minimal).
     #[serde(default)]
     pub local_response: Option<LocalResponseConfig>,
+    /// Response compression (B-N6/H6): opt-in gzip/Brotli negotiated from the
+    /// request's `Accept-Encoding`. `http` mode only.
+    #[serde(default)]
+    pub compression: CompressionConfig,
     /// Ordered routing rules (v0.6, B-H3/B-H4): first match wins, the
     /// `backend` above is the fallback. `http` mode only.
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+}
+
+/// Response compression (B-N6/H6): gzip and Brotli, opt-in per listener.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CompressionConfig {
+    /// Compress eligible responses with gzip when the client accepts it.
+    #[serde(default)]
+    pub gzip: bool,
+    /// Compress eligible responses with Brotli when the client accepts `br`.
+    #[serde(default)]
+    pub brotli: bool,
+    /// gzip level, 1 (fastest) to 9 (smallest); default 6.
+    #[serde(default = "default_gzip_level")]
+    pub level: u32,
+    /// Brotli quality, 0 (fastest) to 11 (smallest); default 5. Values above
+    /// 9 cost far more CPU per request than they save on the wire.
+    #[serde(default = "default_brotli_quality")]
+    pub brotli_quality: u32,
+    /// Minimum declared body length worth compressing; responses without
+    /// `Content-Length` (chunked or until-EOF) are not filtered by it.
+    #[serde(default = "default_gzip_min_size")]
+    pub min_size: u64,
+    /// Eligible media types: `text/*`, `application/json`, `*/*`…
+    #[serde(default = "default_gzip_types")]
+    pub types: Vec<String>,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            gzip: false,
+            brotli: false,
+            level: default_gzip_level(),
+            brotli_quality: default_brotli_quality(),
+            min_size: default_gzip_min_size(),
+            types: default_gzip_types(),
+        }
+    }
+}
+
+fn default_gzip_level() -> u32 {
+    6
+}
+
+fn default_brotli_quality() -> u32 {
+    5
+}
+
+fn default_gzip_min_size() -> u64 {
+    1024
+}
+
+fn default_gzip_types() -> Vec<String> {
+    [
+        "text/*",
+        "application/json",
+        "application/javascript",
+        "application/xml",
+        "application/xhtml+xml",
+        "application/rss+xml",
+        "image/svg+xml",
+    ]
+    .iter()
+    .map(|spec| (*spec).to_owned())
+    .collect()
 }
 
 /// Session affinity of a backend (B-H8/B-N13/B-I8).

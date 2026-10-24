@@ -1,0 +1,44 @@
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): non-root user
+65532
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): gate accepts alpn h2 on an http listener
+    accepted
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): gate rejects alpn h3 on the TCP table
+    rejected with the cause and exit 1
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): config apply writes state
+    applied (state dir writable)
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): live proxied traffic
+Unable to find image 'nginx:alpine' locally
+alpine: Pulling from library/nginx
+cbe54b031f3e: Pulling fs layer
+f523b340a6c0: Pulling fs layer
+1408044c7403: Pulling fs layer
+7b9d02243238: Pulling fs layer
+567a969e0221: Pulling fs layer
+dbb1ef19121a: Pulling fs layer
+c2fefbef5314: Pulling fs layer
+f523b340a6c0: Download complete
+c2fefbef5314: Download complete
+7b9d02243238: Download complete
+dbb1ef19121a: Download complete
+567a969e0221: Download complete
+2d759c5f2f47: Download complete
+1408044c7403: Download complete
+1408044c7403: Pull complete
+7b9d02243238: Pull complete
+db5a6d6bb46f: Download complete
+f523b340a6c0: Pull complete
+dbb1ef19121a: Pull complete
+567a969e0221: Pull complete
+c2fefbef5314: Pull complete
+cbe54b031f3e: Download complete
+cbe54b031f3e: Pull complete
+Digest: sha256:a3554c0d0b48177b1413c26e01f695334428020d9df01243fbae3e11cfd17417
+Status: Image is up to date for nginx:alpine
+    live traffic HTTP 200 through the proxy
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): h2c multiplexed request
+    HTTP/2 over cleartext, version 2
+==> eqproxy:0.7.0-wolfi-arm64 (arm64): logs after the journeys
+warning: listener "web" listens on 0.0.0.0:18080 without TLS: expose it only on trusted networks or enable [listener.web.tls]
+INFO listener web listening on 0.0.0.0:18080
+METRICS client[accepted=0 active=0 completed=0 rejected_maxconn=0 protocol_errors=0] proxy[no_server=0 queue_full=0 queue_timeout=0 retries=0 local_responses=0 redirects=0 direct=0] network[idle_timeouts=0 bytes_c2b=0 bytes_b2c=0] backend[connect_failures=0 tls_failures=0 discarded=0 reused=0 opened=0 proxied=0] phases[header_timeouts=0] proxy_proto[denied=0 invalid=0] cfg[reloads=0 reload_failures=0 last_swap_us=0] auth[denied=0 service_errors=0] dns[ok=0 failures=0 updates=0] maps[reloads=0 failures=0] mirror[sent=0 failures=0 skipped=0] h2[sessions_idle_closed=0 goaway=0 refused_retried=0] grpc[streams=0 errors=0] h3[clean_closes=0 connection_errors=0] ws[tunnels=0 failures=0] compression[gzip=0 brotli=0 bytes_in=0 bytes_out=0]
+PASS eqproxy:0.7.0-wolfi-arm64 (arm64)

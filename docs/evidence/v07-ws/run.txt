@@ -1,0 +1,4 @@
+{"backend_requests": 1, "bytes_first": 13, "bytes_second": 15, "journey": "tunnel", "protocol": "chat", "status": 200}
+{"body": "no tunnel here", "ended": true, "journey": "refused", "status": 404}
+{"ended": true, "journey": "protocol", "status": 501}
+{"backend": {"accepted": 2, "closed": 1, "handshakes": ["GET /chat?room=7 HTTP/1.1\r\nhost: ws.test\r\nsec-websocket-protocol: chat, superchat\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-version: 13\r\nsec-websocket-key: gACrFwr/4BgBAAAAAAAAAA==\r\n\r\n", "GET /refuse HTTP/1.1\r\nhost: ws.test\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-version: 13\r\nsec-websocket-key: YG/KFwr/4BgCAAAAAAAAAA==\r\n\r\n"], "tunnels": 1}, "binary": "/Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy", "client": "hyper-h2 4.2.0", "sha256": "1c9f040a42ed6c73e68900a2ec7bd4c29168e9e130580f60d9875cea324f27d3"}
