@@ -572,8 +572,10 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # The runtime is `scratch`, so a finding here means a real regression in
-      # what we ship, not noise from a Debian base. The CLI is pinned:
+      # The runtime base is Wolfi (ADR-0016), so a finding here is either a
+      # package the pinned base digest ships or a regression in what we ship;
+      # the gate is 0 critical/0 high on both architectures, never waived.
+      # The CLI is pinned:
       # `docker scout cves --exit-code` is the command verified locally on the
       # release image (exit 0), not the action's `compare` semantics.
       - name: Install Docker Scout CLI (pinned)
@@ -667,9 +669,14 @@ jobs:
               config validate --config /dev/stdin \
               | grep -q "config OK: 1 listener(s), 1 backend(s)" \
               || fail "$image linux/$arch validate happy path"
-            # The gate must reject ALPN h2 on an HTTP listener: it used to
-            # negotiate a protocol the dataplane cannot serve.
-            log "E2E $image (linux/$arch): validate rejects alpn = [\"h2\"]"
+            # v0.7.0 serves h2 on an http listener, so the gate accepts
+            # alpn = ["h2"] there (v0.6.3 rejected it). The negative check
+            # stays with the coding that is still reserved: h3 belongs to the
+            # QUIC endpoint and must not appear on the TCP table.
+            log "E2E $image (linux/$arch): validate accepts alpn = [\"h2\"]"
+            openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+              -subj "/CN=localhost" -keyout /tmp/e2e-k.pem -out /tmp/e2e-c.pem >/dev/null 2>&1
+            chmod 0644 /tmp/e2e-c.pem /tmp/e2e-k.pem
             cat > /tmp/e2e-h2.toml <<'EOF'
           schema_version = 1
           [listener.web]
@@ -677,30 +684,35 @@ jobs:
           mode = "http"
           backend = "api"
           [listener.web.tls]
-          cert = "c.pem"
-          key = "k.pem"
+          cert = "/c.pem"
+          key = "/k.pem"
           alpn = ["h2"]
           [backend.api]
           server = "127.0.0.1:9"
           EOF
-            set +e
             h2_out="$(docker run --rm --platform "linux/$arch" \
-              -v /tmp/e2e-h2.toml:/h2.toml:ro "$image" \
-              config validate --config /h2.toml 2>&1)"
-            h2_status=$?
-            set -e
-            [ "$h2_status" = "1" ] \
-              || fail "$image linux/$arch accepted alpn = [\"h2\"] (exit $h2_status)"
-            # `case` instead of `printf | grep -q`: grep exits on the first
-            # match and the writer can take SIGPIPE, which `pipefail` turns
-            # into a failed step even when the check matched.
+              -v /tmp/e2e-h2.toml:/h2.toml:ro \
+              -v /tmp/e2e-c.pem:/c.pem:ro -v /tmp/e2e-k.pem:/k.pem:ro \
+              "$image" config validate --config /h2.toml 2>&1)" \
+              || fail "$image linux/$arch rejected alpn = [\"h2\"]: $h2_out"
             case "$h2_out" in
-              *'ALPN protocol "h2" cannot be served'*) ;;
-              *) fail "$image linux/$arch h2 rejection lacks the cause: $h2_out" ;;
+              "config OK: 1 listener(s), 1 backend(s)"*) ;;
+              *) fail "$image linux/$arch alpn h2 acceptance printed: $h2_out" ;;
             esac
-            case "$h2_out" in
-              *'alpn = ["http/1.1"]'*) ;;
-              *) fail "$image linux/$arch h2 rejection lacks the fix: $h2_out" ;;
+            log "E2E $image (linux/$arch): validate rejects alpn = [\"h3\"] on TCP"
+            sed 's/alpn = \["h2"\]/alpn = ["h3"]/' /tmp/e2e-h2.toml > /tmp/e2e-h3.toml
+            set +e
+            h3_out="$(docker run --rm --platform "linux/$arch" \
+              -v /tmp/e2e-h3.toml:/h3.toml:ro \
+              -v /tmp/e2e-c.pem:/c.pem:ro -v /tmp/e2e-k.pem:/k.pem:ro \
+              "$image" config validate --config /h3.toml 2>&1)"
+            h3_status=$?
+            set -e
+            [ "$h3_status" = "1" ] \
+              || fail "$image linux/$arch accepted alpn = [\"h3\"] on TCP (exit $h3_status)"
+            case "$h3_out" in
+              *'belongs to the QUIC endpoint'*) ;;
+              *) fail "$image linux/$arch h3 rejection lacks the cause: $h3_out" ;;
             esac
             # config apply used to fail with "Permission denied" because the
             # state directory resolved to / under this unprivileged image.
@@ -800,8 +812,8 @@ jobs:
           mode = "http"
           backend = "api"
           [listener.web.tls]
-          cert = "c.pem"
-          key = "k.pem"
+          cert = "/c.pem"
+          key = "/k.pem"
           alpn = ["h2"]
           [backend.api]
           server = "127.0.0.1:9"
@@ -814,6 +826,11 @@ jobs:
           [backend.api]
           server = "127.0.0.1:9"
           EOF
+          # A real certificate: since v0.7.0 the gate accepts alpn = ["h2"]
+          # on an http listener, so validation reaches the files.
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj "/CN=localhost" -keyout /tmp/pub-k.pem -out /tmp/pub-c.pem >/dev/null 2>&1
+          chmod 0644 /tmp/pub-c.pem /tmp/pub-k.pem
           verify_published() {
             local ref="$1" arch="$2" net="$3" subnet="$4"
             log "re-pull $ref (linux/$arch)"
@@ -826,17 +843,28 @@ jobs:
             docker run --rm --platform "linux/$arch" "$ref" --version \
               | grep -q "eqproxy $VERSION" \
               || fail "$ref linux/$arch reports the wrong version"
-            set +e
             h2_out="$(docker run --rm --platform "linux/$arch" \
-              -v /tmp/published-h2.toml:/h2.toml:ro "$ref" \
-              config validate --config /h2.toml 2>&1)"
-            h2_status=$?
-            set -e
-            [ "$h2_status" = "1" ] \
-              || fail "$ref linux/$arch accepted alpn = [\"h2\"] (exit $h2_status)"
+              -v /tmp/published-h2.toml:/h2.toml:ro \
+              -v /tmp/pub-c.pem:/c.pem:ro -v /tmp/pub-k.pem:/k.pem:ro \
+              "$ref" config validate --config /h2.toml 2>&1)" \
+              || fail "$ref linux/$arch rejected alpn = [\"h2\"]: $h2_out"
             case "$h2_out" in
-              *'ALPN protocol "h2" cannot be served'*) ;;
-              *) fail "$ref linux/$arch h2 rejection lacks the cause: $h2_out" ;;
+              "config OK: 1 listener(s), 1 backend(s)"*) ;;
+              *) fail "$ref linux/$arch alpn h2 acceptance printed: $h2_out" ;;
+            esac
+            sed 's/alpn = \["h2"\]/alpn = ["h3"]/' /tmp/published-h2.toml > /tmp/published-h3.toml
+            set +e
+            h3_out="$(docker run --rm --platform "linux/$arch" \
+              -v /tmp/published-h3.toml:/h3.toml:ro \
+              -v /tmp/pub-c.pem:/c.pem:ro -v /tmp/pub-k.pem:/k.pem:ro \
+              "$ref" config validate --config /h3.toml 2>&1)"
+            h3_status=$?
+            set -e
+            [ "$h3_status" = "1" ] \
+              || fail "$ref linux/$arch accepted alpn = [\"h3\"] on TCP (exit $h3_status)"
+            case "$h3_out" in
+              *'belongs to the QUIC endpoint'*) ;;
+              *) fail "$ref linux/$arch h3 rejection lacks the cause: $h3_out" ;;
             esac
             apply_out="$(docker run --rm --platform "linux/$arch" \
               -v /tmp/published-apply.toml:/c.toml:ro "$ref" \
