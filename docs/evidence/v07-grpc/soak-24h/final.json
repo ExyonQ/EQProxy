@@ -1,0 +1,20 @@
+{
+  "binary_sha256": "0672763af6afad189cd24fa6f30673b2bd3a02f3d90c467cffc23f79daab6dd6",
+  "drops": 0,
+  "duration_seconds": 86400.0,
+  "elapsed_seconds": 86400.0,
+  "final_stream_status": "OK",
+  "finished_at": "2026-10-23T23:09:36Z",
+  "interval_seconds": 20.0,
+  "last_rtt_ms": 1.08,
+  "max_rtt_ms": 413.41,
+  "messages": 4267,
+  "p50_rtt_ms": 0.99,
+  "p99_rtt_ms": 17.44,
+  "probes_failed": 0,
+  "probes_ok": 1420,
+  "proxy_rss_kb": 3568,
+  "reason": "",
+  "started_at": "2026-10-22T23:09:36Z",
+  "verdict": "PASS"
+}

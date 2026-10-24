@@ -1,0 +1,22 @@
+schema_version = 1
+
+[listener.grpc]
+listen = "127.0.0.1:61632"
+mode = "http"
+backend = "grpc"
+maxconn = 128
+connect_timeout = "2s"
+idle_timeout = "120s"
+client_header_timeout = "5s"
+server_header_timeout = "30s"
+max_stream_duration = "0s"
+forwarded_headers = "append"
+
+[backend.grpc]
+server = "127.0.0.1:61631"
+
+[backend.grpc.tls]
+verify = true
+ca_file = "/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/fixtures/cert.pem"
+server_name = "localhost"
+alpn = ["h2"]

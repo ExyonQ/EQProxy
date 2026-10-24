@@ -1,0 +1,7 @@
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1792709515.698148 49687843 fork_posix.cc:77] Other threads are currently calling into gRPC, skipping fork() handlers
+{"first_echo_seconds": 0.06, "grpc_status": "OK", "journey": "bidi", "second_echo": true, "seen": {"user-agent": "grpc-python/1.66.1 grpc-c/43.0.0 (osx; chttp2)", "x-forwarded-for": "127.0.0.1", "x-forwarded-proto": "http"}}
+{"bytes": 262144, "equal": true, "grpc_status": "OK", "journey": "bulk"}
+{"details": "no such item", "grpc_status": "NOT_FOUND", "journey": "status", "x_forwarded_for": "127.0.0.1"}
+{"grpc_status": "OK", "interval_seconds": 20.0, "journey": "long", "messages": 18, "seconds": 360.0, "slowest_round_trip_seconds": 0.02}
+PASS
