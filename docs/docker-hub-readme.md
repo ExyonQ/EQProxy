@@ -1,3 +1,9 @@
+<!-- This file is the Docker Hub page (hub.docker.com/r/exyonq/eqproxy), not a
+     README: .github/workflows/dockerhub-page.yml publishes it after every
+     stable release, filling {{version}} from Cargo.toml and {{packages}} from
+     the Scout SBOM of the published image. Never type a version or a package
+     count here by hand — the workflow fails the release if one appears. -->
+
 # EQProxy
 
 EQProxy is a reverse proxy and load balancer written in Rust. It terminates
@@ -21,7 +27,7 @@ never decompressed, they are forwarded untouched.
 
 The image runs on **Wolfi**, the minimal container distro
 (`cgr.dev/chainguard/wolfi-base`, pinned by digest): **0 critical / 0 high**
-per Docker Scout on both architectures, over the 69 packages in its SBOM. The
+per Docker Scout on both architectures, over the {{packages}} packages in its SBOM. The
 binary at `/opt/eqproxy` is still a **statically linked musl** executable and
 does not use the distro's libc; Wolfi supplies the CA bundle for operators that
 point `ca_file` at the system trust store, a shell for `docker exec`, and the
@@ -33,7 +39,7 @@ both scanned with Docker Scout before the release tag exists: the workflow
 scans each architecture, runs the container journeys on each, and only then
 promotes the scanned digest to `:<version>` and `:latest`. The two reports
 (`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`) are attached to every GitHub
-release. The scan indexes the image's SBOM — 69 packages on each
+release. The scan indexes the image's SBOM — {{packages}} packages on each
 architecture — so a clean report covers both: neither the pinned base nor
 EQProxy ships a known critical or high finding at the time of the release.
 
@@ -44,7 +50,7 @@ together with `SHA256SUMS.txt` (four binaries plus the sources,
 
 The musl binary was measured against **genuinely built glibc binaries** on
 arm64 and amd64, same scenario and same hosts, every response a real `200`
-([TLS parity report](https://github.com/ExyonQ/EQProxy/blob/v0.7.0/docs/evidence/v0.6.2-tls-parity/README.md)):
+([TLS parity report](https://github.com/ExyonQ/EQProxy/blob/v{{version}}/docs/evidence/v0.6.2-tls-parity/README.md)):
 arm64 is at parity (−2.4 %, p 0.28); on amd64 musl is 20 % behind under TLS
 (p 0.001) and 11 % behind with no TLS at all (p 0.0001), so the gap is
 libc-general rather than handshake cost. An earlier version of this page
@@ -57,16 +63,16 @@ asset inside a Debian image; that comparison is withdrawn.
 - **Where to get help:** [GitHub issues](https://github.com/ExyonQ/EQProxy/issues) or contact@exyonq.org
 - **Security:** security@exyonq.org
 - **Supported architectures:** `linux/amd64`, `linux/arm64`
-- **Source of this image:** https://github.com/ExyonQ/EQProxy/blob/v0.7.0/docker/Dockerfile
-- **Release:** https://github.com/ExyonQ/EQProxy/releases/tag/v0.7.0
+- **Source of this image:** https://github.com/ExyonQ/EQProxy/blob/v{{version}}/docker/Dockerfile
+- **Release:** https://github.com/ExyonQ/EQProxy/releases/tag/v{{version}}
 
 ## Supported tags
 
-- `0.7.0` — the released version (pinned).
+- `{{version}}` — the released version (pinned).
 - `latest` — the same image as the newest release.
 
 ```bash
-docker pull exyonq/eqproxy:0.7.0
+docker pull exyonq/eqproxy:{{version}}
 ```
 
 The same images are published on GitHub Container Registry as
@@ -81,7 +87,7 @@ CLI. Without arguments it prints `--help`.
 
 ```bash
 docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.7.0 config validate --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:{{version}} config validate --config /etc/eqproxy/eqproxy.toml
 ```
 
 ### Run the proxy
@@ -103,7 +109,7 @@ server = "api:9000"
 ```bash
 docker run --name eqproxy -d -p 8080:8080 \
   -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.7.0 run --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:{{version}} run --config /etc/eqproxy/eqproxy.toml
 ```
 
 Traffic to `localhost:8080` is proxied to `api:9000` — put the backend in
@@ -117,11 +123,11 @@ mapping or `--user 0`: a non-root process cannot bind them.
 ```bash
 # What each timeout does when it fires, per phase:
 docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.7.0 config explain --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:{{version}} config explain --config /etc/eqproxy/eqproxy.toml
 
 # Pre-flight checks (bind probe, config gate):
 docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.7.0 doctor --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:{{version}} doctor --config /etc/eqproxy/eqproxy.toml
 
 # Stage a validated config and keep history for rollback. The image sets
 # EQPROXY_STATE_DIR=/var/lib/eqproxy; mount a volume there to keep it across
@@ -129,7 +135,7 @@ docker run --rm -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
 docker run --rm -e EQPROXY_STATE_DIR=/var/lib/eqproxy \
   -v eqproxy-state:/var/lib/eqproxy \
   -v /path/to/eqproxy.toml:/etc/eqproxy/eqproxy.toml:ro \
-  exyonq/eqproxy:0.7.0 config apply --config /etc/eqproxy/eqproxy.toml
+  exyonq/eqproxy:{{version}} config apply --config /etc/eqproxy/eqproxy.toml
 
 # Hot reload under traffic (the container forwards signals). The running
 # process re-reads the mounted file, so edit it in place and signal it:
@@ -152,12 +158,12 @@ docker kill --signal=HUP eqproxy
 ## Documentation
 
 - [README](https://github.com/ExyonQ/EQProxy#readme) — status, install, quick start
-- [SPEC.md](https://github.com/ExyonQ/EQProxy/blob/v0.7.0/SPEC.md) — specified behaviour
-- [eqproxy.toml.example](https://github.com/ExyonQ/EQProxy/blob/v0.7.0/eqproxy.toml.example) — every option documented
-- [THREAT_MODEL.md](https://github.com/ExyonQ/EQProxy/blob/v0.7.0/THREAT_MODEL.md) — threat model and non-protections
+- [SPEC.md](https://github.com/ExyonQ/EQProxy/blob/v{{version}}/SPEC.md) — specified behaviour
+- [eqproxy.toml.example](https://github.com/ExyonQ/EQProxy/blob/v{{version}}/eqproxy.toml.example) — every option documented
+- [THREAT_MODEL.md](https://github.com/ExyonQ/EQProxy/blob/v{{version}}/THREAT_MODEL.md) — threat model and non-protections
 
 ## License
 
 Dual: MIT OR Apache-2.0, at the recipient's choice.
 
-https://github.com/ExyonQ/EQProxy/blob/v0.7.0/LICENSE-MIT
+https://github.com/ExyonQ/EQProxy/blob/v{{version}}/LICENSE-MIT

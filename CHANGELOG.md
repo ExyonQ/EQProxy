@@ -5,6 +5,18 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Docker Hub page is published by CI, not edited on the website.**
+  `docs/docker-hub-readme.md` is the single source: after every stable release
+  (and on demand, to repair drift) `.github/workflows/dockerhub-page.yml`
+  renders `{{version}}` from `Cargo.toml` and `{{packages}}` from the Scout
+  SBOM of the published image, re-checks the 0 critical / 0 high sentence with
+  `--exit-code` on both architectures, PATCHes the description and reads it
+  back, so a page that disagrees with the release fails the run instead of
+  shipping. The page drifted twice by hand: v0.7.0 still carried 0.6.3 strings
+  and the wrong package count.
+
 ## [v0.7.0] — 2026-10-24
 
 ### Added

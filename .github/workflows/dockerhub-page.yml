@@ -1,0 +1,183 @@
+name: Docker Hub page
+
+# The Hub page is not edited on the website: it is rendered from
+# docs/docker-hub-readme.md and published here, so the repository is the only
+# source and the page cannot drift from the release again (the v0.7.0 page
+# still shipped v0.6.3 strings and the wrong package count).
+#
+# Two entry points, one implementation:
+#   * called by release.yml after the GitHub release exists (`needs: release`),
+#     stable tags only — the page documents `:latest`, which a prerelease
+#     never re-points;
+#   * workflow_dispatch, to repair drift without cutting a release.
+#
+# Nothing about the release is typed by hand here. The version comes from
+# Cargo.toml, the package count and the "0 critical / 0 high" sentence come
+# from the Scout SBOM of the *published* image on both architectures, and the
+# PATCH is followed by a read-back compare: a green run means Docker Hub serves
+# exactly the rendered file.
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: Render, publish and read back the page
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve the version that the published image carries
+        id: version
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          test -n "$VERSION" || { echo "Cargo.toml has no version"; exit 1; }
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+            test "v$VERSION" = "$GITHUB_REF_NAME" \
+              || { echo "tag $GITHUB_REF_NAME does not match Cargo.toml $VERSION"; exit 1; }
+          fi
+          # A page for a tag nobody can pull would document an image that does
+          # not exist; release.yml mirrors the verified manifest before this.
+          docker manifest inspect "exyonq/eqproxy:$VERSION" >/dev/null \
+            || { echo "exyonq/eqproxy:$VERSION is not published"; exit 1; }
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "page describes exyonq/eqproxy:$VERSION"
+
+      - name: Log in to Docker Hub (Scout indexes through this account)
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Install Docker Scout CLI (same pin as release.yml)
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/docker/scout-cli/main/install.sh \
+            | sh -s -- v1.25.0
+          docker scout version
+
+      # The two numbers the page states about the image are measured, never
+      # remembered: the SBOM package count (which must match on both
+      # architectures, because the page says it does) and the 0C/0H claim that
+      # is re-checked with `--exit-code` on the bytes that are live on Hub.
+      - name: Measure the published image (packages and 0C/0H, both architectures)
+        id: image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ref="exyonq/eqproxy:$VERSION"
+          amd=""
+          arm=""
+          for arch in amd64 arm64; do
+            report="$RUNNER_TEMP/sbom-$arch.md"
+            docker scout cves --format markdown --platform "linux/$arch" "$ref" > "$report"
+            n=$(sed -n 's/.*<td>packages<\/td><td>\([0-9][0-9]*\)<\/td>.*/\1/p' "$report" | head -1)
+            [ -n "$n" ] || { echo "no package count in the linux/$arch report:"; sed -n '1,30p' "$report"; exit 1; }
+            echo "linux/$arch: $n packages"
+            # Publishing the "0 critical / 0 high" sentence without checking it
+            # would be a claim about bytes nobody scanned. pipefail keeps
+            # Scout's exit status through `tail`.
+            set -o pipefail
+            docker scout cves --only-severity critical,high --exit-code \
+              --platform "linux/$arch" "$ref" | tail -3
+            echo "linux/$arch: no critical or high vulnerability"
+            case "$arch" in
+              amd64) amd="$n" ;;
+              arm64) arm="$n" ;;
+            esac
+          done
+          [ -n "$amd" ] && [ -n "$arm" ] \
+            || { echo "missing a package count: amd64='$amd' arm64='$arm'"; exit 1; }
+          [ "$amd" = "$arm" ] \
+            || { echo "package counts differ between architectures: amd64=$amd arm64=$arm"; exit 1; }
+          echo "packages=$amd" >> "$GITHUB_OUTPUT"
+          echo "packages on both architectures: $amd"
+
+      - name: Render docs/docker-hub-readme.md for this release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          PACKAGES: ${{ steps.image.outputs.packages }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          import re
+          import sys
+
+          version, packages = os.environ["VERSION"], os.environ["PACKAGES"]
+          src = open("docs/docker-hub-readme.md", encoding="utf-8").read()
+          page = src.replace("{{version}}", version).replace("{{packages}}", packages)
+
+          left = re.findall(r"\{\{[^}]*\}\}", page)
+          if left:
+              sys.exit(f"unrendered placeholder(s) in docs/docker-hub-readme.md: {left}")
+
+          # Any version that is not this release is the drift this job exists
+          # to prevent (the v0.7.0 page still said v0.6.3 in every example).
+          # A `-` suffix is a repository directory such as
+          # docs/evidence/v0.6.2-tls-parity, not a release tag, and stays; a
+          # dotted quad (0.0.0.0 in the example config) is not a version.
+          stale = sorted({
+              v
+              for v in re.findall(r"(?<![\d.])\d+\.\d+\.\d+(?![\d-])(?!\.\d)", page)
+              if v != version
+          })
+          if stale:
+              sys.exit(f"hardcoded version(s) {stale} in docs/docker-hub-readme.md; write {{{{version}}}}")
+
+          for needle in (f"exyonq/eqproxy:{version}", f"releases/tag/v{version}"):
+              if needle not in page:
+                  sys.exit(f"the rendered page never names {needle}")
+
+          open("page.md", "w", encoding="utf-8").write(page)
+          print(f"page.md: {len(page)} bytes, version {version}, {packages} packages")
+          PY
+          echo "rendered sha256: $(sha256sum page.md | cut -d' ' -f1)"
+
+      - name: Publish the page and read back what Docker Hub serves
+        env:
+          HUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          HUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          PACKAGES: ${{ steps.image.outputs.packages }}
+        run: |
+          set -euo pipefail
+          : "${HUB_USER:?DOCKERHUB_USERNAME secret is not set}"
+          : "${HUB_TOKEN:?DOCKERHUB_TOKEN secret is not set}"
+          api="https://hub.docker.com/v2"
+          repo="exyonq/eqproxy"
+          umask 077
+          # The token is written to a mode-600 temp file, never printed and
+          # never an output.
+          curl -fsS -X POST "$api/users/login" \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -n --arg u "$HUB_USER" --arg p "$HUB_TOKEN" '{username:$u,password:$p}')" \
+            -o "$RUNNER_TEMP/login.json"
+          jq -e '.token | length > 0' "$RUNNER_TEMP/login.json" >/dev/null \
+            || { rm -f "$RUNNER_TEMP/login.json"; echo "Docker Hub login returned no token"; exit 1; }
+          jq -n --rawfile full page.md '{full_description: $full}' > "$RUNNER_TEMP/patch.json"
+          status=$(curl -sS -o "$RUNNER_TEMP/patch-out.json" -w '%{http_code}' \
+            -X PATCH "$api/repositories/$repo/" \
+            -H "Authorization: JWT $(jq -r .token "$RUNNER_TEMP/login.json")" \
+            -H 'Content-Type: application/json' \
+            --data-binary @"$RUNNER_TEMP/patch.json")
+          rm -f "$RUNNER_TEMP/login.json"
+          if [ "$status" != "200" ]; then
+            echo "PATCH $api/repositories/$repo/ returned $status:"
+            head -c 800 "$RUNNER_TEMP/patch-out.json"; echo
+            exit 1
+          fi
+          # The read-back is the proof: the API accepting a PATCH says nothing
+          # about what the page shows.
+          curl -fsS "$api/repositories/$repo/" -o "$RUNNER_TEMP/hub.json"
+          jq -j .full_description "$RUNNER_TEMP/hub.json" > "$RUNNER_TEMP/hub.md"
+          cmp -s page.md "$RUNNER_TEMP/hub.md" \
+            || { echo "Docker Hub serves a page that differs from page.md:"; diff -u page.md "$RUNNER_TEMP/hub.md" | head -40; exit 1; }
+          echo "page for $VERSION published and read back byte-identical ($(wc -c < page.md | tr -d ' ') bytes, $PACKAGES packages)"
+          echo "https://hub.docker.com/r/$repo"

@@ -507,6 +507,19 @@ jobs:
               --title "$GITHUB_REF_NAME" --notes-file release-notes.md $EXTRA
           fi
 
+  # The Docker Hub page is an artifact of the release, not of someone's
+  # memory: it is rendered from docs/docker-hub-readme.md with this version
+  # and the package count of the image this run published, then read back
+  # from the API. Stable tags only — the page documents `:latest`, which a
+  # prerelease never re-points. The workflow is reusable so the same code
+  # repairs drift on its own (workflow_dispatch) without cutting a release.
+  dockerhub_page:
+    name: Docker Hub page (rendered, published and read back)
+    needs: [release]
+    if: github.ref_type == 'tag' && !contains(github.ref_name, '-')
+    uses: ./.github/workflows/dockerhub-page.yml
+    secrets: inherit
+
   image:
     name: Multi-arch image (build + Scout both archs + E2E + promote)
     needs: [darwin, linux]
