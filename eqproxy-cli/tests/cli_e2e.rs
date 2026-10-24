@@ -4376,3 +4376,963 @@ fn config_schema_publishes_the_generated_json_schema() {
         repo.display()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Response compression (B-N6/H6): gzip negotiated from Accept-Encoding.
+// ---------------------------------------------------------------------------
+
+/// Body the compression journeys compress: repetitive text, ~9 KB.
+fn compression_text() -> String {
+    "the quick brown fox jumps over the lazy dog\n".repeat(200)
+}
+
+/// Origin with one route per compression rule under test.
+fn start_compression_origin() -> std::net::SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind compression origin");
+    let addr = listener.local_addr().expect("addr compression origin");
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                use std::io::Read;
+                let mut buf = vec![0u8; 8192];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) | Err(_) => return,
+                        Ok(n) => total += n,
+                    }
+                    if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf[..total]).to_ascii_lowercase();
+                let path = head
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .unwrap_or("/");
+                match path {
+                    "/small" => respond_content_length(&mut stream, "text/plain", b"tiny"),
+                    "/json" => {
+                        let body = format!(
+                            "{{\"items\":[{}]}}",
+                            (0..400)
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>()
+                                .join(",")
+                        );
+                        respond_content_length(&mut stream, "application/json", body.as_bytes())
+                    }
+                    "/png" => {
+                        let mut body = vec![0x89u8, b'P', b'N', b'G'];
+                        body.extend((0..4092u32).map(|i| (i % 251) as u8));
+                        respond_content_length(&mut stream, "image/png", &body)
+                    }
+                    "/encoded" => {
+                        let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: br\r\nContent-Length: 18\r\nConnection: close\r\n\r\nnot-really-brotli!";
+                        let _ = stream.write_all(response);
+                    }
+                    "/notransform" => {
+                        let body = compression_text();
+                        let head = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-transform\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(head.as_bytes());
+                        let _ = stream.write_all(body.as_bytes());
+                    }
+                    "/chunked" => {
+                        let body = compression_text();
+                        let (first, second) = body.split_at(body.len() / 2);
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:x}\r\n{first}\r\n{:x}\r\n{second}\r\n0\r\nx-checksum: 42\r\n\r\n",
+                            first.len(),
+                            second.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    _ => {
+                        let body = compression_text();
+                        respond_content_length(
+                            &mut stream,
+                            "text/plain; charset=utf-8",
+                            body.as_bytes(),
+                        );
+                    }
+                }
+            });
+        }
+    });
+    addr
+}
+
+fn respond_content_length(stream: &mut TcpStream, content_type: &str, body: &[u8]) {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(head.as_bytes());
+    let _ = stream.write_all(body);
+}
+
+/// Raw response bytes through the real binary (compressed bodies are binary:
+/// never round-trip them through `String`).
+fn proxied_bytes(proxy: &str, request: &[u8]) -> Vec<u8> {
+    let mut client = TcpStream::connect(proxy).expect("connect proxy");
+    client.write_all(request).expect("write request");
+    let mut response = Vec::new();
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("read timeout");
+    let _ = client.read_to_end(&mut response);
+    assert!(
+        !response.is_empty(),
+        "the proxy never answered: {:?}",
+        String::from_utf8_lossy(&response)
+    );
+    response
+}
+
+/// Splits a raw response into its head, decoded body and chunked trailers.
+fn response_body(response: &[u8]) -> (String, Vec<u8>, Vec<String>) {
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response head terminator");
+    let head = String::from_utf8_lossy(&response[..split]).into_owned();
+    let mut rest = &response[split + 4..];
+    if !head
+        .to_ascii_lowercase()
+        .contains("transfer-encoding: chunked")
+    {
+        return (head, rest.to_vec(), Vec::new());
+    }
+    let mut body = Vec::new();
+    let mut trailers = Vec::new();
+    loop {
+        let line_end = rest
+            .windows(2)
+            .position(|w| w == b"\r\n")
+            .expect("chunk size line");
+        let line = String::from_utf8_lossy(&rest[..line_end]).into_owned();
+        let size = usize::from_str_radix(line.split(';').next().unwrap_or("0").trim(), 16)
+            .expect("hex chunk size");
+        rest = &rest[line_end + 2..];
+        if size == 0 {
+            loop {
+                let end = rest
+                    .windows(2)
+                    .position(|w| w == b"\r\n")
+                    .expect("trailer line");
+                if end == 0 {
+                    break;
+                }
+                trailers.push(String::from_utf8_lossy(&rest[..end]).into_owned());
+                rest = &rest[end + 2..];
+            }
+            break;
+        }
+        body.extend_from_slice(&rest[..size]);
+        rest = &rest[size + 2..];
+    }
+    (head, body, trailers)
+}
+
+fn gunzip(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(body)
+        .read_to_end(&mut out)
+        .expect("the body must be a valid gzip member");
+    out
+}
+
+fn get_with_encoding(proxy: &str, path: &str, accept_encoding: Option<&str>) -> Vec<u8> {
+    let mut request = format!("GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n");
+    if let Some(accept) = accept_encoding {
+        request.push_str(&format!("Accept-Encoding: {accept}\r\n"));
+    }
+    request.push_str("\r\n");
+    proxied_bytes(proxy, request.as_bytes())
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_compresses_gzip_and_respects_every_refusal_case() {
+    let origin = start_compression_origin();
+    let config = temp_config(
+        "gzip-run",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [listener.web.compression]\n\
+             gzip = true\n\
+             min_size = 512\n\
+             [backend.api]\n\
+             server = \"{origin}\"\n"
+        ),
+    );
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (gzip)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && proxy.is_empty() {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy = addr.trim().to_owned();
+        }
+    }
+    assert!(!proxy.is_empty(), "the listener was not announced");
+
+    // 1) Negotiated: gzip on the wire, decoded body equals the origin's.
+    let text = compression_text();
+    let compressed = get_with_encoding(&proxy, "/big", Some("gzip, deflate"));
+    let (head, body, _) = response_body(&compressed);
+    let head_lower = head.to_ascii_lowercase();
+    assert!(head_lower.starts_with("http/1.1 200 ok"), "{head}");
+    assert!(head_lower.contains("content-encoding: gzip"), "{head}");
+    assert!(head_lower.contains("transfer-encoding: chunked"), "{head}");
+    assert!(head_lower.contains("vary: accept-encoding"), "{head}");
+    assert!(!head_lower.contains("content-length"), "{head}");
+    assert_eq!(&body[..2], &[0x1f, 0x8b], "gzip magic missing");
+    assert_eq!(gunzip(&body), text.as_bytes(), "decoded body differs");
+    assert!(
+        body.len() < text.len(),
+        "nothing was saved: {} vs {}",
+        body.len(),
+        text.len()
+    );
+
+    // 2) `gzip;q=0` is a refusal: identity, same bytes as the origin sent.
+    let identity = get_with_encoding(&proxy, "/big", Some("gzip;q=0"));
+    let (head, body, _) = response_body(&identity);
+    let head_lower = head.to_ascii_lowercase();
+    assert!(!head_lower.contains("content-encoding"), "{head}");
+    assert!(
+        head_lower.contains(&format!("content-length: {}", text.len())),
+        "{head}"
+    );
+    assert_eq!(body, text.as_bytes());
+
+    // 3) Below min_size: identity even when accepted.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/small", Some("gzip")));
+    assert!(
+        !head.to_ascii_lowercase().contains("content-encoding"),
+        "{head}"
+    );
+    assert_eq!(body, b"tiny");
+
+    // 4) Already encoded: never re-encoded.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/encoded", Some("gzip")));
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: br"),
+        "{head}"
+    );
+    assert_eq!(body, b"not-really-brotli!");
+
+    // 5) A type outside the list: identity.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/png", Some("gzip")));
+    assert!(
+        !head.to_ascii_lowercase().contains("content-encoding"),
+        "{head}"
+    );
+    assert_eq!(&body[..4], &[0x89, b'P', b'N', b'G']);
+
+    // 6) Chunked origin body: re-framed compressed, trailers preserved.
+    let (head, body, trailers) =
+        response_body(&get_with_encoding(&proxy, "/chunked", Some("gzip")));
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: gzip"),
+        "{head}"
+    );
+    assert_eq!(gunzip(&body), text.as_bytes());
+    assert_eq!(
+        trailers,
+        vec!["x-checksum: 42".to_owned()],
+        "trailers: {trailers:?}"
+    );
+
+    // 7) JSON is in the default list and compresses.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/json", Some("*")));
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: gzip"),
+        "{head}"
+    );
+    assert_eq!(gunzip(&body)[0], b'{');
+
+    // 8) `Cache-Control: no-transform` forbids the transformation.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/notransform", Some("gzip")));
+    assert!(
+        !head.to_ascii_lowercase().contains("content-encoding"),
+        "{head}"
+    );
+    assert_eq!(body, text.as_bytes());
+
+    // 9) An HTTP/1.0 client cannot read chunked framing: identity.
+    let (head, body, _) = response_body(&proxied_bytes(
+        &proxy,
+        b"GET /big HTTP/1.0\r\nHost: t\r\nAccept-Encoding: gzip\r\nConnection: close\r\n\r\n",
+    ));
+    assert!(
+        !head.to_ascii_lowercase().contains("content-encoding"),
+        "{head}"
+    );
+    assert_eq!(body, text.as_bytes());
+
+    // Real SIGINT: the final METRICS line carries the compression counters.
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut rest = String::new();
+    let _ = stderr.read_to_string(&mut rest);
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+    let final_line = rest
+        .lines()
+        .find(|line| line.starts_with("METRICS ") && line.contains("(final)"))
+        .expect("final METRICS line");
+    let group = final_line
+        .split("compression[")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("compression group");
+    let value = |name: &str| -> u64 {
+        group
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("missing {name} in {group}"))
+    };
+    assert_eq!(
+        value("gzip"),
+        3,
+        "big + chunked + json were compressed: {group}"
+    );
+    assert!(value("bytes_out") < value("bytes_in"), "{group}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_and_explain_report_the_compression_settings() {
+    let config = temp_config(
+        "gzip-validate",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"http\"\n\
+         backend = \"api\"\n\
+         [listener.web.compression]\n\
+         gzip = true\n\
+         level = 6\n\
+         min_size = 512\n\
+         types = [\"text/*\", \"application/json\"]\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run validate");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let explain = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&config)
+        .output()
+        .expect("run explain");
+    assert!(explain.status.success());
+    let report = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        report.contains("compression: gzip level=6 min_size=512 types=[text/*, application/json]"),
+        "report: {report}"
+    );
+
+    // A tcp listener cannot serve compressed responses.
+    let bad = temp_config(
+        "gzip-tcp",
+        "schema_version = 1\n\
+         [listener.raw]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"tcp\"\n\
+         backend = \"api\"\n\
+         [listener.raw.compression]\n\
+         gzip = true\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&bad)
+        .output()
+        .expect("run validate (tcp)");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {text}");
+    assert!(
+        text.contains("compression is only meaningful in mode"),
+        "{text}"
+    );
+
+    // Level and media type are validated with the runtime grammar.
+    let bad = temp_config(
+        "gzip-bad",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"http\"\n\
+         backend = \"api\"\n\
+         [listener.web.compression]\n\
+         gzip = true\n\
+         level = 12\n\
+         types = [\"text/*\", \"text\"]\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&bad)
+        .output()
+        .expect("run validate (bad options)");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {text}");
+    assert!(text.contains("listener.web.compression.level"), "{text}");
+    assert!(text.contains("listener.web.compression.types"), "{text}");
+    assert!(text.contains("is not a media type"), "{text}");
+
+    // Brotli alone is a valid configuration and explain names its quality.
+    let brotli = temp_config(
+        "brotli-validate",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"http\"\n\
+         backend = \"api\"\n\
+         [listener.web.compression]\n\
+         brotli = true\n\
+         brotli_quality = 7\n\
+         min_size = 512\n\
+         types = [\"text/*\", \"application/json\"]\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&brotli)
+        .output()
+        .expect("run validate (brotli)");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let explain = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&brotli)
+        .output()
+        .expect("run explain (brotli)");
+    assert!(explain.status.success());
+    let report = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        report.contains(
+            "compression: brotli quality=7 min_size=512 types=[text/*, application/json]"
+        ),
+        "report: {report}"
+    );
+
+    // Brotli quality outside 0-11 is rejected before it reaches the dataplane.
+    let bad_brotli = temp_config(
+        "brotli-bad",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"http\"\n\
+         backend = \"api\"\n\
+         [listener.web.compression]\n\
+         brotli = true\n\
+         brotli_quality = 12\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&bad_brotli)
+        .output()
+        .expect("run validate (bad brotli quality)");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {text}");
+    assert!(
+        text.contains("listener.web.compression.brotli_quality"),
+        "{text}"
+    );
+
+    // A tcp listener cannot serve Brotli either.
+    let bad = temp_config(
+        "brotli-tcp",
+        "schema_version = 1\n\
+         [listener.raw]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"tcp\"\n\
+         backend = \"api\"\n\
+         [listener.raw.compression]\n\
+         brotli = true\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&bad)
+        .output()
+        .expect("run validate (brotli tcp)");
+    let text = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {text}");
+    assert!(
+        text.contains("compression is only meaningful in mode"),
+        "{text}"
+    );
+
+    // Both codings enabled: explain names both, with each tuning knob.
+    let both = temp_config(
+        "compression-both",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:0\"\n\
+         mode = \"http\"\n\
+         backend = \"api\"\n\
+         [listener.web.compression]\n\
+         gzip = true\n\
+         brotli = true\n\
+         level = 7\n\
+         brotli_quality = 4\n\
+         [backend.api]\n\
+         server = \"127.0.0.1:9\"\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&both)
+        .output()
+        .expect("run validate (both codings)");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let explain = bin()
+        .args(["config", "explain", "--config"])
+        .arg(&both)
+        .output()
+        .expect("run explain (both codings)");
+    assert!(explain.status.success());
+    let report = String::from_utf8_lossy(&explain.stdout);
+    assert!(
+        report.contains("compression: gzip level=7 brotli quality=4 min_size=1024"),
+        "report: {report}"
+    );
+    remove_temp(&both);
+
+    remove_temp(&config);
+    remove_temp(&bad);
+    remove_temp(&brotli);
+    remove_temp(&bad_brotli);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_serves_gzip_over_h2c_to_a_real_client() {
+    let origin = start_compression_origin();
+    let config = temp_config(
+        "gzip-h2c",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [listener.web.compression]\n\
+             gzip = true\n\
+             [backend.api]\n\
+             server = \"{origin}\"\n"
+        ),
+    );
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (h2c gzip)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && proxy.is_empty() {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy = addr.trim().to_owned();
+        }
+    }
+    assert!(!proxy.is_empty());
+
+    // curl with h2 prior knowledge and `--compressed`: it negotiates gzip,
+    // decodes it and prints the decoded body, while `-D -` shows the headers
+    // that crossed the wire.
+    let dump = curl_stdout(&[
+        "--http2-prior-knowledge",
+        "--compressed",
+        &format!("http://{proxy}/big"),
+    ]);
+    assert!(
+        dump.starts_with("HTTP/2 200"),
+        "h2c must negotiate HTTP/2: {dump}"
+    );
+    let lower = dump.to_ascii_lowercase();
+    assert!(lower.contains("content-encoding: gzip"), "{dump}");
+    assert!(
+        !lower.contains("transfer-encoding:"),
+        "h2 has no chunked framing: {dump}"
+    );
+    let (_, body) = dump.split_once("\r\n\r\n").expect("curl headers and body");
+    assert_eq!(body, compression_text(), "the decoded h2 body differs");
+
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0));
+}
+
+fn unbrotli(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    brotli::Decompressor::new(body, 4096)
+        .read_to_end(&mut out)
+        .expect("the body must be a valid brotli stream");
+    out
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_compresses_brotli_and_prefers_it_over_gzip() {
+    let origin = start_compression_origin();
+    let config = temp_config(
+        "brotli-run",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [listener.web.compression]\n\
+             gzip = true\n\
+             brotli = true\n\
+             brotli_quality = 5\n\
+             min_size = 512\n\
+             [backend.api]\n\
+             server = \"{origin}\"\n"
+        ),
+    );
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (brotli)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && proxy.is_empty() {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy = addr.trim().to_owned();
+        }
+    }
+    assert!(!proxy.is_empty(), "the listener was not announced");
+
+    let text = compression_text();
+
+    // 1) Both accepted: Brotli wins the tie and the body decodes.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/big", Some("gzip, br")));
+    let head_lower = head.to_ascii_lowercase();
+    assert!(head_lower.starts_with("http/1.1 200 ok"), "{head}");
+    assert!(
+        head_lower.contains("content-encoding: br"),
+        "brotli must win the tie: {head}"
+    );
+    assert!(head_lower.contains("transfer-encoding: chunked"), "{head}");
+    assert!(!head_lower.contains("content-length"), "{head}");
+    assert_eq!(unbrotli(&body), text.as_bytes(), "decoded body differs");
+    assert!(
+        body.len() < text.len(),
+        "nothing was saved: {} vs {}",
+        body.len(),
+        text.len()
+    );
+
+    // 2) Only gzip accepted: gzip is still served when Brotli is not offered.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/big", Some("gzip")));
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: gzip"),
+        "{head}"
+    );
+    assert_eq!(gunzip(&body), text.as_bytes());
+
+    // 3) Explicit q-values order the choice: gzip can beat a low-q Brotli.
+    let (head, body, _) = response_body(&get_with_encoding(
+        &proxy,
+        "/big",
+        Some("gzip;q=0.9, br;q=0.2"),
+    ));
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: gzip"),
+        "{head}"
+    );
+    assert_eq!(gunzip(&body), text.as_bytes());
+
+    // 4) `br;q=0` refuses Brotli; gzip was not offered, so identity.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/big", Some("br;q=0")));
+    assert!(
+        !head.to_ascii_lowercase().contains("content-encoding"),
+        "{head}"
+    );
+    assert_eq!(body, text.as_bytes());
+
+    // 5) Below min_size: identity even when Brotli is accepted.
+    let (head, body, _) = response_body(&get_with_encoding(&proxy, "/small", Some("br")));
+    assert!(
+        !head.to_ascii_lowercase().contains("content-encoding"),
+        "{head}"
+    );
+    assert_eq!(body, b"tiny");
+
+    // 6) Chunked origin body: re-framed as Brotli, trailers preserved.
+    let (head, body, trailers) = response_body(&get_with_encoding(&proxy, "/chunked", Some("br")));
+    assert!(
+        head.to_ascii_lowercase().contains("content-encoding: br"),
+        "{head}"
+    );
+    assert_eq!(unbrotli(&body), text.as_bytes());
+    assert_eq!(trailers, vec!["x-checksum: 42".to_owned()]);
+
+    // Real SIGINT: the final METRICS line distinguishes the two codings.
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut rest = String::new();
+    let _ = stderr.read_to_string(&mut rest);
+    remove_temp(&config);
+    assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
+    let final_line = rest
+        .lines()
+        .find(|line| line.starts_with("METRICS ") && line.contains("(final)"))
+        .expect("final METRICS line");
+    let group = final_line
+        .split("compression[")
+        .nth(1)
+        .and_then(|rest| rest.split(']').next())
+        .expect("compression group");
+    let value = |name: &str| -> u64 {
+        group
+            .split_whitespace()
+            .find_map(|field| field.strip_prefix(&format!("{name}=")))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("missing {name} in {group}"))
+    };
+    assert_eq!(
+        value("brotli"),
+        2,
+        "big + chunked were compressed with Brotli: {group}"
+    );
+    assert_eq!(value("gzip"), 2, "big gzip + q-value gzip: {group}");
+    assert!(value("bytes_out") < value("bytes_in"), "{group}");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_serves_brotli_over_h2c_to_a_real_client() {
+    let origin = start_compression_origin();
+    let config = temp_config(
+        "brotli-h2c",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [listener.web.compression]\n\
+             brotli = true\n\
+             [backend.api]\n\
+             server = \"{origin}\"\n"
+        ),
+    );
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (h2c brotli)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && proxy.is_empty() {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Some(addr) = line.split("listening on ").nth(1) {
+            proxy = addr.trim().to_owned();
+        }
+    }
+    assert!(!proxy.is_empty(), "the listener was not announced");
+
+    let tag = format!("eqproxy-cli-e2e-{}-h2c-br", std::process::id());
+    let body_path = std::env::temp_dir().join(format!("{tag}.body"));
+    let head_path = std::env::temp_dir().join(format!("{tag}.head"));
+    // This curl has no Brotli support, so it forwards the raw body: the test
+    // decodes it itself instead of trusting `--compressed`.
+    let output = Command::new("curl")
+        .args([
+            "-sS",
+            "--max-time",
+            "15",
+            "--http2-prior-knowledge",
+            "-H",
+            "Accept-Encoding: br",
+            "-D",
+        ])
+        .arg(&head_path)
+        .arg("-o")
+        .arg(&body_path)
+        .arg(format!("http://{proxy}/big"))
+        .output()
+        .expect("run curl (needed for the HTTP/2 e2e)");
+    assert!(
+        output.status.success(),
+        "curl failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let head = std::fs::read_to_string(&head_path).expect("read h2 headers");
+    assert!(head.starts_with("HTTP/2 200"), "{head}");
+    let lower = head.to_ascii_lowercase();
+    assert!(lower.contains("content-encoding: br"), "{head}");
+    assert!(
+        !lower.contains("transfer-encoding:"),
+        "h2 has no chunked framing: {head}"
+    );
+    let body = std::fs::read(&body_path).expect("read h2 body");
+    assert_eq!(unbrotli(&body), compression_text().as_bytes());
+
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    remove_temp(&config);
+    let _ = std::fs::remove_file(&body_path);
+    let _ = std::fs::remove_file(&head_path);
+    assert_eq!(status.code(), Some(0));
+}

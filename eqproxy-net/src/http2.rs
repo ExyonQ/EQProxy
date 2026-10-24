@@ -21,9 +21,10 @@
 //!   directions (RFC 9113 §8.2.2); the h2 side never sees chunk framing.
 //! - A backend protocol switch (`101`) cannot cross h2: the stream is reset
 //!   and the refusal is logged, never half-forwarded.
-//! - `CONNECT` over h2 is refused with `501` (no h2 tunnel in this phase).
-//! - Extended CONNECT (`:protocol`) and WebSockets over h2 are the next
-//!   increment (B-I18), not this one.
+//! - A classic `CONNECT` (no `:protocol`) is refused with `501`.
+//! - An extended CONNECT (`:protocol = websocket`) is served by `ws`: the
+//!   stream becomes a real WebSocket tunnel through the h1 engine, and every
+//!   other `:protocol` value is refused with `501` (RFC 8441 §5).
 //! - A body truncated by the backend resets the stream instead of ending it
 //!   cleanly: a short body must never look complete to the client.
 
@@ -101,6 +102,8 @@ pub(crate) enum StreamError {
     Io,
     /// The h2 side is gone or refused the frame.
     H2,
+    /// The HTTP/3 side is gone or refused the frame/stream (B-H2).
+    H3,
     /// The peer's GOAWAY refused the stream before processing it, and no
     /// request body was consumed: replaying it on a fresh session is safe
     /// (the session it belonged to is going away anyway).
@@ -168,6 +171,9 @@ pub async fn serve_h2<IO>(
 {
     let mut builder = h2::server::Builder::new();
     builder.max_concurrent_streams(MAX_CONCURRENT_STREAMS);
+    // RFC 8441: advertise that extended CONNECT is understood, so a client
+    // may use `:protocol = websocket` on this connection.
+    builder.enable_connect_protocol();
     let mut connection = match builder.handshake(io).await {
         Ok(connection) => connection,
         Err(err) => {
@@ -204,22 +210,39 @@ pub async fn serve_h2<IO>(
 /// pipe and translate the answer back into h2 frames.
 async fn exchange(
     request: Request<h2::RecvStream>,
-    mut respond: h2::server::SendResponse<Bytes>,
+    respond: h2::server::SendResponse<Bytes>,
     peer: SocketAddr,
     local: SocketAddr,
     cfg: Arc<ResolvedListener>,
     metrics: Arc<Metrics>,
 ) {
     let method = request.method().clone();
+    let (request, mut respond) = if method == Method::CONNECT {
+        // Extended CONNECT (RFC 8441) becomes a real WebSocket tunnel; any
+        // other CONNECT is refused explicitly instead of opening a stream
+        // that can never complete.
+        match crate::ws::serve(request, respond, peer, local, &cfg, &metrics).await {
+            Ok(()) => return,
+            Err(pair) => pair,
+        }
+    } else {
+        (request, respond)
+    };
     if method == Method::CONNECT {
-        // A tunnel has no h2-to-h1 translation in this phase: refuse it
-        // explicitly instead of opening a stream that can never complete.
         metrics
             .http_requests_rejected
             .fetch_add(1, Ordering::Relaxed);
         refuse(&mut respond, StatusCode::NOT_IMPLEMENTED);
         return;
     }
+    // gRPC keeps both directions of its stream open at once (B-I12/Q5). When
+    // the backend speaks HTTP/2 as well, the stream is relayed as-is by
+    // `grpc`; every other request keeps the h1 translation below.
+    let (request, mut respond) =
+        match crate::grpc::serve(request, respond, peer, local, &cfg, &metrics).await {
+            Ok(()) => return,
+            Err(pair) => pair,
+        };
     let body_empty = request.body().is_end_stream();
     let translated = match build_request_head(&method, request.uri(), request.headers(), body_empty)
     {
@@ -307,7 +330,7 @@ fn refuse(respond: &mut h2::server::SendResponse<Bytes>, status: StatusCode) {
 /// HTTP/1.1 head + framing for one h2 request. Pseudo-headers are required
 /// to be complete (`:path` mandatory for a non-CONNECT request); anything
 /// that cannot be translated refuses the stream (`Err`) instead of guessing.
-fn build_request_head(
+pub(crate) fn build_request_head(
     method: &Method,
     uri: &http::Uri,
     headers: &HeaderMap,
@@ -447,7 +470,7 @@ where
 }
 
 /// Reads the h1 answer and writes it back as h2 frames.
-async fn relay_response<R>(
+pub(crate) async fn relay_response<R>(
     mut reader: BufReader<R>,
     respond: &mut h2::server::SendResponse<Bytes>,
     head_request: bool,
@@ -676,7 +699,7 @@ fn informational_response(status: u16) -> Response<()> {
 
 /// h2 headers from an already validated h1 response head: names lowercased,
 /// hop-by-hop and h1 framing headers removed, everything else preserved.
-fn response_headers(head: &[u8]) -> HeaderMap {
+pub(crate) fn response_headers(head: &[u8]) -> HeaderMap {
     let mut headers = HeaderMap::new();
     for (index, line) in head.split(|byte| *byte == b'\n').enumerate() {
         if index == 0 {

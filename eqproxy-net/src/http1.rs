@@ -38,6 +38,8 @@ use tokio::io::{
 
 use eqproxy_core::Metrics;
 
+use crate::compression;
+
 use crate::mirror;
 use crate::proxy::{
     AffinityMode, ForwardedMode, OutboundError, READ_BUF, ResolvedCors, ResolvedHeaders,
@@ -758,6 +760,200 @@ async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
+/// Writes one chunked frame (size line, payload, CRLF) and accounts for it.
+async fn write_chunk<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    data: &[u8],
+    idle: Duration,
+    metrics: &Metrics,
+) -> Result<(), CopyError> {
+    let header = format!("{:x}\r\n", data.len());
+    write_with_timeout(writer, header.as_bytes(), idle).await?;
+    write_with_timeout(writer, data, idle).await?;
+    write_with_timeout(writer, CRLF, idle).await?;
+    metrics
+        .compression_bytes_out
+        .fetch_add(data.len() as u64, Ordering::Relaxed);
+    metrics
+        .bytes_backend_to_client
+        .fetch_add(data.len() as u64, Ordering::Relaxed);
+    Ok(())
+}
+
+/// Compresses a plaintext stream into chunked frames of the negotiated coding.
+/// It stops after the last data chunk: the caller writes `0\r\n` and any
+/// trailers, because the chunked terminator is not part of the compressed
+/// stream.
+async fn compress_to_chunks<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    encoding: compression::Encoding,
+    settings: &compression::ResolvedCompression,
+    idle: Duration,
+    metrics: &Metrics,
+) -> Result<(), CopyError> {
+    let mut encoder = compression::Encoder::new(encoding, settings).map_err(|_| CopyError::Io)?;
+    let mut buf = vec![0u8; READ_BUF];
+    let mut out = Vec::with_capacity(READ_BUF);
+    loop {
+        let got = match tokio::time::timeout(idle, reader.read(&mut buf)).await {
+            Err(_) => return Err(idle_copy_error(&metrics.idle_timeouts)),
+            Ok(Err(_)) => return Err(CopyError::Io),
+            Ok(Ok(0)) => break,
+            Ok(Ok(n)) => n,
+        };
+        metrics
+            .compression_bytes_in
+            .fetch_add(got as u64, Ordering::Relaxed);
+        encoder
+            .push(&buf[..got], &mut out)
+            .map_err(|_| CopyError::Io)?;
+        if !out.is_empty() {
+            write_chunk(writer, &out, idle, metrics).await?;
+            out.clear();
+        }
+    }
+    encoder.finish(&mut out).map_err(|_| CopyError::Io)?;
+    if !out.is_empty() {
+        write_chunk(writer, &out, idle, metrics).await?;
+    }
+    Ok(())
+}
+
+/// Reads a `chunked` body and writes only its payload (framing and trailers
+/// are separate): the compressor sees the plaintext, and the validated
+/// trailer lines are returned to be re-emitted after the gzip member.
+async fn pump_chunked_plain<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    idle: Duration,
+    idle_counter: &AtomicU64,
+) -> Result<Vec<u8>, CopyError> {
+    let scratch = AtomicU64::new(0);
+    let mut trailers = Vec::new();
+    loop {
+        let line = read_crlf_line(reader, idle, MAX_LINE_BYTES).await?;
+        let size = parse_chunk_size(&line)?;
+        if size == 0 {
+            loop {
+                let trailer = read_crlf_line(reader, idle, MAX_LINE_BYTES).await?;
+                if trailer == CRLF {
+                    return Ok(trailers);
+                }
+                let (name, _) = parse_header_line(&trailer[..trailer.len() - CRLF.len()])
+                    .map_err(CopyError::Framing)?;
+                if FORBIDDEN_TRAILERS.contains(&name.as_str()) {
+                    return Err(CopyError::Framing(Reject {
+                        status: 400,
+                        reason: "forbidden trailer header",
+                    }));
+                }
+                trailers.extend_from_slice(&trailer);
+            }
+        }
+        copy_exact(reader, writer, size, idle, &scratch, idle_counter).await?;
+        let mut crlf = [0u8; 2];
+        match tokio::time::timeout(idle, reader.read_exact(&mut crlf)).await {
+            Err(_) => return Err(idle_copy_error(idle_counter)),
+            Ok(Err(_)) => return Err(CopyError::Io),
+            Ok(Ok(_)) => {}
+        }
+        if crlf[..] != *CRLF {
+            return Err(CopyError::Framing(Reject {
+                status: 400,
+                reason: "chunk data without CRLF terminator",
+            }));
+        }
+    }
+}
+
+/// Streams a response body to the client as a chunked compressed stream,
+/// without buffering it whole. The decoder side closes the pipe on every path,
+/// so the compressor always reaches EOF (a truncated body fails the exchange
+/// instead of hanging).
+async fn copy_compressed_body<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    framing: BodyFraming,
+    encoding: compression::Encoding,
+    settings: &compression::ResolvedCompression,
+    idle: Duration,
+    metrics: &Metrics,
+) -> Result<(), CopyError> {
+    const PIPE: usize = 64 * 1024;
+    let scratch = AtomicU64::new(0);
+    let (mut plain_read, plain_write) = tokio::io::duplex(PIPE);
+    let trailers = match framing {
+        BodyFraming::None => return Ok(()),
+        BodyFraming::ContentLength(len) => {
+            let (compressed, fed) = tokio::join!(
+                compress_to_chunks(&mut plain_read, writer, encoding, settings, idle, metrics),
+                async move {
+                    let mut plain_write = plain_write;
+                    let result = copy_exact(
+                        reader,
+                        &mut plain_write,
+                        len,
+                        idle,
+                        &scratch,
+                        &metrics.idle_timeouts,
+                    )
+                    .await;
+                    drop(plain_write);
+                    result
+                },
+            );
+            compressed?;
+            fed?;
+            Vec::new()
+        }
+        BodyFraming::Chunked => {
+            let (compressed, fed) = tokio::join!(
+                compress_to_chunks(&mut plain_read, writer, encoding, settings, idle, metrics),
+                async move {
+                    let mut plain_write = plain_write;
+                    let result =
+                        pump_chunked_plain(reader, &mut plain_write, idle, &metrics.idle_timeouts)
+                            .await;
+                    drop(plain_write);
+                    result
+                },
+            );
+            compressed?;
+            fed?
+        }
+        BodyFraming::UntilEof => {
+            let (compressed, fed) = tokio::join!(
+                compress_to_chunks(&mut plain_read, writer, encoding, settings, idle, metrics),
+                async move {
+                    let mut plain_write = plain_write;
+                    let result = copy_to_eof(
+                        reader,
+                        &mut plain_write,
+                        idle,
+                        &scratch,
+                        &metrics.idle_timeouts,
+                    )
+                    .await;
+                    drop(plain_write);
+                    result
+                },
+            );
+            compressed?;
+            fed?;
+            Vec::new()
+        }
+    };
+    // Chunked terminator: `0` line, the backend's validated trailers, and the
+    // final CRLF. The gzip member already ended inside `gzip_to_chunks`.
+    write_with_timeout(writer, b"0\r\n", idle).await?;
+    if !trailers.is_empty() {
+        write_with_timeout(writer, &trailers, idle).await?;
+    }
+    write_with_timeout(writer, CRLF, idle).await?;
+    Ok(())
+}
+
 /// Reader that serves an already-read prefix first (head-read remainder).
 pub(crate) struct Prefixed<R> {
     pub(crate) prefix: Vec<u8>,
@@ -1031,7 +1227,7 @@ fn rewrite_target(target: &str, rewrite: &ResolvedRewrite) -> String {
 /// 2): the request line's target is rewritten and/or the `Host` header
 /// set to the configured value. The client's bytes are never mutated.
 /// Same line contract as [`apply_forwarded`] (no trailing blank line).
-fn apply_rewrite(head: &[u8], rewrite: &ResolvedRewrite, target: &str) -> Vec<u8> {
+pub(crate) fn apply_rewrite(head: &[u8], rewrite: &ResolvedRewrite, target: &str) -> Vec<u8> {
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut rest = head;
     while let Some(pos) = rest.windows(2).position(|w| w == b"\r\n") {
@@ -1133,7 +1329,12 @@ fn join_head_lines(lines: &[Vec<u8>], capacity: usize) -> Vec<u8> {
 /// - `Replace`: both headers reflect the real client address only.
 /// - Both: `X-Forwarded-Proto` is the client-facing scheme (a
 ///   single-value header: the client's is replaced, never chained).
-fn apply_forwarded(head: &[u8], peer: SocketAddr, mode: ForwardedMode, scheme: &str) -> Vec<u8> {
+pub(crate) fn apply_forwarded(
+    head: &[u8],
+    peer: SocketAddr,
+    mode: ForwardedMode,
+    scheme: &str,
+) -> Vec<u8> {
     if matches!(mode, ForwardedMode::Off) {
         return head.to_vec();
     }
@@ -1273,7 +1474,7 @@ where
 }
 
 /// The value of cookie `name` in the request's `Cookie` headers (B-H8).
-fn cookie_value(headers: &[(String, String)], name: &str) -> Option<String> {
+pub(crate) fn cookie_value(headers: &[(String, String)], name: &str) -> Option<String> {
     headers
         .iter()
         .filter(|(header, _)| header == "cookie")
@@ -1304,7 +1505,7 @@ fn render_header_lines(
 /// `set` drops the client's and appends the new value, `add` keeps the
 /// client's and appends another line. Runs before the forwarded-headers
 /// policy, which a rule can never override.
-fn apply_header_actions(
+pub(crate) fn apply_header_actions(
     head: &[u8],
     actions: &ResolvedHeaders,
     peer: SocketAddr,
@@ -2035,11 +2236,48 @@ pub async fn serve_http<CR, CW>(
         if let Some(cors) = rule_headers.and_then(|actions| actions.cors.as_ref()) {
             response_lines.extend(cors_response_lines(cors, false));
         }
-        let response_head_bytes = if response_lines.is_empty() {
+        let mut response_head_bytes = if response_lines.is_empty() {
             response_head_bytes
         } else {
             append_response_headers(&response_head_bytes, &response_lines)
         };
+        // Response compression (B-N6/H6): the decision happens once, before a
+        // byte of the head is sent, so nothing has to be unwound later. The
+        // backend framing is untouched; only the client's view is rewritten.
+        let accept_encoding = request
+            .headers
+            .iter()
+            .find(|(name, _)| name == "accept-encoding")
+            .map(|(_, value)| value.as_str());
+        let compression_settings = cfg.compression.as_ref();
+        let encoding = compression_settings.and_then(|settings| {
+            compression::eligible(
+                &request.method,
+                request.version,
+                accept_encoding,
+                &compression::ResponseFacts {
+                    status: response.status,
+                    no_body: response.framing == BodyFraming::None,
+                    declared_len: match response.framing {
+                        BodyFraming::ContentLength(len) => Some(len),
+                        _ => None,
+                    },
+                    head: &response_head_bytes,
+                },
+                settings,
+            )
+        });
+        if let Some(encoding) = encoding {
+            response_head_bytes = compression::rewrite_head(&response_head_bytes, encoding);
+            match encoding {
+                compression::Encoding::Gzip => metrics
+                    .compression_gzip_responses
+                    .fetch_add(1, Ordering::Relaxed),
+                compression::Encoding::Brotli => metrics
+                    .compression_brotli_responses
+                    .fetch_add(1, Ordering::Relaxed),
+            };
+        }
         let mut from_backend = Prefixed {
             prefix: carry,
             pos: 0,
@@ -2050,39 +2288,55 @@ pub async fn serve_http<CR, CW>(
             write_with_timeout(&mut client_write, &response_head_bytes, cfg.idle_timeout).await?;
             write_with_timeout(&mut client_write, HEAD_END, cfg.idle_timeout).await?;
             head_forwarded = true;
-            match response.framing {
-                BodyFraming::None => Ok(()),
-                BodyFraming::ContentLength(len) => {
-                    copy_exact(
+            match encoding {
+                Some(encoding) => {
+                    // `encoding` is only produced from `compression_settings`.
+                    let settings = compression_settings.ok_or(CopyError::Io)?;
+                    copy_compressed_body(
                         &mut from_backend,
                         &mut client_write,
-                        len,
+                        response.framing,
+                        encoding,
+                        settings,
                         cfg.idle_timeout,
-                        &metrics.bytes_backend_to_client,
-                        &metrics.idle_timeouts,
+                        &metrics,
                     )
                     .await
                 }
-                BodyFraming::Chunked => {
-                    copy_chunked(
-                        &mut from_backend,
-                        &mut client_write,
-                        cfg.idle_timeout,
-                        &metrics.bytes_backend_to_client,
-                        &metrics.idle_timeouts,
-                    )
-                    .await
-                }
-                BodyFraming::UntilEof => {
-                    copy_to_eof(
-                        &mut from_backend,
-                        &mut client_write,
-                        cfg.idle_timeout,
-                        &metrics.bytes_backend_to_client,
-                        &metrics.idle_timeouts,
-                    )
-                    .await
-                }
+                None => match response.framing {
+                    BodyFraming::None => Ok(()),
+                    BodyFraming::ContentLength(len) => {
+                        copy_exact(
+                            &mut from_backend,
+                            &mut client_write,
+                            len,
+                            cfg.idle_timeout,
+                            &metrics.bytes_backend_to_client,
+                            &metrics.idle_timeouts,
+                        )
+                        .await
+                    }
+                    BodyFraming::Chunked => {
+                        copy_chunked(
+                            &mut from_backend,
+                            &mut client_write,
+                            cfg.idle_timeout,
+                            &metrics.bytes_backend_to_client,
+                            &metrics.idle_timeouts,
+                        )
+                        .await
+                    }
+                    BodyFraming::UntilEof => {
+                        copy_to_eof(
+                            &mut from_backend,
+                            &mut client_write,
+                            cfg.idle_timeout,
+                            &metrics.bytes_backend_to_client,
+                            &metrics.idle_timeouts,
+                        )
+                        .await
+                    }
+                },
             }
         })
         .await;

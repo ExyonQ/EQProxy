@@ -27,6 +27,28 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 # or a truncated stream after it.
 max_stream_duration = "0s"
 
+# Response compression (v0.7, mode = "http" only): gzip and/or Brotli
+# negotiated from the request's Accept-Encoding. The body is compressed while
+# it is relayed, so the response is sent chunked (no Content-Length) and
+# clients that already compressed (Content-Encoding), partial replies, HEAD
+# and HTTP/1.0 are left untouched. Measure before promising anything: the raw
+# numbers live in docs/evidence/v07-compression/bench.md.
+#[listener.web.compression]
+#gzip = true
+#level = 6                  # gzip, 1 (fastest) to 9 (smallest)
+#brotli = true              # also offer br when the client accepts it
+#brotli_quality = 5         # Brotli, 0 (fastest) to 11 (smallest)
+#min_size = 1024            # only applies when the response declares its length
+#types = ["text/*", "application/json", "application/javascript",
+#         "application/xml", "application/xhtml+xml", "application/rss+xml",
+#         "image/svg+xml"]
+
+# HTTP/3 over QUIC (B-H2): optional, and only with TLS + mode = "http".
+# Serves h3 on the same IP:PORT over UDP (ALPN "h3" is automatic; the
+# certificate, SNI entries and client CA are the same as the TCP listener).
+# A change to the TLS material of a live QUIC listener needs a restart.
+#quic = true
+
 # TLS termination (A11): optional. Without this section the listener is plain TCP.
 #[listener.web.tls]
 #cert = "certs/fullchain.pem"  # PEM chain (leaf first)

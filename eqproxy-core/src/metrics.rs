@@ -105,6 +105,31 @@ pub struct Metrics {
     /// Streams the peer refused with `GOAWAY` (never processed) that were
     /// replayed on a fresh session: safe because the server said so.
     pub h2_refused_retried: AtomicU64,
+    /// gRPC streams relayed end to end over HTTP/2 (B-I12/Q5).
+    pub grpc_streams: AtomicU64,
+    /// gRPC streams cut before a clean status (backend reset, deadline,
+    /// failed request direction).
+    pub grpc_stream_errors: AtomicU64,
+    /// Responses served with `Content-Encoding: gzip` (B-N6/H6).
+    pub compression_gzip_responses: AtomicU64,
+    /// WebSocket tunnels opened through an HTTP/2 extended CONNECT
+    /// (RFC 8441, B-I18).
+    pub ws_tunnels: AtomicU64,
+    /// Extended CONNECT streams whose handshake or tunnel failed (backend
+    /// refused or reset, deadline, client gone).
+    pub ws_failures: AtomicU64,
+    /// Responses served with `Content-Encoding: br` (B-N6/H6).
+    pub compression_brotli_responses: AtomicU64,
+    /// Body bytes fed into the compressor (plaintext).
+    pub compression_bytes_in: AtomicU64,
+    /// Compressed bytes written to the client (gzip payload, no framing).
+    pub compression_bytes_out: AtomicU64,
+    /// HTTP/3 connections that ended with a normal close (`H3_NO_ERROR` or
+    /// QUIC application code 0): not an error, not logged.
+    pub h3_clean_closes: AtomicU64,
+    /// HTTP/3 connections that ended with a real error (protocol error code,
+    /// transport error, reset or timeout): counted and logged as `WARN`.
+    pub h3_connection_errors: AtomicU64,
 }
 
 /// Immutable snapshot of the counters.
@@ -151,6 +176,16 @@ pub struct MetricsSnapshot {
     pub h2_sessions_idle_closed: u64,
     pub h2_goaway_received: u64,
     pub h2_refused_retried: u64,
+    pub grpc_streams: u64,
+    pub grpc_stream_errors: u64,
+    pub ws_tunnels: u64,
+    pub ws_failures: u64,
+    pub compression_gzip_responses: u64,
+    pub compression_brotli_responses: u64,
+    pub compression_bytes_in: u64,
+    pub compression_bytes_out: u64,
+    pub h3_clean_closes: u64,
+    pub h3_connection_errors: u64,
 }
 
 impl Metrics {
@@ -200,6 +235,16 @@ impl Metrics {
             h2_sessions_idle_closed: self.h2_sessions_idle_closed.load(Ordering::Relaxed),
             h2_goaway_received: self.h2_goaway_received.load(Ordering::Relaxed),
             h2_refused_retried: self.h2_refused_retried.load(Ordering::Relaxed),
+            grpc_streams: self.grpc_streams.load(Ordering::Relaxed),
+            grpc_stream_errors: self.grpc_stream_errors.load(Ordering::Relaxed),
+            ws_tunnels: self.ws_tunnels.load(Ordering::Relaxed),
+            ws_failures: self.ws_failures.load(Ordering::Relaxed),
+            compression_gzip_responses: self.compression_gzip_responses.load(Ordering::Relaxed),
+            compression_brotli_responses: self.compression_brotli_responses.load(Ordering::Relaxed),
+            compression_bytes_in: self.compression_bytes_in.load(Ordering::Relaxed),
+            compression_bytes_out: self.compression_bytes_out.load(Ordering::Relaxed),
+            h3_clean_closes: self.h3_clean_closes.load(Ordering::Relaxed),
+            h3_connection_errors: self.h3_connection_errors.load(Ordering::Relaxed),
         }
     }
 
@@ -301,6 +346,29 @@ impl fmt::Display for MetricsSnapshot {
             f,
             " h2[sessions_idle_closed={} goaway={} refused_retried={}]",
             self.h2_sessions_idle_closed, self.h2_goaway_received, self.h2_refused_retried
+        )?;
+        write!(
+            f,
+            " grpc[streams={} errors={}]",
+            self.grpc_streams, self.grpc_stream_errors
+        )?;
+        write!(
+            f,
+            " h3[clean_closes={} connection_errors={}]",
+            self.h3_clean_closes, self.h3_connection_errors
+        )?;
+        write!(
+            f,
+            " ws[tunnels={} failures={}]",
+            self.ws_tunnels, self.ws_failures
+        )?;
+        write!(
+            f,
+            " compression[gzip={} brotli={} bytes_in={} bytes_out={}]",
+            self.compression_gzip_responses,
+            self.compression_brotli_responses,
+            self.compression_bytes_in,
+            self.compression_bytes_out
         )
     }
 }

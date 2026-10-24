@@ -12,14 +12,20 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true }
+# Global allocator (ADR-0014): musl's single-lock malloc measured ~20 % of
+# S-H3-01 CPU plus futex wakeups; mimalloc keeps per-thread free lists.
+mimalloc = { version = "0.1", default-features = false }
 rlimit = { workspace = true }
 tokio = { workspace = true }
-eqproxy-core = { path = "../eqproxy-core", version = "0.6.1" }
-eqproxy-config = { path = "../eqproxy-config", version = "0.6.1" }
-eqproxy-net = { path = "../eqproxy-net", version = "0.6.1" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.7.0" }
+eqproxy-config = { path = "../eqproxy-config", version = "0.7.0" }
+eqproxy-net = { path = "../eqproxy-net", version = "0.7.0" }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The compression E2E decodes what the real binary wrote on the wire.
+flate2 = "1"
+brotli = "9"

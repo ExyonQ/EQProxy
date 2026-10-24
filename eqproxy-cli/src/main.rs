@@ -6,6 +6,13 @@
 
 #![forbid(unsafe_code)]
 
+// One allocator for the whole binary. Profiling S-H3-01 put ~20 % of the CPU
+// in musl's malloc lock plus the futex wakeups it causes across the tokio
+// workers (`docs/evidence/v07-h3-profile.md`); the same path is 39 % faster
+// with per-thread free lists. The decision and its trade-offs are ADR-0014.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -736,10 +743,17 @@ fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
                 }
             }
         };
+        let quic = if listener.quic { " quic=h3/udp" } else { "" };
         let _ = writeln!(
             out,
-            "listener \"{}\": bind {} mode={} maxconn={} tls={} backend=\"{}\"",
-            listener.name, listener.listen, mode, listener.maxconn, tls, listener.backend_name
+            "listener \"{}\": bind {} mode={} maxconn={} tls={} backend=\"{}\"{}",
+            listener.name,
+            listener.listen,
+            mode,
+            listener.maxconn,
+            tls,
+            listener.backend_name,
+            quic
         );
         let _ = writeln!(
             out,
@@ -1698,6 +1712,35 @@ fn explain_report(
         }
     };
     let _ = writeln!(out, "timeout_on_fire: {fire}");
+    if listener.quic {
+        let _ = writeln!(
+            out,
+            "http3: yes (QUIC on udp/{}, ALPN h3; a TLS change needs a process restart)",
+            listener.listen.port()
+        );
+    }
+    if let Some(compression) = &listener.compression {
+        let types = compression
+            .types
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let codings = match (compression.gzip, compression.brotli) {
+            (true, true) => format!(
+                "gzip level={} brotli quality={}",
+                compression.level, compression.brotli_quality
+            ),
+            (true, false) => format!("gzip level={}", compression.level),
+            (false, true) => format!("brotli quality={}", compression.brotli_quality),
+            (false, false) => "none".to_owned(),
+        };
+        let _ = writeln!(
+            out,
+            "compression: {codings} min_size={} types=[{types}] (negotiated from Accept-Encoding; HTTP/1.1 chunked)",
+            compression.min_size
+        );
+    }
     if let Some(local) = &listener.local_response {
         let _ = writeln!(
             out,
@@ -2187,6 +2230,20 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                     eqproxy_net::proxy::ForwardedMode::Replace
                 }
             });
+            // Response compression (B-N6/H6): validated here so the runtime
+            // receives exactly the grammar the gate accepted.
+            if listener.compression.gzip || listener.compression.brotli {
+                let settings = eqproxy_net::compression::ResolvedCompression::new(
+                    listener.compression.gzip,
+                    listener.compression.brotli,
+                    listener.compression.level,
+                    listener.compression.brotli_quality,
+                    listener.compression.min_size,
+                    &listener.compression.types,
+                )
+                .map_err(|why| format!("listener.{name}.compression: {why}"))?;
+                resolved = resolved.with_compression(settings);
+            }
             if let Some(local) = &listener.local_response {
                 resolved = resolved.with_local_response(eqproxy_net::proxy::LocalResponse {
                     status: local.status,
@@ -2242,6 +2299,9 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
                 .map_err(|e| format!("listener.{name}.tls: {e}"))?;
                 resolved = resolved.with_server_tls(acceptor);
             }
+            // HTTP/3 (B-H2): the UDP endpoint is opened by the dataplane on
+            // the same address; validation already required TLS and http.
+            resolved = resolved.with_quic(listener.quic);
             Ok(resolved)
         })
         .collect()
