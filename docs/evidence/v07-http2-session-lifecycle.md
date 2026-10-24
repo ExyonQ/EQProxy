@@ -122,6 +122,69 @@ The three new journeys:
 | `a_goaway_drains_in_flight_streams_and_the_next_exchange_dials_a_fresh_one` | A real `h2::server::Connection::graceful_shutdown` announced while a `/slow` stream is being answered: that stream still returns `200 slow-done` (drain), the next exchange dials a fresh session (2 accepted connections) and `h2_goaway_received == 1`. |
 | `a_stream_the_peer_refuses_is_replayed_once_on_a_fresh_session` | The origin serves one stream, then resets the next with `RST_STREAM(REFUSED_STREAM)` without reading or answering it: the client still gets `200`, exactly one copy of the request reaches the origin (with the same `x-replay` header), the replayed session is a second connection, `h2_refused_retried == 1` and `h2_goaway_received == 0`. |
 
+### 5.1 A GOAWAY that races an admission (fixed after the first tag attempt)
+
+The first v0.7.0 tag run failed this journey on Linux (`40060841889`, job
+`Binaries linux`): `next.status` was `502` with
+`WARN [web] HTTP/2 backend exchange ended: HTTP/2 protocol error`, and the
+same failure had already happened on the previous `main` (`40046969558`), so
+it was not caused by the release commit. It is timing-dependent: the suite
+passed on macOS and failed on Linux.
+
+Reproduced with the real suite in a Linux container, natively on arm64,
+limited to 2 CPUs like a CI runner:
+
+```bash
+docker run --rm --platform linux/arm64 --cpus=2 -v "$PWD":/src -w /src \
+  -u "$(id -u):$(id -g)" -e CARGO_TARGET_DIR=/tmp/eq-target \
+  -v /tmp/eq-target-linux:/tmp/eq-target rust:1.97-bookworm \
+  cargo test -p eqproxy-net --test e2e_backend_h2 \
+  a_goaway_drains_in_flight_streams_and_the_next_exchange_dials_a_fresh_one
+```
+
+It failed in **0.10 s**, before any timeout. A temporary diagnostic on the
+response-error path named the cause:
+
+```text
+DIAG response: eos=true remote=true goaway=false reset=true reason=Some(CANCEL) usable=true
+```
+
+The origin had sent `GOAWAY` (the test waits for that), but the proxy's next
+bodiless request was admitted before the client library reported it, and the
+peer answered that stream with `RST_STREAM(CANCEL)` rather than a GOAWAY
+error. The old classifier replayed only `is_go_away()` or
+`RST_STREAM(REFUSED_STREAM)`, so this reset became `StreamError::H2` and the
+client saw a `502` — a real defect, not a flaky assertion: a request that
+races a GOAWAY must not fail while nothing of it reached the origin.
+
+The fix has two parts, both on the backend side:
+
+1. `Session::enter` probes the h2 handle (`SendRequest::poll_ready`, which
+   reports the stored GOAWAY) before admitting a stream, and retires the
+   session when the peer already announced it. `hub.lookup` then dials a
+   fresh session instead of handing out a draining one.
+2. If the GOAWAY lands between the lookup and the admission, the exchange
+   either finds the retired session (the proxy retries the open once on a
+   fresh session) or loses the race on the wire; on that error path EQProxy
+   probes the session again and, only for a request that carried **no body**,
+   replays it once on a fresh session. A body-carrying request is never
+   replayed, because it may have been processed.
+
+Verification after the fix:
+
+| Command | Result |
+|---|---|
+| Linux container, the single journey ×5 | **5/5 passed**, 0.6 s each (previously deterministic failure) |
+| Linux container, whole `e2e_backend_h2` ×3 | **13/13 passed** each run, 11.4 s |
+| Linux container, whole `eqproxy-net` suite | **all result lines ok**, 0 failed |
+| macOS, whole `e2e_backend_h2` ×3 | **13/13 passed** each run, 10.1 s |
+| macOS, `cargo test --workspace` | **424 passed, 0 failed**, 2 ignored, 28 suites |
+| `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` | exit 0 |
+
+The journeys that carry a body (`trailers_and_chunked_bodies_cross_in_both_directions`,
+the gRPC and WebSocket suites) stayed green, which is what the no-replay rule
+protects.
+
 The one-shot origin used by `a_dead_session_is_replaced_by_a_fresh_one` had a
 latent bug that the new timing exposed: it answered **inline**, so the only
 poller of its h2 connection was busy inside `RecvStream::data()` and could

@@ -118,6 +118,9 @@ struct State {
     last_idle: Instant,
     /// The peer sent GOAWAY or the session is closing: never handed out.
     going_away: bool,
+    /// The peer actually sent GOAWAY (not just a closed connection): only
+    /// this proves that a refused stream was never processed.
+    goaway: bool,
 }
 
 impl Session {
@@ -148,7 +151,16 @@ impl Session {
         if state.going_away {
             return None;
         }
-        let send = state.send.clone()?;
+        let mut send = state.send.clone()?;
+        // h2 reports a received GOAWAY only when the handle is next used. A
+        // session the peer already announced as going away must never admit
+        // another stream: the request would be reset by the peer and, unlike
+        // a GOAWAY error, that reset cannot always be replayed safely.
+        if probe_gone(&mut send) {
+            drop(state);
+            self.going_away();
+            return None;
+        }
         state.active += 1;
         Some((
             ExchangeSlot {
@@ -167,6 +179,7 @@ impl Session {
             return;
         }
         state.going_away = true;
+        state.goaway = true;
         state.send = None;
         drop(state);
         self.metrics
@@ -177,6 +190,33 @@ impl Session {
             self.name, self.addr
         );
         self.unregister();
+    }
+
+    /// Whether the peer announced GOAWAY on this session, probing the handle
+    /// when h2 has not surfaced it yet. Only a received GOAWAY counts: a
+    /// connection that simply died leaves a processed stream unknown, so it
+    /// must never authorize a replay. Reads (never opens a stream), so it is
+    /// safe on the response path too.
+    fn peer_announced_goaway(&self) -> bool {
+        if !self.alive.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut state = self.lock();
+        if state.goaway {
+            return true;
+        }
+        if state.going_away {
+            return false;
+        }
+        let Some(send) = state.send.as_mut() else {
+            return false;
+        };
+        let gone = probe_gone(send);
+        drop(state);
+        if gone {
+            self.going_away();
+        }
+        gone
     }
 
     /// Ends the connection once no exchange is in flight. The h2 client API
@@ -396,6 +436,7 @@ where
             active: 0,
             last_idle: Instant::now(),
             going_away: false,
+            goaway: false,
         }),
         alive: AtomicBool::new(true),
         connection: Mutex::new(None),
@@ -472,6 +513,15 @@ fn describe(err: StreamError) -> &'static str {
         StreamError::Refused => "refused by a GOAWAY and not replayable",
         StreamError::StreamRefused => "reset with REFUSED_STREAM and not replayable",
     }
+}
+
+/// Asks the client handle whether the peer's GOAWAY has arrived. The h2
+/// client stores that frame as a connection error and reports it on the next
+/// use, so a session can be shut down by the peer while it still looks alive
+/// in the hub; this is the only way to learn it without opening a stream.
+fn probe_gone(send: &mut h2::client::SendRequest<Bytes>) -> bool {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    matches!(send.poll_ready(&mut cx), std::task::Poll::Ready(Err(_)))
 }
 
 /// Did the peer refuse this stream **without processing it**? That is the one
@@ -618,7 +668,17 @@ impl Exchange {
                     StreamError::StreamRefused
                 });
             }
-            Err(_) => return Err(StreamError::H2),
+            Err(_) => {
+                // A peer that announced GOAWAY may answer the next stream with
+                // `RST_STREAM(CANCEL)` instead of a GOAWAY error, depending on
+                // which frame the client library reports first. Nothing of a
+                // bodiless request reached the origin, so it is replayable on
+                // a fresh session; the probe also retires this one.
+                if end_of_stream && self.session.peer_announced_goaway() {
+                    return Err(StreamError::Refused);
+                }
+                return Err(StreamError::H2);
+            }
         };
         if !end_of_stream {
             forward_request_body(body, &mut send, request.framing, idle).await?;
@@ -630,14 +690,22 @@ impl Exchange {
                 // Only a stream that carried no body at all can be replayed:
                 // a consumed body would need a buffer, and a stream the server
                 // did process must never run twice.
-                if !end_of_stream || !refused_by_peer(&err) {
+                if !end_of_stream {
                     return StreamError::H2;
                 }
-                if went_away(&err) {
-                    StreamError::Refused
-                } else {
-                    StreamError::StreamRefused
+                if refused_by_peer(&err) {
+                    return if went_away(&err) {
+                        StreamError::Refused
+                    } else {
+                        StreamError::StreamRefused
+                    };
                 }
+                // Same GOAWAY race as above, seen as a reset of the stream the
+                // peer refused to process: the session is the one going away.
+                if self.session.peer_announced_goaway() {
+                    return StreamError::Refused;
+                }
+                StreamError::H2
             })?;
         // `HEAD`, `204` and `304` never carry a body: the h2 response may still
         // declare a length, it just must not be awaited or relayed.

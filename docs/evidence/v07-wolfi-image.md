@@ -130,6 +130,11 @@ The 424-test figure is the `cargo test`/`nextest` result of that Veyra run
 - The images were **built and tested locally**; the publish, promote and
   re-pull journeys are the release workflow's job and were **not executed**
   here (no tag, no push in this step).
+- The two digests in §2 were built **before** the GOAWAY-race fix documented
+  in [`v07-http2-session-lifecycle.md`](v07-http2-session-lifecycle.md) §5.1.
+  They prove the Wolfi packaging, the Scout gate and the container journeys;
+  the release workflow rebuilds both architectures from the final tag and
+  re-runs the same journeys, so the published digests differ from these.
 - **HTTP/3 inside the container was NOT EXECUTED**: the journeys above cover
   h1 and h2c. h3 is covered by the crate-level E2E suites (`e2e_http3.rs`) and
   the `aioquic`/`quic-go` runs in
