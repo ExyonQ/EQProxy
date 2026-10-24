@@ -3895,6 +3895,69 @@ fn run_canary_split_routes_by_weight_with_header_and_cookie_overrides() {
     assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
 }
 
+/// How long the map watcher may take to apply a new file on a loaded host.
+/// Measured against the real binary in this test's topology: 0.8 s on an
+/// idle host, 4.2–7.4 s with 16 CPU burners on 12 cores, and more than the
+/// old 10 s budget when the whole instrumented suite (424 tests, 25
+/// binaries) competes for the same cores — which is exactly how this test
+/// failed under `veyra audit`. The load, not the swap, is what varies, so
+/// the wait is event-based and the bound is generous.
+const MAP_RELOAD_BUDGET: Duration = Duration::from_secs(60);
+
+/// Kills and reaps a spawned proxy when the test leaves its scope early.
+/// A failed run must never leave `eqproxy run` alive: it keeps accepting
+/// and dialling, so it burns CPU and makes the next run slower. A failed
+/// `llvm-cov` run of this file left one alive for 30 minutes.
+struct ReapOnDrop(std::process::Child);
+
+impl std::ops::Deref for ReapOnDrop {
+    type Target = std::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for ReapOnDrop {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for ReapOnDrop {
+    fn drop(&mut self) {
+        if matches!(self.0.try_wait(), Ok(None)) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+}
+
+/// Waits for one line of a child's stderr, or panics with the whole log
+/// after `budget`. Lines that are not the awaited one (metrics, another
+/// reload) are skipped; a closed channel or an exhausted budget is a
+/// failure that prints what the child did say.
+fn await_log_line(
+    rx: &std::sync::mpsc::Receiver<String>,
+    log: &std::sync::Mutex<String>,
+    need: &str,
+    budget: Duration,
+    what: &str,
+) -> String {
+    let deadline = Instant::now() + budget;
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(line) if line.contains(need) => return line,
+            Ok(_) => continue,
+            Err(_) => {
+                let log = log.lock().map(|l| l.clone()).unwrap_or_default();
+                panic!("{what} within {budget:?}: {log}");
+            }
+        }
+    }
+}
+
 /// Hot data maps through the **real** binary (C10 / PP-02): a 100 000
 /// entry map updates under traffic **without a config reload** and
 /// without losing any other state — the modified entries change, the
@@ -3950,15 +4013,20 @@ fn run_hot_maps_swap_under_traffic_without_config_reload() {
         ),
     );
 
-    let mut child = bin()
-        .args(["run", "--config"])
-        .arg(&config)
-        .args(["--metrics-interval", "1h"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn eqproxy run (hot maps)");
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (hot maps)"),
+    );
     let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    // The whole log is kept: the reload line is the event this test waits
+    // for, and the tail is what a failure prints.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let mut proxy_addr = String::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut line = String::new();
@@ -3966,12 +4034,34 @@ fn run_hot_maps_swap_under_traffic_without_config_reload() {
         line.clear();
         let read = stderr.read_line(&mut line).expect("read stderr");
         assert!(read > 0, "eqproxy closed stderr without announcing bind");
+        if let Ok(mut log) = log.lock() {
+            log.push_str(&line);
+        }
         if let Some(addr) = line.split("listening on ").nth(1) {
             proxy_addr = addr.trim().to_owned();
             break;
         }
     }
     assert!(!proxy_addr.is_empty(), "the address was not announced");
+
+    // Keep draining stderr for the rest of the test, so the reload line can
+    // be awaited as an event instead of inferred from response latency.
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let reader = {
+        let log = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            for line in stderr.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(mut log) = log.lock() {
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+                if line_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+    };
 
     let as_user = |user: &str| {
         format!("GET / HTTP/1.1\r\nHost: x\r\nx-user: {user}\r\nConnection: close\r\n\r\n")
@@ -4004,7 +4094,18 @@ fn run_hot_maps_swap_under_traffic_without_config_reload() {
     updated.push("newcomer vip".to_owned());
     write_entries(&mapfile, &updated);
 
-    // The swap lands within a reload window (poll, never a fixed sleep).
+    // The watcher is the thing under test: wait for the reload it logs
+    // (bounded, but not against a latency budget it cannot control). The
+    // dataplane assertion below is what proves the swap is live.
+    await_log_line(
+        &line_rx,
+        &log,
+        "map \"tiers\" reloaded: 100001 entries",
+        MAP_RELOAD_BUDGET,
+        "the map reload did not land",
+    );
+    // The swap was published before its line was written; traffic must see
+    // it without a reconnect or a config reload.
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let response = proxied(proxy_addr.as_str(), as_user("newcomer").as_bytes());
@@ -4013,7 +4114,8 @@ fn run_hot_maps_swap_under_traffic_without_config_reload() {
         }
         assert!(
             Instant::now() < deadline,
-            "the map reload did not land in time"
+            "the reloaded map did not reach traffic (last response: {response}; log: {})",
+            log.lock().map(|l| l.clone()).unwrap_or_default()
         );
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -4061,15 +4163,10 @@ fn run_hot_maps_swap_under_traffic_without_config_reload() {
         }
         std::thread::sleep(Duration::from_millis(50));
     };
-    // The process has exited: drain the log lines it left in the pipe.
-    let mut log = String::new();
-    loop {
-        line.clear();
-        if stderr.read_line(&mut line).expect("read stderr") == 0 {
-            break;
-        }
-        log.push_str(&line);
-    }
+    // The process has exited: the reader thread hits EOF and the log is
+    // complete (including the final METRICS line) once it is joined.
+    reader.join().expect("stderr reader thread");
+    let log = log.lock().map(|l| l.clone()).unwrap_or_default();
     remove_temp(&config);
     let _ = std::fs::remove_file(&mapfile);
     assert_eq!(status.code(), Some(0), "clean shutdown must exit with 0");
@@ -4088,6 +4185,50 @@ fn run_hot_maps_swap_under_traffic_without_config_reload() {
     assert!(
         log.contains("cfg[reloads=0"),
         "no config reload may happen (PP-02: no state rebuilt): {log}"
+    );
+}
+
+/// A wait for a log line that never comes fails on its own budget and says
+/// what the child did log, instead of hanging the suite.
+#[test]
+#[should_panic(expected = "the line never came within 100ms")]
+fn await_log_line_times_out_with_the_log() {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    tx.send("INFO listener web listening on 127.0.0.1:1".to_owned())
+        .expect("send log line");
+    drop(tx);
+    let log = std::sync::Mutex::new("INFO listener web listening on 127.0.0.1:1\n".to_owned());
+    await_log_line(
+        &rx,
+        &log,
+        "reloaded",
+        Duration::from_millis(100),
+        "the line never came",
+    );
+}
+
+/// The guard that keeps a failed run from leaving a proxy behind: dropping
+/// the handle kills and reaps the child instead of orphaning it.
+#[cfg(unix)]
+#[test]
+fn reap_on_drop_leaves_no_live_child() {
+    let child = ReapOnDrop(
+        Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("spawn sleep"),
+    );
+    let pid = child.id().to_string();
+    drop(child);
+    let probe = Command::new("kill")
+        .args(["-0", pid.as_str()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("probe the pid");
+    assert!(
+        !probe.success(),
+        "the guard must reap the child, not orphan it"
     );
 }
 
