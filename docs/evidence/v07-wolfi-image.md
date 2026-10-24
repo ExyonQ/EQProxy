@@ -52,6 +52,15 @@ same zero. The two reports are kept verbatim in
 [`v07-wolfi-image/scout-amd64.txt`](v07-wolfi-image/scout-amd64.txt); both
 were re-run after the last build and exited 0.
 
+Later check on the published release (2026-10-24):
+`docker scout cves exyonq/eqproxy:0.7.0` reports **69 packages** indexed and
+`No vulnerable package detected` for `linux/arm64` (local digest
+`eeef96fc7a4c`), and the same 69 with 0/0/0/0 comes from the attestation for
+`linux/amd64`; the `SCOUT-0.7.0-linux-amd64.md` and `…-arm64.md` assets on
+the v0.7.0 release state 69 as well. The 36 above is the candidate build
+measured in this section; the published image indexes 69. The zero is
+unchanged on both.
+
 ## 4. Container journeys (both architectures)
 
 Each row was executed twice, once per architecture: `--platform linux/<arch>`

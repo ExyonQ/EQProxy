@@ -20,10 +20,10 @@ responses with **gzip or Brotli** from `Accept-Encoding` — request bodies are
 never decompressed, they are forwarded untouched.
 
 The image runs on **Wolfi**, the minimal container distro
-(`cgr.dev/chainguard/wolfi-base`, pinned by digest): 36 packages and
-**0 critical / 0 high** per Docker Scout, on both architectures. The binary
-at `/opt/eqproxy` is still a **statically linked musl** executable and does
-not use the distro's libc; Wolfi supplies the CA bundle for operators that
+(`cgr.dev/chainguard/wolfi-base`, pinned by digest): **0 critical / 0 high**
+per Docker Scout on both architectures, over the 69 packages in its SBOM. The
+binary at `/opt/eqproxy` is still a **statically linked musl** executable and
+does not use the distro's libc; Wolfi supplies the CA bundle for operators that
 point `ca_file` at the system trust store, a shell for `docker exec`, and the
 unprivileged `nonroot` user (`65532:65532`). It listens wherever the
 configuration says (the convention in the examples is port 8080).
@@ -33,8 +33,8 @@ both scanned with Docker Scout before the release tag exists: the workflow
 scans each architecture, runs the container journeys on each, and only then
 promotes the scanned digest to `:<version>` and `:latest`. The two reports
 (`SCOUT-<version>-linux-amd64.md`, `…-arm64.md`) are attached to every GitHub
-release. The scan indexes the image — 36 Wolfi packages plus the statically
-linked binary — so a clean report covers both: neither the pinned base nor
+release. The scan indexes the image's SBOM — 69 packages on each
+architecture — so a clean report covers both: neither the pinned base nor
 EQProxy ships a known critical or high finding at the time of the release.
 
 Standalone binaries for both architectures — `eqproxy-linux-amd64` and
