@@ -1,0 +1,55 @@
+samples=129714
+ 20.09%  quinn_proto (protocol state machine)
+           2.20%  _RNvMNtCs1WptpMRJdWI_11quinn_proto10connectionNtB2_10Connection12handle_event
+           2.19%  _RNvMNtCs1WptpMRJdWI_11quinn_proto10connectionNtB2_10Connection13poll_transmit
+           2.18%  _RNvMNtCs1WptpMRJdWI_11quinn_proto10connectionNtB2_10Connection13handle_decode
+           1.41%  _RNvMNtCs1WptpMRJdWI_11quinn_proto10connectionNtB2_10Connection24process_decrypted_packet
+           1.39%  _RNvMNtCs1WptpMRJdWI_11quinn_proto10connectionNtB2_10Connection15process_payload
+           0.88%  _RNvMNtNtCs1WptpMRJdWI_11quinn_proto10connection14packet_builderNtB2_13PacketBuilder16finish_and_tra
+  0.00%  quinn conn/endpoint driver
+  0.11%  quinn_udp (socket syscalls)
+           0.04%  _RNvMNtCscB10Mn78dph_9quinn_udp3impNtB2_14UdpSocketState4send
+           0.03%  _RNvNtCscB10Mn78dph_9quinn_udp3imp4send
+           0.03%  _RNvMNtCscB10Mn78dph_9quinn_udp3impNtB2_14UdpSocketState4recv
+           0.00%  _RNvNtCscB10Mn78dph_9quinn_udp3imp11prepare_msg
+  5.44%  aws-lc crypto
+           0.52%  _RNvXs1_NtNtNtCs1svMGqKZKUb_6rustls6crypto9aws_lc_rs4quicNtB5_9PacketKeyNtNtBb_4quic9PacketKey16encr
+           0.49%  aws_lc_0_46_0_EVP_AEAD_CTX_seal_scatter
+           0.44%  aead_aes_gcm_seal_scatter
+           0.42%  aead_aes_gcm_seal_scatter_impl
+           0.34%  _RNvXs1_NtNtNtCs1svMGqKZKUb_6rustls6crypto9aws_lc_rs4quicNtB5_9PacketKeyNtNtBb_4quic9PacketKey16decr
+           0.32%  _RINvMsa_NtCs9Gn82KeU9QK_9aws_lc_rs4aeadNtB6_11LessSafeKey11open_withinRShECs1svMGqKZKUb_6rustls
+ 18.31%  h3 (framing/QPACK)
+           1.88%  _RNCNvMs2_NtNtCskxJ5fuUDbbr_2h36server6streamINtB7_13RequestStreamINtCs2RdjJYtKhgJ_8h3_quinn10BidiSt
+           1.60%  _RNvMs0_NtNtCskxJ5fuUDbbr_2h36server10connectionINtB5_10ConnectionNtCs2RdjJYtKhgJ_8h3_quinn10Connect
+           1.36%  _RNvXs8_Cs2RdjJYtKhgJ_8h3_quinnNtB5_10RecvStreamNtNtCskxJ5fuUDbbr_2h34quic10RecvStream9poll_data
+           1.27%  _RNCNvXs8_Cs2RdjJYtKhgJ_8h3_quinnNtB7_10RecvStreamNtNtCskxJ5fuUDbbr_2h34quic10RecvStream9poll_data0B
+           1.15%  _RNvMs_NtCskxJ5fuUDbbr_2h35frameINtB4_11FrameStreamINtCs2RdjJYtKhgJ_8h3_quinn10BidiStreamNtNtCscux9F
+           1.00%  _RINvNtNtCskxJ5fuUDbbr_2h35qpack7encoder16encode_statelessNtNtCscux9FtbmaV1_5bytes9bytes_mut8BytesMu
+ 15.68%  eqproxy http3 exchange
+           5.15%  _RNCNvNtCs6UARxvO4XRA_11eqproxy_net5http38exchange0B5_
+           3.04%  _RNvMs0_NtNtNtCsfGan6uRHWP8_5tokio7runtime4task7harnessINtB5_7HarnessNCNCNvNtCs6UARxvO4XRA_11eqproxy
+           2.79%  _RNvMs4_NtNtNtCsfGan6uRHWP8_5tokio7runtime4task4coreINtB5_4CoreNCNCNvNtCs6UARxvO4XRA_11eqproxy_net5h
+           2.76%  _RNCNCNvNtCs6UARxvO4XRA_11eqproxy_net5http38exchange0s_0B7_.llvm.9588228170710391016
+           0.29%  _RINvMNtNtNtNtCsfGan6uRHWP8_5tokio7runtime9scheduler12multi_thread6handleNtB3_6Handle13bind_new_task
+           0.24%  _RINvNtNtCsfGan6uRHWP8_5tokio4task5spawn5spawnNCNCNvNtCs6UARxvO4XRA_11eqproxy_net5http38exchange00EB
+ 13.63%  eqproxy http1 engine
+           5.34%  _RNCINvNtCs6UARxvO4XRA_11eqproxy_net5http110serve_httpINtNtNtCsfGan6uRHWP8_5tokio2io5split8ReadHalfN
+           1.21%  _RNCINvNtCs6UARxvO4XRA_11eqproxy_net5http19read_headINtB4_8PrefixedQINtNtNtNtCsfGan6uRHWP8_5tokio2io
+           1.14%  _RNCINvNtCs6UARxvO4XRA_11eqproxy_net5http114until_deadlineINtNtCs7x1JxYRm7tp_4core6result6ResultTINt
+           1.04%  _RNvNtCs6UARxvO4XRA_11eqproxy_net5http119parse_response_head
+           0.82%  _RNvXs_NtNtCsfGan6uRHWP8_5tokio4time7timeoutINtB4_7TimeoutNCNCINvNtCs6UARxvO4XRA_11eqproxy_net5http1
+           0.81%  _RNvXs_NtNtCsfGan6uRHWP8_5tokio4time7timeoutINtB4_7TimeoutNCNCINvNtCs6UARxvO4XRA_11eqproxy_net5http1
+  0.00%  tokio runtime
+ 45.38%  musl allocator
+          20.87%  __unlock
+          11.54%  __lock
+           4.96%  __libc_free
+           4.74%  __libc_malloc_impl
+           1.62%  alloc_slot
+           1.12%  calloc
+  4.80%  memcpy family
+           4.40%  memcpy
+           0.40%  memset
+           0.01%  memmove
+EXPORT_DONE

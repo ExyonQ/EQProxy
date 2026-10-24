@@ -1,0 +1,95 @@
+{
+  "mode": "load",
+  "target": "https://mi-eq:19443/",
+  "conns": 8,
+  "streams": 8,
+  "warmup_s": 2,
+  "duration_s": 12,
+  "wall_s": 14.009127999,
+  "requests": 372504,
+  "ok": 372504,
+  "errors": 0,
+  "status_codes": {
+    "200": 372504
+  },
+  "bytes": 381444096,
+  "rps": 26189.64740481638,
+  "latency_ms": {
+    "count": 314287,
+    "min": 0.196207,
+    "p50": 2.148867,
+    "p95": 4.838718,
+    "p99": 6.722373,
+    "max": 15.314674,
+    "mean": 2.4425462421067077,
+    "histogram": [
+      {
+        "upper_ms": 0.5,
+        "count": 632
+      },
+      {
+        "upper_ms": 1,
+        "count": 13677
+      },
+      {
+        "upper_ms": 2,
+        "count": 123429
+      },
+      {
+        "upper_ms": 3,
+        "count": 98328
+      },
+      {
+        "upper_ms": 5,
+        "count": 64525
+      },
+      {
+        "upper_ms": 7.5,
+        "count": 12052
+      },
+      {
+        "upper_ms": 10,
+        "count": 1411
+      },
+      {
+        "upper_ms": 15,
+        "count": 232
+      },
+      {
+        "upper_ms": 20,
+        "count": 1
+      },
+      {
+        "upper_ms": 30,
+        "count": 0
+      },
+      {
+        "upper_ms": 50,
+        "count": 0
+      },
+      {
+        "upper_ms": 75,
+        "count": 0
+      },
+      {
+        "upper_ms": 100,
+        "count": 0
+      },
+      {
+        "upper_ms": 200,
+        "count": 0
+      },
+      {
+        "upper_ms": 500,
+        "count": 0
+      },
+      {
+        "upper_ms": 0,
+        "count": 0
+      }
+    ]
+  },
+  "sanity": "ok",
+  "generator_cpu_seconds": 31553.436,
+  "generator_cpu_pct_one_core": 224.62731486098716
+}

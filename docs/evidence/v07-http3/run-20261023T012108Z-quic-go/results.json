@@ -1,0 +1,138 @@
+{
+  "date_utc": "2026-10-23T01:21:10.914957+00:00",
+  "binary": "/Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy",
+  "binary_sha256": "f1d0aecb0ea1b3fbeec081ddd8661ae786fbeeb08038cee39787b8916ceb3982",
+  "version": "eqproxy 0.6.3",
+  "client": "github.com/quic-go/quic-go v0.64.1 (independent QUIC + h3 implementation)",
+  "client_run": {
+    "build_exit": 0,
+    "binary_sha256": "5e9629bd3522c40c4366017b4d89c4c7e8e75b7e8a36afcfd08eddec9fce18c2",
+    "module": "github.com/quic-go/quic-go v0.64.1"
+  },
+  "config": "schema_version = 1\n\n[listener.h3]\nlisten = \"127.0.0.1:55720\"\nmode = \"http\"\nbackend = \"api\"\nquic = true\nidle_timeout = \"10s\"\n\n[listener.h3.compression]\ngzip = true\ntypes = [\"text/*\"]\n\n[[listener.h3.rules]]\nname = \"shed\"\npath = \"/shed\"\ndirect_response = { status = 418, content_type = \"application/json\", body = '{\"shed\":true}' }\n\n[listener.h3.tls]\ncert = \"/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/fixtures/cert.pem\"\nkey = \"/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/fixtures/key.pem\"\nalpn = [\"h2\", \"http/1.1\"]\n\n[backend.api]\nserver = \"127.0.0.1:55719\"\n",
+  "plan_exit": 0,
+  "plan": "plan: 1 listener(s), 1 backend(s) \u2014 nothing started (dry run)\nlistener \"h3\": bind 127.0.0.1:55720 mode=http maxconn=1024 tls=yes(alpn=[h2,http/1.1]) backend=\"api\" quic=h3/udp\n  timeouts: connect=5s idle=10s client_header=5s server_header=30s max_stream=0ns shutdown_grace=10s\nbackend \"api\": servers=1 tls=no proxy_protocol=none health_check=none\n  server 127.0.0.1:55719 weight=1\n\n",
+  "proxy_exit": 0,
+  "elapsed_s": 2.287,
+  "journeys": [
+    {
+      "journey": "get",
+      "status": 200,
+      "headers": {
+        "content-length": [
+          "17"
+        ],
+        "content-type": [
+          "text/plain"
+        ]
+      },
+      "body_len": 17,
+      "body_md5": "5acb970bdf2f4c4f1a505e80b37eb392",
+      "body_text": "hello from origin",
+      "trailers": {},
+      "error": ""
+    },
+    {
+      "journey": "post_streaming",
+      "status": 200,
+      "headers": {
+        "content-length": [
+          "12"
+        ],
+        "content-type": [
+          "text/plain"
+        ]
+      },
+      "body_len": 12,
+      "body_md5": "7c185153fa2775d49c8a089f85e73095",
+      "body_text": "262144 bytes",
+      "trailers": {},
+      "error": ""
+    },
+    {
+      "journey": "chunked_trailers",
+      "status": 200,
+      "headers": {
+        "content-type": [
+          "text/plain"
+        ],
+        "vary": [
+          "Accept-Encoding"
+        ]
+      },
+      "body_len": 13,
+      "body_md5": "b3bddce76c73bda23841d15a4f72d52d",
+      "body_text": "hello chunked",
+      "trailers": {
+        "x-origin": [
+          "yes"
+        ]
+      },
+      "error": ""
+    },
+    {
+      "journey": "compression",
+      "status": 200,
+      "headers": {
+        "content-encoding": [
+          "gzip"
+        ],
+        "content-type": [
+          "text/plain"
+        ],
+        "vary": [
+          "Accept-Encoding"
+        ]
+      },
+      "body_len": 44,
+      "body_md5": "e34ee2bed72a6cf4c08e6a9407ac1f44",
+      "body_text": "\u001f\ufffd\b\u0000\u0000\u0000\u0000\u0000\u0000\ufffd\ufffd\ufffd\u0001\r\u0000\u0000\u0000\u00a0\ufffd\ufffd_\ufffd\u001cnP\u0000\u0000\u0000\u0000\u0000\u0000\u0000\ufffd\ufffd\u0001\ufffdfo\r\u0000 \u0000\u0000",
+      "trailers": {},
+      "error": ""
+    },
+    {
+      "journey": "direct_rule",
+      "status": 418,
+      "headers": {
+        "content-length": [
+          "13"
+        ],
+        "content-type": [
+          "application/json"
+        ]
+      },
+      "body_len": 13,
+      "body_md5": "61443518dc269da1446c239421692d8e",
+      "body_text": "{\"shed\":true}",
+      "trailers": {},
+      "error": ""
+    }
+  ],
+  "origin_requests": [
+    {
+      "request_line": "GET /hello HTTP/1.1",
+      "head": "GET /hello HTTP/1.1\r\nhost: localhost\r\naccept-encoding: gzip\r\nuser-agent: quic-go HTTP/3\r\n\r\n",
+      "body_len": 0
+    },
+    {
+      "request_line": "POST /echo HTTP/1.1",
+      "head": "POST /echo HTTP/1.1\r\nhost: localhost\r\naccept-encoding: gzip\r\nuser-agent: quic-go HTTP/3\r\ntransfer-encoding: chunked\r\n\r\n",
+      "body_len": 262144
+    },
+    {
+      "request_line": "GET /trailers HTTP/1.1",
+      "head": "GET /trailers HTTP/1.1\r\nhost: localhost\r\naccept-encoding: gzip\r\nuser-agent: quic-go HTTP/3\r\n\r\n",
+      "body_len": 0
+    },
+    {
+      "request_line": "GET /compress HTTP/1.1",
+      "head": "GET /compress HTTP/1.1\r\nhost: localhost\r\naccept-encoding: gzip\r\nuser-agent: quic-go HTTP/3\r\n\r\n",
+      "body_len": 0
+    }
+  ],
+  "final_metrics": "METRICS client[accepted=1 active=0 completed=1 rejected_maxconn=0 protocol_errors=0] proxy[no_server=0 queue_full=0 queue_timeout=0 retries=0 local_responses=0 redirects=0 direct=1] network[idle_timeouts=0 bytes_c2b=262144 bytes_b2c=106] backend[connect_failures=0 tls_failures=0 discarded=0 reused=0 opened=4 proxied=4] phases[header_timeouts=0] proxy_proto[denied=0 invalid=0] cfg[reloads=0 reload_failures=0 last_swap_us=0] auth[denied=0 service_errors=0] dns[ok=0 failures=0 updates=0] maps[reloads=0 failures=0] mirror[sent=0 failures=0 skipped=0] h2[sessions_idle_closed=0 goaway=0 refused_retried=0] grpc[streams=0 errors=0] ws[tunnels=0 failures=0] compression[gzip=2 brotli=0 bytes_in=8205 bytes_out=77] (final)",
+  "failures": [
+    "GET /trailers: 200 {'x-origin': ['yes']}"
+  ],
+  "verdict": "FAIL"
+}
