@@ -1,0 +1,41 @@
+=== arm64 · eqproxy-local:v07-arm64 ===
+sha256:14c026e2ec52cac6a64af8a3ff196bc5f1ba9902f99bbad79d11303954e0378b arm64 linux
+PASS --version (eqproxy 0.6.3)
+PASS config validate
+--- J1 idle close (idle_timeout = 1s)
+PASS J1 first request
+PASS J1 request after the window
+PASS J1 session 1 opened
+PASS J1 session 1 closed by the idle close
+PASS J1 second session dialed
+PASS J1 proxy logged the idle close
+PASS J1 counters
+PASS J1 closed before redial (line 4 < 5)
+--- J2 GOAWAY drain + replay (idle_timeout = 5s)
+PASS J2 warm request
+PASS J2 GOAWAY announced
+PASS J2 request racing GOAWAY served once
+PASS J2 in-flight stream drained
+PASS J2 origin announced GOAWAY
+PASS J2 proxy logged the drain
+PASS J2 GOAWAY counted
+PASS J2 replay counted
+PASS J2 backend counters
+PASS J2 exactly one copy at the origin
+PASS J2 replayed on the fresh session
+PASS J2 in-flight answer after the GOAWAY (line 7 < 11)
+PASS J2 first session closed only after the drained stream
+--- J3 REFUSED_STREAM replay (idle_timeout = 5s)
+PASS J3 replayed request served 200
+PASS J3 origin refused the first stream
+PASS J3 no GOAWAY
+PASS J3 replay counted
+PASS J3 exactly one answered copy
+PASS J3 exactly one refusal
+PASS J3 replay on a fresh session
+PASS J3 backend counters
+=== arm64 failures: 0 ===
+200 0.013092
+200 0.003567
+200 1.508992
+harness exit=0

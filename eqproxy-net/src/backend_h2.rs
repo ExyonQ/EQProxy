@@ -138,7 +138,9 @@ impl Session {
 
     /// Admits one exchange and returns its stream handle. The [`ExchangeSlot`]
     /// keeps the session from closing while the exchange runs.
-    fn enter(self: &Arc<Self>) -> Option<(ExchangeSlot, h2::client::SendRequest<Bytes>)> {
+    pub(crate) fn enter(
+        self: &Arc<Self>,
+    ) -> Option<(ExchangeSlot, h2::client::SendRequest<Bytes>)> {
         if !self.alive.load(Ordering::Acquire) {
             return None;
         }
@@ -466,6 +468,7 @@ fn describe(err: StreamError) -> &'static str {
         StreamError::Framing => "framing that has no HTTP/2 translation",
         StreamError::Io => "I/O or timeout",
         StreamError::H2 => "HTTP/2 protocol error",
+        StreamError::H3 => "HTTP/3 stream error",
         StreamError::Refused => "refused by a GOAWAY and not replayable",
         StreamError::StreamRefused => "reset with REFUSED_STREAM and not replayable",
     }

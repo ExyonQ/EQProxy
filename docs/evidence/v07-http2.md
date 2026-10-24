@@ -5,6 +5,20 @@
 > the configuration gate accepts `alpn = ["h2"]` on a backend. The text below
 > records what slice 1 actually delivered; its "upstream stays HTTP/1.1"
 > limitation no longer applies.
+>
+> **Benchmark follow-up (2026-10-23):** the S-H2-01/02 campaign against
+> HAProxy 3.4.6 with h2 active in both is published in
+> [`v07-h2-bench.md`](v07-h2-bench.md). It measures the translation described
+> here and finds **Worse** (S-H2-01 0.099×, S-H2-02 0.975×): the backend idle
+> pool (64 per server) churns connections once more than 64 h2 streams are in
+> flight, exhausts the ephemeral port range and returns 502s. The §9 note
+> below ("no benchmark was run for this slice") is true of this slice only.
+>
+> **Fixed (2026-10-23):** the pool now sizes its idle cap from the peak
+> exchanges in flight ([ADR-0015](../adr/0015-backend-idle-pool-sizing.md)),
+> and the S-H2-01/02 campaign was re-measured: 0.742× (was 0.099×), 0.55
+> backend connections per 1 000 requests (was 192.85) and zero `502`s. See
+> [`v07-h2-pool-sizing.md`](v07-h2-pool-sizing.md).
 
 Language: **English**. Evidence for the first v0.7 increment, collected on
 2026-10-21/22 (macOS 26 arm64 host, Rust 1.97.1, curl 8.7.1 with nghttp2

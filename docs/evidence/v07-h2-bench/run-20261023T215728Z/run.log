@@ -1,0 +1,18 @@
+[build] load sha256=711baf20bbaeb391b309423b1af6299fa7ca59f2c2bfe9e43dbbb4765e55e9dc probe sha256=9f36912cd47d431709b3744f630df9fe17ec9d1b9e4d65d579dadafc4a4d72c2
+[build] eqproxy image 934f8a46f7a9c60d binary 7ef8a754ebf03e49
+[host] Linux-6.8.0-147-generic-x86_64-with-glibc2.39 · cpus=8 memory=16767594496 · client 29.6.1 / server 29.6.1 · load [0.70751953125, 1.5458984375, 1.40185546875]
+[calibration] load_c4s100_1k: 101688.8 req/s, 99.3 MiB/s, generator cpu 326% of one core
+[calibration] load_c4s8_1m: 1691.1 req/s, 1691.1 MiB/s, generator cpu 353% of one core
+[scenario] S-H2-01 {"conns": 4, "streams": 100, "payload": 1024, "warmup": 3, "duration": 15}
+[run] S-H2-01 eqproxy rep1: rps=40240.5 mib_s=39.3 p50=9.33ms cpu=316% gen_cpu=197% errors=0 backend_conns_per_1k=0.55
+[run] S-H2-01 haproxy rep1: rps=55064.1 mib_s=53.8 p50=6.71ms cpu=208% gen_cpu=246% errors=0 backend_conns_per_1k=1.52
+[run] S-H2-01 haproxy rep2: rps=61571.9 mib_s=60.1 p50=5.99ms cpu=214% gen_cpu=249% errors=0 backend_conns_per_1k=0.90
+[run] S-H2-01 eqproxy rep2: rps=41853.6 mib_s=40.9 p50=9.04ms cpu=316% gen_cpu=196% errors=0 backend_conns_per_1k=0.54
+[run] S-H2-01 eqproxy rep3: rps=42144.4 mib_s=41.2 p50=8.92ms cpu=318% gen_cpu=196% errors=0 backend_conns_per_1k=0.53
+[run] S-H2-01 haproxy rep3: rps=60515.1 mib_s=59.1 p50=6.08ms cpu=212% gen_cpu=249% errors=0 backend_conns_per_1k=0.88
+[run] S-H2-01 haproxy rep4: rps=47784.2 mib_s=46.7 p50=7.36ms cpu=214% gen_cpu=241% errors=0 backend_conns_per_1k=0.81
+[run] S-H2-01 eqproxy rep4: rps=40872.0 mib_s=39.9 p50=9.21ms cpu=314% gen_cpu=197% errors=0 backend_conns_per_1k=0.54
+[run] S-H2-01 eqproxy rep5: rps=40513.8 mib_s=39.6 p50=9.25ms cpu=315% gen_cpu=193% errors=0 backend_conns_per_1k=0.56
+[run] S-H2-01 haproxy rep5: rps=54012.4 mib_s=52.7 p50=6.72ms cpu=209% gen_cpu=248% errors=0 backend_conns_per_1k=1.04
+[gaps] S-H2-01: {"metric_eq_over_ha": 0.742, "bandwidth_eq_over_ha": 0.742, "latency_p50_ha_over_eq": 0.729, "latency_p99_ha_over_eq": 0.826, "cpu_ratio_eq_over_ha": 1.49, "note": "metric ratios > 1 favour EQProxy; latency ratios > 1 mean EQProxy had the lower end-to-end latency; cpu ratio > 1 means EQProxy spent more CPU per second for the same offered load."}
+report: /root/eqproxy-h2-src/docs/evidence/v07-h2-bench/run-20261023T215728Z/report.json

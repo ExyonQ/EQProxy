@@ -1,0 +1,14 @@
+{"session_opened": 1}
+{"t": 1792698659.732, "connection": 1, "stream": 1, "method": "GET", "path": "/echo", "x_req": "warm", "content_length": null}
+{"t": 1792698659.733, "connection": 1, "stream": 1, "x_req": "warm", "phase": "answered"}
+{"t": 1792698659.751, "connection": 1, "stream": 3, "method": "GET", "path": "/hold?ms=1500", "x_req": "inflight", "content_length": null}
+{"t": 1792698659.752, "connection": 1, "stream": 3, "path": "/hold?ms=1500", "x_req": "inflight", "phase": "start"}
+{"t": 1792698659.911, "connection": 1, "stream": 5, "method": "GET", "path": "/goaway", "x_req": "g1", "content_length": null}
+{"t": 1792698659.911, "connection": 1, "goaway_sent": 5}
+{"session_opened": 2}
+{"t": 1792698660.145, "connection": 2, "stream": 1, "method": "GET", "path": "/echo", "x_req": "after-goaway", "content_length": null}
+{"t": 1792698660.146, "connection": 2, "stream": 1, "x_req": "after-goaway", "phase": "answered"}
+{"t": 1792698661.253, "connection": 1, "stream": 3, "path": "/hold?ms=1500", "x_req": "inflight", "phase": "end", "held_ms": 1500}
+{"t": 1792698661.254, "connection": 1, "stream": 3, "x_req": "inflight", "phase": "answered"}
+{"session_closed": 1}
+{"session_closed": 2}

@@ -1,0 +1,11 @@
+schema_version = 1
+
+[listener.web]
+listen = "0.0.0.0:28081"
+mode = "http"
+backend = "api"
+idle_timeout = "1s"
+
+[backend.api]
+server = "host.docker.internal:28471"
+tls = { ca_file = "/certs/cert.pem", server_name = "localhost", alpn = ["h2"] }

@@ -1,0 +1,8 @@
+{"session_opened": 1}
+{"t": 1792698654.971, "connection": 1, "stream": 1, "method": "GET", "path": "/echo", "x_req": "first", "content_length": null}
+{"t": 1792698654.971, "connection": 1, "stream": 1, "x_req": "first", "phase": "answered"}
+{"session_closed": 1}
+{"session_opened": 2}
+{"t": 1792698657.215, "connection": 2, "stream": 1, "method": "GET", "path": "/echo", "x_req": "after-idle", "content_length": null}
+{"t": 1792698657.216, "connection": 2, "stream": 1, "x_req": "after-idle", "phase": "answered"}
+{"session_closed": 2}
