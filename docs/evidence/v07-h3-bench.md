@@ -30,8 +30,8 @@ result is what the numbers say, including a loss.
 | Product | `eqproxy 0.6.3`, image `eqproxy-bench:v07` (id `3e8ef9479fc3`, built from the uncommitted v0.7 working tree on `b93883e`) |
 | EQProxy binary SHA-256 | `412feb8e8ce2556fc89eae39beb77ed4c212101e2344c2e0a9dba9e70b8a2ed1` (extracted from the image, not from the host) |
 | Reference | `haproxy:3.4.6`, image id `e273915691a8`, build `HAProxy 3.4.6-56332c5 2026/09/28`, `USE_QUIC=1`, OpenSSL 3.5.7, `-vv` in `report.json` |
-| Generator | `docs/evidence/v07-h3-bench/load.go`, quic-go **0.64.1** (own QUIC/h3/QPACK), Go 1.26.2, static binary SHA-256 `f02af496…`, QPACK `0.6.0` |
-| Counter probe | `docs/evidence/v07-h3-bench/probe/main.go`, static binary SHA-256 `bb546e7e…` |
+| Generator | `scripts/evidence/v07-h3-bench/load.go`, quic-go **0.64.1** (own QUIC/h3/QPACK), Go 1.26.2, static binary SHA-256 `f02af496…`, QPACK `0.6.0` |
+| Counter probe | `scripts/evidence/v07-h3-bench/probe/main.go`, static binary SHA-256 `bb546e7e…` |
 | TLS certificate | `eqproxy-net/tests/fixtures/cert.pem`, SHA-256 `0c6cab2e…`, CN=localhost, SAN `DNS:localhost` + IP `127.0.0.1` |
 | Evidence host | `netcup-bench`: Linux 6.8.0-147-generic, x86_64, AMD EPYC 9645 (8 vCPU exposed), 15.6 GiB RAM, Docker 29.6.1 |
 | Raw data | [`run-20261023T134656Z/`](v07-h3-bench/run-20261023T134656Z/) — `report.json`, `raw/` (20 runs), `logs/` (gzipped), `configs/`, `certs/`, `run.log` |
@@ -220,11 +220,11 @@ not directly comparable.
 
 | Command | Result |
 |---|---|
-| `gofmt -l docs/evidence/v07-h3-bench` | clean |
+| `gofmt -l scripts/evidence/v07-h3-bench` | clean |
 | `go vet ./...` in `v07-h3-bench` | exit 0 |
 | `GOOS=linux GOARCH=amd64 go build` (`load`, `probe`) | exit 0, static ELF x86-64 |
-| `python3 -m py_compile docs/evidence/v07-h3-bench/run.py` | exit 0 |
-| `python3 docs/evidence/v07-h3-bench/run.py --reps 5 --load-binary … --probe-binary …` | exit 0, 20/20 valid runs, report written |
+| `python3 -m py_compile scripts/evidence/v07-h3-bench/run.py` | exit 0 |
+| `python3 scripts/evidence/v07-h3-bench/run.py --reps 5 --load-binary … --probe-binary …` | exit 0, 20/20 valid runs, report written |
 | medians recomputation from `raw/` | exact match |
 | `cargo fmt --all --check` | clean |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean |
@@ -263,8 +263,9 @@ not directly comparable.
 ## 10. Reproduce
 
 ```bash
-# generator and probe are committed next to this file (go.mod/go.sum pinned)
-cd docs/evidence/v07-h3-bench
+# generator and probe live in scripts/evidence/v07-h3-bench (maintainer-local:
+# docs/ publishes the document and the recorded data, not the harness)
+cd scripts/evidence/v07-h3-bench
 gofmt -l . && go vet ./... && go list -m all > go-modules.txt
 
 # on an idle Linux evidence host with Docker and the two images:
@@ -276,6 +277,7 @@ python3 run.py --reps 5 --load-binary bin/load --probe-binary bin/probe
 ```
 
 The script builds the generator image, creates the network and containers,
-runs the calibration and the 20 measured runs, writes `run-<UTC>/` and
+runs the calibration and the 20 measured runs, writes
+`docs/evidence/v07-h3-bench/run-<UTC>/` and
 removes the containers. The result of the campaign above is
 [`run-20261023T134656Z/report.json`](v07-h3-bench/run-20261023T134656Z/report.json).

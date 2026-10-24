@@ -61,7 +61,7 @@ The published S-H1-04 config, unchanged
 ([s-h1-04-eqproxy.toml](../v06-bench/configs/s-h1-04-eqproxy.toml)): **11
 listeners, 200 backend entries, 20 routing rules, HTTP health checks** every
 2 s; the backend is one asyncio process answering `200` with a 1 KiB body
-([backend.py](backend.py)).
+(`scripts/evidence/v0.6.1-parity/backend.py`, maintainer-local).
 
 - `oha -z 10s -c 50 --latency-correction`.
 - Per block: start the container, wait for a real `200` through it, settle 7 s
@@ -80,11 +80,11 @@ listeners, 200 backend entries, 20 routing rules, HTTP health checks** every
 Reproduce:
 
 ```bash
-cd docs/evidence/v0.6.1-parity
-python3 run.py --binary /path/to/eqproxy-linux-amd64 \
-    --config ../v06-bench/configs/s-h1-04-eqproxy.toml --out raw/amd64-http --reps 8 --secs 10
-python3 run.py --binary /path/to/eqproxy-linux-amd64 \
-    --config ../v06-bench/configs/s-h1-04-eqproxy.toml --out raw/amd64-tls --reps 8 --secs 10 --tls
+# the harness is maintainer-local; --out resolves against this directory
+python3 scripts/evidence/v0.6.1-parity/run.py --binary /path/to/eqproxy-linux-amd64 \
+    --config docs/evidence/v06-bench/configs/s-h1-04-eqproxy.toml --out raw/amd64-http --reps 8 --secs 10
+python3 scripts/evidence/v0.6.1-parity/run.py --binary /path/to/eqproxy-linux-amd64 \
+    --config docs/evidence/v06-bench/configs/s-h1-04-eqproxy.toml --out raw/amd64-tls --reps 8 --secs 10 --tls
 ```
 
 Raw `oha` JSON per rep and the machine summary live in

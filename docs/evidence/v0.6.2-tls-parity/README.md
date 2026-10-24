@@ -155,19 +155,24 @@ that value. Raw transcript: [`raw/h2-probe.txt`](raw/h2-probe.txt).
 docker run --rm -v "$PWD":/src:ro -w /src -e CARGO_TARGET_DIR=/out \
   -v eqglibc:/out rust:1.97-bookworm cargo build --release --locked -p eqproxy-cli
 
-python3 run.py --binary /path/to/eqproxy --label glibc --arch amd64 --out raw/glibc-amd64.json
-python3 run.py --binary /path/to/eqproxy-linux-amd64 --label musl --arch amd64 --out raw/musl-amd64.json
+# the harness is maintainer-local; --out is the path you want the JSON in
+python3 scripts/evidence/v0.6.2-tls-parity/run.py --binary /path/to/eqproxy \
+  --label glibc --arch amd64 --out docs/evidence/v0.6.2-tls-parity/raw/glibc-amd64.json
+python3 scripts/evidence/v0.6.2-tls-parity/run.py --binary /path/to/eqproxy-linux-amd64 \
+  --label musl --arch amd64 --out docs/evidence/v0.6.2-tls-parity/raw/musl-amd64.json
 
 # interleaved blocks (what the tables above use)
 for block in 1 2 3 4; do
   case $block in 1|4) label=glibc ;; 2|3) label=musl ;; esac
-  python3 run.py --binary /path/to/$label --label $label --arch amd64 \
-    --reps 6 --skip-handshakes --out raw/blocks/block${block}-${label}.json
+  python3 scripts/evidence/v0.6.2-tls-parity/run.py --binary /path/to/$label \
+    --label $label --arch amd64 --reps 6 --skip-handshakes \
+    --out docs/evidence/v0.6.2-tls-parity/raw/blocks/block${block}-${label}.json
 done
 
 # control: same, without TLS
-python3 run.py --binary /path/to/$label --label $label --arch amd64 --plain \
-  --reps 6 --skip-handshakes --out raw/blocks/plain${block}-${label}.json
+python3 scripts/evidence/v0.6.2-tls-parity/run.py --binary /path/to/$label \
+  --label $label --arch amd64 --plain --reps 6 --skip-handshakes \
+  --out docs/evidence/v0.6.2-tls-parity/raw/blocks/plain${block}-${label}.json
 ```
 
 Raw data: `raw/{glibc,musl}-{arm64,amd64}.json` (load + handshakes +

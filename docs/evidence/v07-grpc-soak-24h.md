@@ -28,7 +28,7 @@ writes that event and ends as **FAIL**; it is never rounded up to a pass.
 | Binary | `target/release/eqproxy`, sha256 `0672763af6afad189cd24fa6f30673b2bd3a02f3d90c467cffc23f79daab6dd6` (`cargo build --release -p eqproxy-cli`) |
 | Real gRPC stack | `grpcio` 1.66.1 / `grpc-c` 43.0.0, Python 3.9.6 |
 | Host | macOS 26.5.1 arm64, loopback |
-| Harness | [`v07-grpc/soak.py`](v07-grpc/soak.py) |
+| Harness | `scripts/evidence/v07-grpc/soak.py` (maintainer-local, not published) |
 | Final evidence | [`v07-grpc/soak-24h/`](v07-grpc/soak-24h/): `meta.json`, `checkpoint.jsonl`, `events.jsonl`, `proxy.log`, `runner.log`, `soak.pid`, `watch.pid`/`watch.log` (the automatic close-out), plus `final.json`, `verdict.md` and `verdict.json` written at close |
 | Design | [ADR-0011](../adr/0011-grpc-http2-passthrough.md) |
 
@@ -118,7 +118,7 @@ its own session, with `caffeinate -i -w <soak pid>` keeping the machine awake
 for exactly as long as the soak):
 
 ```bash
-python3 docs/evidence/v07-grpc/soak.py --hours 24 --interval 20 \
+python3 scripts/evidence/v07-grpc/soak.py --hours 24 --interval 20 \
   --probe 60 --checkpoint 60 \
   --outdir docs/evidence/v07-grpc/soak-24h --detach
 ```
@@ -128,7 +128,7 @@ refuses to write anything while `final.json` is missing, and refuses PASS when
 the fields do not prove it):
 
 ```bash
-python3 docs/evidence/v07-grpc/soak.py --close docs/evidence/v07-grpc/soak-24h
+python3 scripts/evidence/v07-grpc/soak.py --close docs/evidence/v07-grpc/soak-24h
 ```
 
 `--close` is the only writer of a verdict: it validates `final.json` against
@@ -146,7 +146,7 @@ so the table row stays one line) and the gate paragraph in `CHANGELOG.md`.
 `--watch` performs that close by itself when `final.json` appears:
 
 ```bash
-python3 docs/evidence/v07-grpc/soak.py --watch docs/evidence/v07-grpc/soak-24h --detach
+python3 scripts/evidence/v07-grpc/soak.py --watch docs/evidence/v07-grpc/soak-24h --detach
 ```
 
 It waits for the verdict, refuses to write anything if the soak process
@@ -157,7 +157,7 @@ run directory.
 Inspect at any time:
 
 ```bash
-python3 docs/evidence/v07-grpc/soak.py --summarize docs/evidence/v07-grpc/soak-24h
+python3 scripts/evidence/v07-grpc/soak.py --summarize docs/evidence/v07-grpc/soak-24h
 tail -n 3 docs/evidence/v07-grpc/soak-24h/checkpoint.jsonl
 ```
 

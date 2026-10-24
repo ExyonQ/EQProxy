@@ -27,7 +27,7 @@ separate gate, still running).
 | Independent client | `hyper-h2` 4.2.0 (Python 3.9.6), real TCP socket, `SETTINGS_ENABLE_CONNECT_PROTOCOL = 1` |
 | Origin | real TCP server speaking the HTTP/1.1 upgrade and echoing bytes (harness) |
 | Design | [ADR-0012](../adr/0012-websockets-over-h2.md) |
-| Raw run | [`v07-ws/run.txt`](v07-ws/run.txt), harness [`v07-ws/run.py`](v07-ws/run.py) |
+| Raw run | [`v07-ws/run.txt`](v07-ws/run.txt), harness `scripts/evidence/v07-ws/run.py` (maintainer-local) |
 
 ## 3. What the implementation does
 
@@ -87,7 +87,7 @@ refused).
 
 ### 4.2 Independent client through the release binary
 
-`python3 docs/evidence/v07-ws/run.py` — **PASS**. The client is `hyper-h2`
+`python3 scripts/evidence/v07-ws/run.py` — **PASS**. The client is `hyper-h2`
 4.2.0 over h2c with `ENABLE_CONNECT_PROTOCOL`; the origin is a real TCP
 WebSocket server; the proxy is the release binary with a real config
 (`idle_timeout = 30s`, plaintext listener).

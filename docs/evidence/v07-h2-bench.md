@@ -30,8 +30,8 @@ result is what the numbers say, and one of the two scenarios loses badly.
 | Product | `eqproxy 0.6.3`, image `eqproxy-bench:v07h2` (id `af9e57c5ed53e2a8`, built from the v0.7 working tree on `b93883e`, uncommitted) |
 | EQProxy binary SHA-256 | `b4db9260ef34a2b8a87d3d8550f115913224eda12d6da49c4bd242aa8f97aa3c` (extracted from the image, not from the host) |
 | Reference | `haproxy:3.4.6`, image id `e273915691a8`, build `HAProxy 3.4.6-56332c5 2026/09/28`, OpenSSL 3.5.7, `-vv` in `report.json` |
-| Generator | `docs/evidence/v07-h2-bench/load.go`, `golang.org/x/net/http2` **0.42.0**, Go 1.26.2, static ELF, SHA-256 `d29516bc…` |
-| Counter probe | `docs/evidence/v07-h2-bench/probe/main.go`, SHA-256 `c0c2f77d…` |
+| Generator | `scripts/evidence/v07-h2-bench/load.go`, `golang.org/x/net/http2` **0.42.0**, Go 1.26.2, static ELF, SHA-256 `d29516bc…` |
+| Counter probe | `scripts/evidence/v07-h2-bench/probe/main.go`, SHA-256 `c0c2f77d…` |
 | TLS certificate | `eqproxy-net/tests/fixtures/cert.pem`, SHA-256 `0c6cab2ee3…`, CN=localhost, SAN `DNS:localhost` + IP `127.0.0.1` |
 | Evidence host | `netcup-bench`: Linux 6.8.0-147-generic, x86_64, AMD EPYC 9645 (8 vCPU exposed), 15.6 GiB RAM, Docker 29.6.1, `ip_local_port_range = 32768 60999` (28 232 ports) |
 | S-H2-01 raw data | [`run-20261023T200316Z/`](v07-h2-bench/run-20261023T200316Z/) — `report.json`, `raw/` (10 runs), `logs/`, `configs/`, `certs/`, `run.log` |
@@ -307,12 +307,12 @@ it should be profiled before any memory claim is made.
 
 | Command | Result |
 |---|---|
-| `gofmt -l docs/evidence/v07-h2-bench` | clean (no output) |
+| `gofmt -l scripts/evidence/v07-h2-bench` | clean (no output) |
 | `go vet ./...` in `v07-h2-bench` | exit 0 |
-| `python3 -m py_compile docs/evidence/v07-h2-bench/run.py` | exit 0 |
+| `python3 -m py_compile scripts/evidence/v07-h2-bench/run.py` | exit 0 |
 | `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build` (`load`, `probe`) | exit 0, static ELF x86-64 |
-| `python3 docs/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-01 …` | exit 0, 10 runs, `run-20261023T200316Z` |
-| `python3 docs/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-02 …` | exit 0, 10 runs, `run-20261023T201003Z` |
+| `python3 scripts/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-01 …` | exit 0, 10 runs, `run-20261023T200316Z` |
+| `python3 scripts/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-02 …` | exit 0, 10 runs, `run-20261023T201003Z` |
 | median recomputation from `raw/` | exact match (all fields) |
 | `cargo fmt --all --check` | exit 0 |
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | exit 0 |
@@ -346,8 +346,9 @@ it should be profiled before any memory claim is made.
 ## 10. Reproduce
 
 ```bash
-# generator and probe are committed next to this file (go.mod/go.sum pinned)
-cd docs/evidence/v07-h2-bench
+# generator and probe live in scripts/evidence/v07-h2-bench (maintainer-local:
+# docs/ publishes the document and the recorded data, not the harness)
+cd scripts/evidence/v07-h2-bench
 gofmt -l . && go vet ./... && go list -m all > go-modules.txt
 
 # on an idle Linux evidence host with Docker:
@@ -363,7 +364,7 @@ python3 run.py --reps 5 --scenarios S-H2-02 \
   --eq-image eqproxy-bench:v07h2 --load-binary ./load --probe-binary ./probe
 ```
 
-Each campaign writes `run-<UTC>/` with `report.json`, one JSON per run
+Each campaign writes `docs/evidence/v07-h2-bench/run-<UTC>/` with `report.json`, one JSON per run
 (`raw/`), the exact configs, the certificate, the container logs and
 `run.log`; the tables above are read from `report.json` and were re-derived
 from `raw/`.

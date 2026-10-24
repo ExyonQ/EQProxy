@@ -180,10 +180,10 @@ cargo test --workspace
 docker build -f docker/Dockerfile -t eqproxy-bench:v07c .
 
 # campaigns (one scenario at a time, on an idle host)
-python3 docs/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-01 \
+python3 scripts/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-01 \
   --eq-image eqproxy-bench:v07c --load-binary <linux/amd64 load> \
   --probe-binary <linux/amd64 probe>
-python3 docs/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-02 \
+python3 scripts/evidence/v07-h2-bench/run.py --reps 5 --scenarios S-H2-02 \
   --eq-image eqproxy-bench:v07c --load-binary <load> --probe-binary <probe>
 ```
 

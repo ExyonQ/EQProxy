@@ -147,6 +147,11 @@ authored by the contributor alone.
 - Evidence goes under `docs/evidence/` with the commands, the artifact under
   test (binary or image digest) and the raw data. A conclusion without raw
   data is not evidence.
+- `docs/` publishes documentation (`.md`) and the recorded data only, never
+  code. The harnesses that produced the measurements live outside the
+  repository in the maintainer's tree (`scripts/evidence/<campaign>/`), and
+  the evidence names them by that path so a reader knows which program
+  produced each number and can ask for it.
 
 ## Benchmarks
 

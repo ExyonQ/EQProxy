@@ -95,7 +95,7 @@ its size is unknown when the decision must be made.
 
 ### Measurement
 
-`docs/evidence/v07-compression/bench.py` measures the release binary against
+`scripts/evidence/v07-compression/bench.py` measures the release binary against
 an independent Python origin over loopback with three fixed corpora (text,
 JSON, binary), five repetitions of fifty requests per cell and seven
 configurations (identity, gzip levels 1/6/9, Brotli qualities 1/5/11). Every

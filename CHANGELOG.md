@@ -118,7 +118,7 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   refusal case, Brotli preference/q-values/refusals/trailers with the decoded
   body compared, validate/explain for both codings, and h2c with real curl for
   each). Measured with the release binary against an independent Python origin
-  over loopback (`docs/evidence/v07-compression/bench.py`, raw data
+  over loopback (`scripts/evidence/v07-compression/bench.py`, raw data
   committed): 771 214 B of text → 49 799 B with gzip 6 (ratio 0.065) and
   12 726 B with Brotli 5 (0.017); 1 037 124 B of JSON → 77 132 B (0.074) and
   30 380 B (0.029); a 256 KiB `application/octet-stream` body stays at 1.000

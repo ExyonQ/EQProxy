@@ -159,8 +159,8 @@ Both builds, same host, same 12 s load, back to back:
 
 ## 6. Re-measurement — S-H3-01 / S-H3-02
 
-`python3 run.py --reps 5 --load-binary bin/load --probe-binary bin/probe
---eq-image eqproxy-bench:v07b` → [`run-20261023T181822Z`](v07-h3-bench/run-20261023T181822Z/report.json).
+`cd scripts/evidence/v07-h3-bench && python3 run.py --reps 5 --load-binary
+bin/load --probe-binary bin/probe --eq-image eqproxy-bench:v07b` → [`run-20261023T181822Z`](v07-h3-bench/run-20261023T181822Z/report.json).
 Host load at start: 0.59 (1 min), 2.50 (5 min) — the 5/15-minute averages
 still carried the image build; both products ran under the same condition and
 the order alternated. **All 20 runs: 0 errors, every response 200 with a
@@ -283,7 +283,7 @@ docker run ... -mode load -url https://eq:19443/ -cacert /certs/cert.pem \
   -conns 8 -streams 8 -warmup 2s -duration 12s
 
 # campaign
-cd docs/evidence/v07-h3-bench
+cd scripts/evidence/v07-h3-bench
 python3 run.py --reps 5 --load-binary bin/load --probe-binary bin/probe \
   --eq-image eqproxy-bench:v07b
 ```

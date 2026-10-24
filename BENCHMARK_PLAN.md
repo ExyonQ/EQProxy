@@ -161,7 +161,8 @@ exploratory conclusions, not market metrics).
 
 ## 9. Soak 24h — presupuestos publicados (gate v0.5)
 
-Harness reproducible: [`scripts/soak.py`](scripts/soak.py). Ejecuta el
+Harness reproducible (local-only, fuera del repositorio):
+`scripts/evidence/v07-grpc/soak.py`. Ejecuta el
 **binario real** contra backends HTTP reales, con carga sostenida y
 RSS/CPU muestreados cada 30 s (`/proc`), y emite un veredicto contra
 los presupuestos (sin medidas no hay PASS: `rss_measured` es obligatorio).

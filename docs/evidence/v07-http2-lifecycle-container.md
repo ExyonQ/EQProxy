@@ -34,20 +34,24 @@ build 5 min 34 s. Neither is a timing claim about the product.
 
 ## 3. Harness
 
-Files in this directory are the harness that was run:
+The harness that was run (maintainer-local, outside this repository; the
+paths below are its paths in that tree):
 
-- `origin.py` — the independent **hyper-h2 4.2.0** server over real TLS with
+- `scripts/evidence/v07-lifecycle-container/origin.py` (maintainer-local) —
+  the independent **hyper-h2 4.2.0** server over real TLS with
   ALPN `h2` (not the Rust `h2` crate, not a mock). It records every accepted
   session, every requested stream and every answered stream to JSONL. The
   one-shot refusal (`x-refuse: 1`) is the RFC 9113 §8.1.4 case: reset the
   stream with `REFUSED_STREAM`, answer nothing.
-- `journey.sh` — starts the origin on the host, runs the proxy **in the
+- `scripts/evidence/v07-lifecycle-container/journey.sh` — starts the origin on
+  the host, runs the proxy **in the
   image** on a user-defined bridge, and drives it with `curl`. The container
   gets `--add-host=host.docker.internal:host-gateway` because this engine has
   no `host.docker.internal` entry by default (the first attempt returned
   `503` with `dns[failures=1]`, which is how the need was found); the backend
   address in the config is `host.docker.internal:<port>`.
-- `probe-refused.sh` — the diagnostic in §5.2 (replay latency, repeated).
+- `scripts/evidence/v07-lifecycle-container/probe-refused.sh` — the diagnostic
+  in §5.2 (replay latency, repeated).
 
 The proxy is stopped with `docker kill --signal=INT` (SIGINT, the signal the
 binary drains on), so the container's final `METRICS` line and
@@ -190,7 +194,8 @@ it; the journeys assert behavior, not speed.
 ### 5.2 Why one amd64 request took ~5 s
 
 In the full run, J3's `curl` reported 4.918 s while the origin answered
-230 ms after the refused request. `probe-refused.sh` repeated the journey
+230 ms after the refused request.
+`scripts/evidence/v07-lifecycle-container/probe-refused.sh` repeated the journey
 three times with fresh origin and proxy per attempt and split the time:
 
 | Attempt | curl total | curl → origin request | request → answered (replay incl. 2nd handshake) |
@@ -237,11 +242,11 @@ docker buildx build --file docker/Dockerfile --platform linux/arm64 \
 docker buildx build --file docker/Dockerfile --platform linux/amd64 \
   --load -t eqproxy-local:v07-amd64 .          # ~25 min under QEMU on this host
 
-docs/evidence/v07-lifecycle-container/journey.sh \
+scripts/evidence/v07-lifecycle-container/journey.sh \
   eqproxy-local:v07-arm64 arm64 28471 28081 /tmp/lifecycle-arm64
-docs/evidence/v07-lifecycle-container/journey.sh \
+scripts/evidence/v07-lifecycle-container/journey.sh \
   eqproxy-local:v07-amd64 amd64 28472 28082 /tmp/lifecycle-amd64
-bash docs/evidence/v07-lifecycle-container/probe-refused.sh
+bash scripts/evidence/v07-lifecycle-container/probe-refused.sh
 ```
 
 Each harness run needs the origin's ports (`28471`/`28472`) free and the

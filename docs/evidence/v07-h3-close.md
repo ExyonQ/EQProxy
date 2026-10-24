@@ -81,7 +81,7 @@ scratch).
 
 ## 4. Functional check on the release binary
 
-`python3 docs/evidence/v07-h3-close/run.py` with `aioquic` 1.2.0 as the client
+`python3 scripts/evidence/v07-h3-close/run.py` with `aioquic` 1.2.0 as the client
 (independent QUIC + h3 + QPACK stack), against `a902bce9…`:
 
 | Step | Close | Result |
@@ -222,14 +222,14 @@ ssh netcup-bench 'cd /root/eqproxy-h3-pre && docker build -f docker/Dockerfile \
 
 # two campaigns per image, each preceded by a wait for 1-minute load < 0.30
 ssh netcup-bench 'cd /root/eqproxy-h3-src && python3 \
-  docs/evidence/v07-h3-bench/run.py --reps 5 --eq-image eqproxy-bench:v07c-pre \
+  scripts/evidence/v07-h3-bench/run.py --reps 5 --eq-image eqproxy-bench:v07c-pre \
   --load-binary /root/h3bench-bin/load --probe-binary /root/h3bench-bin/probe'
 ssh netcup-bench 'cd /root/eqproxy-h3-src && python3 \
-  docs/evidence/v07-h3-bench/run.py --reps 5 --eq-image eqproxy-bench:v07c \
+  scripts/evidence/v07-h3-bench/run.py --reps 5 --eq-image eqproxy-bench:v07c \
   --load-binary /root/h3bench-bin/load --probe-binary /root/h3bench-bin/probe'
 
 # the tables above, from the run directories only
-python3 docs/evidence/v07-h3-bench/summarize-close-ab.py \
+python3 scripts/evidence/v07-h3-bench/summarize-close-ab.py \
   run-20261024T001018Z run-20261024T002632Z \
   run-20261024T001614Z run-20261024T003532Z
 ```

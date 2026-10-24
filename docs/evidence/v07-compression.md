@@ -117,11 +117,11 @@ crate and compares it with the origin's bytes.
 
 ## 5. Raw benchmark data (C11 / H6)
 
-`docs/evidence/v07-compression/bench.py` measured the release binary against
-the independent Python origin:
+`scripts/evidence/v07-compression/bench.py` (maintainer-local, outside the
+repository) measured the release binary against the independent Python origin:
 
 ```
-python3 docs/evidence/v07-compression/bench.py --binary target/release/eqproxy
+python3 scripts/evidence/v07-compression/bench.py --binary target/release/eqproxy
 ```
 
 - 3 corpora (text, JSON, binary) × 7 configurations (identity, gzip levels
@@ -206,7 +206,7 @@ cargo build --release
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-python3 docs/evidence/v07-compression/bench.py --binary target/release/eqproxy
+python3 scripts/evidence/v07-compression/bench.py --binary target/release/eqproxy
 veyra audit . --profile standard
 ```
 

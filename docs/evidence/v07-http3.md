@@ -23,7 +23,7 @@ Design: [ADR-0013](../adr/0013-http3-quic.md).
 | Toolchain | `rustc 1.97.1` / `cargo 1.97.1` (edition 2024) |
 | Stack | `quinn 0.11.12` (`rustls-aws-lc-rs`, no `ring`), `h3 0.0.8`, `h3-quinn 0.0.10` |
 | Independent client 1 | `aioquic 1.2.0` (Python 3.9.6), QUIC + h3 + QPACK, no TCP fallback |
-| Independent client 2 | `quic-go v0.64.1` (Go 1.26.2), its own QUIC + h3 + QPACK stack (source in [`v07-http3/interop-quic-go/`](v07-http3/interop-quic-go/)) |
+| Independent client 2 | `quic-go v0.64.1` (Go 1.26.2), its own QUIC + h3 + QPACK stack (source in `scripts/evidence/v07-http3/interop-quic-go/`, maintainer-local) |
 
 ## 3. What the implementation does
 
@@ -91,7 +91,7 @@ loopback UDP; the origin is a real HTTP/1.1 TCP server.
 python3 -m venv /tmp/h3venv
 /tmp/h3venv/bin/pip install aioquic==1.2.0
 cargo build --release -p eqproxy-cli
-/tmp/h3venv/bin/python docs/evidence/v07-http3/run.py
+/tmp/h3venv/bin/python scripts/evidence/v07-http3/run.py
 ```
 
 Run `docs/evidence/v07-http3/run-20261023T004518Z/` (`results.json`,
@@ -120,13 +120,14 @@ Note on the metrics: `protocol_errors=1` in that run is the deliberate
 
 A second implementation with no shared code with the proxy: `quic-go`
 v0.64.1 (its own QUIC transport, h3 framing and QPACK). The client is a
-small Go program ([`v07-http3/interop-quic-go/main.go`](v07-http3/interop-quic-go/main.go)) that
-only performs requests and prints JSON; every assertion stays in `run.py`,
+small Go program (`scripts/evidence/v07-http3/interop-quic-go/main.go`,
+maintainer-local) that only performs requests and prints JSON; every assertion
+stays in `run.py`,
 the same ones the aioquic run uses.
 
 ```
-cd docs/evidence/v07-http3/interop-quic-go && go mod download
-/tmp/h3venv/bin/python docs/evidence/v07-http3/run.py --client quic-go
+cd scripts/evidence/v07-http3/interop-quic-go && go mod download
+/tmp/h3venv/bin/python scripts/evidence/v07-http3/run.py --client quic-go
 ```
 
 Run `docs/evidence/v07-http3/run-20261023T012403Z-quic-go/` (`results.json`,
@@ -190,8 +191,8 @@ the valid one).
 | `cargo clippy --workspace --all-targets --all-features -- -D warnings` | clean (below) |
 | `cargo test --workspace` | 414 passed, 0 failed, 2 ignored |
 | `gofmt -l …/interop-quic-go` / `go vet ./…` | clean / exit 0 |
-| `/tmp/h3venv/bin/python docs/evidence/v07-http3/run.py` | PASS, exit 0 (`run-20261023T012405Z`) |
-| `/tmp/h3venv/bin/python docs/evidence/v07-http3/run.py --client quic-go` | PASS, exit 0 (`run-20261023T012403Z-quic-go`) |
+| `/tmp/h3venv/bin/python scripts/evidence/v07-http3/run.py` | PASS, exit 0 (`run-20261023T012405Z`) |
+| `/tmp/h3venv/bin/python scripts/evidence/v07-http3/run.py --client quic-go` | PASS, exit 0 (`run-20261023T012403Z-quic-go`) |
 | `veyra audit . --profile standard` | **ACCEPTED**, exit 0, `.veyra/evidence/20261023T012717Z/` (rustfmt, check, clippy, test, audit, anti-theater, nextest, llvm-cov, deny, machete and `veyra-e2e` 17/17 OK; geiger INCONCLUSIVE by its own coverage warning, dylint/semver-checks SKIPPED for lack of config/baseline — no check disabled) |
 | Rust Audit `scan . --format terminal,md,json,sarif --fail-on high` | exit 1: 251 findings (3 critical / 25 high / 180 medium / 43 low), triaged below; **none in the new HTTP/3 code** |
 | EvoForge `mcp_submit_eval` | **F = 1.0**, 3/3 sandbox tests, clippy clean, exit 0, trace `94fd6088-02f1-4a2f-8cb5-0c2ba308c123`; re-run for the interop increment on the same unchanged h3 translation slice — **F = 1.0**, trace `113d25cd-49e2-40ff-b8eb-4d59e261291b` |

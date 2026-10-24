@@ -28,7 +28,7 @@ increment).
 | Toolchain | `rustc 1.97.1 (8bab26f4f 2026-07-14)`, cargo 1.97.1 |
 | Real gRPC stack | `grpcio` 1.66.1 / `grpc-c` 43.0.0 (origin **and** client), Python 3.9.6 |
 | Design | [ADR-0011](../adr/0011-grpc-http2-passthrough.md) |
-| Raw runs | [`v07-grpc/quick.txt`](v07-grpc/quick.txt), [`v07-grpc/long-360s.txt`](v07-grpc/long-360s.txt), harness [`v07-grpc/run.py`](v07-grpc/run.py), binary hash [`v07-grpc/binary.sha256`](v07-grpc/binary.sha256) |
+| Raw runs | [`v07-grpc/quick.txt`](v07-grpc/quick.txt), [`v07-grpc/long-360s.txt`](v07-grpc/long-360s.txt), harness `scripts/evidence/v07-grpc/run.py` (maintainer-local), binary hash [`v07-grpc/binary.sha256`](v07-grpc/binary.sha256) |
 
 ## 3. What the implementation does
 
@@ -88,7 +88,7 @@ outbound request carries `te: trailers` and no h1 framing, keeps a declared
 
 ### 4.2 Real `grpcio` through the release binary
 
-`python3 docs/evidence/v07-grpc/run.py --long-seconds 0` and
+`python3 scripts/evidence/v07-grpc/run.py --long-seconds 0` and
 `... --long-seconds 360 --long-interval 20` — both **PASS**.
 
 The origin is a genuine `grpcio` TLS server (ALPN h2, self-signed fixture
