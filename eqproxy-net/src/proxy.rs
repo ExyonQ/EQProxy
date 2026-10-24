@@ -2200,8 +2200,21 @@ async fn open_h2_exchange(
         proxy_protocol: backend.proxy_protocol,
         metrics: Arc::clone(metrics),
     });
-    let (session, opened) = session_for(hub, &dialer, addr).await?;
-    let (read, write) = stream_on_session(&session, dialer, name, addr, peer, idle, metrics)?;
+    let (session, mut opened) = session_for(hub, &dialer, addr).await?;
+    let mut stream = stream_on_session(&session, Arc::clone(&dialer), name, idle);
+    if stream.is_err() && hub.lookup(addr).is_none() {
+        // The peer's GOAWAY arrived between the lookup and the admission, so
+        // the session was retired before a stream was opened: nothing reached
+        // the origin and the exchange belongs on a fresh session.
+        let (fresh, dialed) = session_for(hub, &dialer, addr).await?;
+        opened |= dialed;
+        stream = stream_on_session(&fresh, dialer, name, idle);
+    }
+    let (read, write) = stream.map_err(|err| {
+        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
+        eprintln!("ERROR [{name}] could not open an HTTP/2 stream to {addr} (peer {peer}): {err}");
+        OutboundError::Connect
+    })?;
     Ok((read, write, opened))
 }
 
@@ -2368,16 +2381,9 @@ fn stream_on_session(
     session: &Arc<backend_h2::Session>,
     dialer: Arc<H2Dialer>,
     name: &str,
-    addr: SocketAddr,
-    peer: SocketAddr,
     idle: Duration,
-    metrics: &Arc<Metrics>,
-) -> Result<(BoxRead, BoxWrite), OutboundError> {
-    backend_h2::open(session, dialer, name, idle).map_err(|err| {
-        metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
-        eprintln!("ERROR [{name}] could not open an HTTP/2 stream to {addr} (peer {peer}): {err}");
-        OutboundError::Connect
-    })
+) -> Result<(BoxRead, BoxWrite), std::io::Error> {
+    backend_h2::open(session, dialer, name, idle)
 }
 
 /// Everything one fresh h2 session needs, owned so an exchange can dial a

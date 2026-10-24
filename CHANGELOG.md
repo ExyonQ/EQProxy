@@ -296,6 +296,22 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Fixed
 
+- **An exchange that races the backend's GOAWAY is no longer answered with
+  `502`.** When the peer announced GOAWAY while a bodiless request was being
+  admitted, h2 could report the refused stream as `RST_STREAM(CANCEL)`
+  instead of a GOAWAY error; EQProxy classified that as a protocol error and
+  answered `502` on Linux (the macOS timing took the GOAWAY branch, so the
+  suite passed there). The session now probes the h2 handle for the stored
+  GOAWAY before admitting a stream and is retired when the peer already
+  announced it; if the GOAWAY lands between the lookup and the admission, the
+  exchange is moved to a fresh session, and a request that carried **no
+  body** is replayed once when the race is lost on the wire. A body-carrying
+  request is still never replayed. Reproduced on Linux against the real
+  `h2::server` (`RST_STREAM(CANCEL)`, previously a deterministic failure) and
+  verified with 5/5 single-journey runs, 3×13/13 for
+  `e2e_backend_h2`, the whole `eqproxy-net` suite on Linux and
+  `cargo test --workspace` on macOS (424 passed); details in
+  `docs/evidence/v07-http2-session-lifecycle.md` §5.1.
 - **A clean HTTP/3 close is no longer counted as a protocol error, and no
   longer floods the log (S-H3-02).** The h3 error alone does not say whether a
   peer ended the session normally, so EQProxy wrote
