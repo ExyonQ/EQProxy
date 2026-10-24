@@ -836,9 +836,22 @@ jobs:
             log "re-pull $ref (linux/$arch)"
             docker pull -q --platform "linux/$arch" "$ref" >/dev/null \
               || fail "docker pull $ref linux/$arch"
+            # A platform pull records either the index digest or the platform
+            # manifest digest in RepoDigests, depending on what the daemon
+            # already had. Both belong to the scanned index; resolve the tag
+            # and the platform manifest from the raw index and accept either.
+            raw_index="$(docker buildx imagetools inspect --raw "$ref")" \
+              || fail "inspect $ref"
+            got_index="$(printf '%s' "$raw_index" | sha256sum | cut -d' ' -f1)"
+            [ "$got_index" = "$INDEX" ] \
+              || fail "$ref resolves to sha256:$got_index, not the scanned sha256:$INDEX"
+            platform_digest="$(printf '%s' "$raw_index" \
+              | jq -r --arg arch "$arch" '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest' \
+              | head -1)"
+            [ -n "$platform_digest" ] || fail "$ref has no linux/$arch manifest"
             case "$(docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ref")" in
-              *"@sha256:$INDEX"*) ;;
-              *) fail "$ref linux/$arch is not the scanned index sha256:$INDEX" ;;
+              *"@sha256:$got_index"*|*"@$platform_digest"*) ;;
+              *) fail "$ref linux/$arch is neither the scanned index nor its manifest $platform_digest" ;;
             esac
             docker run --rm --platform "linux/$arch" "$ref" --version \
               | grep -q "eqproxy $VERSION" \
