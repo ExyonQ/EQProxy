@@ -34,6 +34,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use h2::server::SendResponse;
 use h2::{RecvStream, SendStream};
+
+/// The request pair handed back untouched when the stream is not a WebSocket.
+/// Boxed: the pair is 264 bytes and returning it inline trips
+/// `clippy::result_large_err` on current toolchains.
+pub(crate) type Unserved = Box<(Request<RecvStream>, SendResponse<Bytes>)>;
 use http::{HeaderMap, Method, Request, Response, StatusCode, Uri};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
@@ -64,12 +69,12 @@ pub(crate) async fn serve(
     local: SocketAddr,
     cfg: &Arc<ResolvedListener>,
     metrics: &Arc<Metrics>,
-) -> Result<(), (Request<RecvStream>, SendResponse<Bytes>)> {
+) -> Result<(), Unserved> {
     if request.method() != Method::CONNECT {
-        return Err((request, respond));
+        return Err(Box::new((request, respond)));
     }
     let protocol = match request.extensions().get::<h2::ext::Protocol>() {
-        None => return Err((request, respond)),
+        None => return Err(Box::new((request, respond))),
         Some(protocol) => protocol.as_str().to_owned(),
     };
     if protocol != WEBSOCKET {

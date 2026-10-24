@@ -41,6 +41,11 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Status
 
 use eqproxy_core::Metrics;
 
+/// The request pair handed back untouched when the stream is not gRPC. Boxed:
+/// the pair is 264 bytes and returning it inline trips
+/// `clippy::result_large_err` on current toolchains.
+pub(crate) type Unserved = Box<(Request<RecvStream>, h2::server::SendResponse<Bytes>)>;
+
 use crate::http1::{
     BodyFraming, RequestHead, apply_forwarded, apply_header_actions, apply_rewrite, cookie_value,
     parse_request_head,
@@ -93,9 +98,9 @@ pub(crate) async fn serve(
     local: SocketAddr,
     cfg: &Arc<ResolvedListener>,
     metrics: &Arc<Metrics>,
-) -> Result<(), (Request<RecvStream>, h2::server::SendResponse<Bytes>)> {
+) -> Result<(), Unserved> {
     if request.method() != Method::POST || !is_grpc(request.headers()) {
-        return Err((request, respond));
+        return Err(Box::new((request, respond)));
     }
     let body_empty = request.body().is_end_stream();
     let Ok(h1) = build_request_head(
@@ -105,10 +110,10 @@ pub(crate) async fn serve(
         body_empty,
     ) else {
         // The h1 translation answers this with the precise refusal.
-        return Err((request, respond));
+        return Err(Box::new((request, respond)));
     };
     let Ok(head) = parse_head(&h1.head) else {
-        return Err((request, respond));
+        return Err(Box::new((request, respond)));
     };
     let path = eqproxy_core::rules::path_of(&head.target).to_owned();
     let facts = eqproxy_core::rules::RequestFacts {
@@ -157,13 +162,13 @@ pub(crate) async fn serve(
         // A redirect or a direct answer is a local response, not a stream:
         // the h1 translation already serves them with their exact semantics.
         RouteDecision::Redirect { .. } | RouteDecision::Direct { .. } => {
-            return Err((request, respond));
+            return Err(Box::new((request, respond)));
         }
     };
     if backend.h2.is_none() {
         // No HTTP/2 to this backend: gRPC cannot be spoken there. Keep the
         // existing translation instead of inventing a second failure mode.
-        return Err((request, respond));
+        return Err(Box::new((request, respond)));
     }
 
     let scheme = if cfg.server_tls.is_some() {

@@ -223,7 +223,7 @@ async fn exchange(
         // that can never complete.
         match crate::ws::serve(request, respond, peer, local, &cfg, &metrics).await {
             Ok(()) => return,
-            Err(pair) => pair,
+            Err(pair) => *pair,
         }
     } else {
         (request, respond)
@@ -241,7 +241,7 @@ async fn exchange(
     let (request, mut respond) =
         match crate::grpc::serve(request, respond, peer, local, &cfg, &metrics).await {
             Ok(()) => return,
-            Err(pair) => pair,
+            Err(pair) => *pair,
         };
     let body_empty = request.body().is_end_stream();
     let translated = match build_request_head(&method, request.uri(), request.headers(), body_empty)
