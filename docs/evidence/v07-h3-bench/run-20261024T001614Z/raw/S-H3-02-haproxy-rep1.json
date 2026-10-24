@@ -1,0 +1,118 @@
+{
+  "scenario": "S-H3-02",
+  "product": "haproxy",
+  "rep": 1,
+  "order_index": 1,
+  "url": "https://haproxy:19443/",
+  "started_utc": "2026-10-24T00:20:10Z",
+  "ended_utc": "2026-10-24T00:20:23Z",
+  "wall_seconds": 12.366,
+  "generator": {
+    "mode": "handshake",
+    "target": "https://haproxy:19443/",
+    "conns": 16,
+    "warmup_s": 2,
+    "duration_s": 10,
+    "wall_s": 12.006874966,
+    "requests": 0,
+    "ok": 0,
+    "errors": 0,
+    "status_codes": null,
+    "bytes": 0,
+    "rps": 0,
+    "handshakes": 18042,
+    "handshakes_per_sec": 1804.1709434661213,
+    "handshake_ms": {
+      "count": 18042,
+      "min": 1.604052,
+      "p50": 7.953621,
+      "p95": 14.583777,
+      "p99": 18.361957,
+      "max": 34.013419,
+      "mean": 8.422878256955983,
+      "histogram": [
+        {
+          "upper_ms": 0.5,
+          "count": 0
+        },
+        {
+          "upper_ms": 1,
+          "count": 0
+        },
+        {
+          "upper_ms": 2,
+          "count": 13
+        },
+        {
+          "upper_ms": 3,
+          "count": 280
+        },
+        {
+          "upper_ms": 5,
+          "count": 2150
+        },
+        {
+          "upper_ms": 7.5,
+          "count": 5540
+        },
+        {
+          "upper_ms": 10,
+          "count": 5121
+        },
+        {
+          "upper_ms": 15,
+          "count": 4165
+        },
+        {
+          "upper_ms": 20,
+          "count": 683
+        },
+        {
+          "upper_ms": 30,
+          "count": 88
+        },
+        {
+          "upper_ms": 50,
+          "count": 2
+        },
+        {
+          "upper_ms": 75,
+          "count": 0
+        },
+        {
+          "upper_ms": 100,
+          "count": 0
+        },
+        {
+          "upper_ms": 200,
+          "count": 0
+        },
+        {
+          "upper_ms": 500,
+          "count": 0
+        },
+        {
+          "upper_ms": 0,
+          "count": 0
+        }
+      ]
+    },
+    "sanity": "ok",
+    "generator_cpu_seconds": 29986.819,
+    "generator_cpu_pct_one_core": 249.70703773729178
+  },
+  "resources": {
+    "proxy": {
+      "cpu_percent_one_core": 203.3,
+      "cpu_seconds": 25.143,
+      "memory_bytes": 38227968,
+      "memory_peak_bytes": 39362560
+    },
+    "origin": {
+      "cpu_percent_one_core": 0.2,
+      "cpu_seconds": 0.026,
+      "memory_bytes": 11886592,
+      "memory_peak_bytes": 13324288
+    }
+  }
+}

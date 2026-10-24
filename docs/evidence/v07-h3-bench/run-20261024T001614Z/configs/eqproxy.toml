@@ -1,0 +1,16 @@
+schema_version = 1
+
+[listener.h3]
+listen = "0.0.0.0:19443"
+mode = "http"
+backend = "api"
+maxconn = 20000
+idle_timeout = "30s"
+quic = true
+
+[listener.h3.tls]
+cert = "/certs/cert.pem"
+key = "/certs/key.pem"
+
+[backend.api]
+server = "origin:9000"

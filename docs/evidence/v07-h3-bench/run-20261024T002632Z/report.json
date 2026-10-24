@@ -1,0 +1,2929 @@
+{
+  "disclosure": {
+    "date_utc": "2026-10-24T00:26:34Z",
+    "plan": "BENCHMARK_PLAN.md \u00a72 disclosure, \u00a73 scenarios, \u00a74 metrics, \u00a75 bias controls",
+    "artifacts": {
+      "eqproxy_image": {
+        "image": "eqproxy-bench:v07c",
+        "id": "cbdbd07a05c40b65",
+        "tags": "[eqproxy-bench:v07c]",
+        "created": "2026-10-24T02:04:34.736745438+02:00"
+      },
+      "eqproxy_binary_sha256": "b8fae6d85b8bc0ee8ad041fe4e0c596f5968ca9727748824713143d10931d6ff",
+      "eqproxy_version": "eqproxy 0.6.3",
+      "haproxy_image": {
+        "image": "haproxy:3.4.6",
+        "id": "e273915691a8eab3",
+        "tags": "[haproxy:3.4.6]",
+        "created": "2026-10-06T01:15:42.729294789Z"
+      },
+      "haproxy_vv": [
+        "HAProxy version 3.4.6-56332c5 2026/09/28 - https://haproxy.org/",
+        "Status: long-term supported branch - will stop receiving fixes around Q2 2031.",
+        "Known bugs: http://www.haproxy.org/bugs/bugs-3.4.6.html",
+        "Running on: Linux 6.8.0-147-generic #147-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep 24 11:33:16 UTC 2026 x86_64",
+        "Build options : ",
+        "  TARGET  = linux-glibc",
+        "  CC      = cc",
+        "  CFLAGS  = -O2 -g -fwrapv -fvect-cost-model=very-cheap",
+        "  OPTIONS = USE_PTHREAD_EMULATION=1 USE_GETADDRINFO=1 USE_OPENSSL=1 USE_LUA=1 USE_QUIC=1 USE_PROMEX=1 USE_PCRE2=1 USE_PCRE2_JIT=1",
+        "  DEBUG   = ",
+        "",
+        "Feature list : -51DEGREES +ACCEPT4 +ACME +BACKTRACE -CLOSEFROM +CPU_AFFINITY +CRYPT_H -DEVICEATLAS +DL -ECH -ENGINE +EPOLL -EVPORTS +GETADDRINFO +HAVE_TCP_MD5SIG -KQUEUE +KTLS -LIBATOMIC +LIBCRYPT +LINUX_CAP +LINUX_SPLICE +LINUX_TPROXY +LUA +MATH -MEMORY_PROFILING +NETFILTER +NS -OBSOLETE_LINKER +OPENSSL -OPENSSL_AWSLC -OPENSSL_WOLFSSL -OT -PCRE +PCRE2 +PCRE2_JIT -PCRE_JIT +POLL +PRCTL -PROCCTL +PROMEX +PTHREAD_EMULATION +QUIC -QUIC_OPENSSL_COMPAT +RT +SHM_OPEN +SLZ +SSL -STATIC_PCRE -STATIC_PCRE2 +TFO +THREAD +THREAD_DUMP +TPROXY +TRACE -WURFL -ZLIB",
+        "Detected feature list : +HAVE_WORKING_TCP_MD5SIG",
+        "",
+        "Default settings :",
+        "  bufsize = 16384, maxrewrite = 1024, maxpollevents = 200",
+        "",
+        "Built with multi-threading support (MAX_TGROUPS=32, MAX_THREADS=1024, default=8).",
+        "Built with SSL library version : OpenSSL 3.5.7 9 Jun 2026",
+        "Running on SSL library version : OpenSSL 3.5.7 9 Jun 2026",
+        "SSL library supports TLS extensions : yes",
+        "SSL library supports SNI : yes",
+        "SSL library default verify directory : /usr/lib/ssl/certs",
+        "SSL library supports : TLSv1.0 TLSv1.1 TLSv1.2 TLSv1.3",
+        "OpenSSL providers loaded : default",
+        "QUIC: connection sock-per-conn mode support : yes",
+        "QUIC: GSO emission support : yes",
+        "Built with Lua version : Lua 5.4.7",
+        "Built with the Prometheus exporter as a service",
+        "Built with network namespace support.",
+        "Built with libslz for stateless compression.",
+        "Compression algorithms supported : identity(\"identity\"), deflate(\"deflate\"), raw-deflate(\"deflate\"), gzip(\"gzip\")",
+        "Built with transparent proxy support using: IP_TRANSPARENT IPV6_TRANSPARENT IP_FREEBIND",
+        "Built with PCRE2 version : 10.46 2025-08-27",
+        "PCRE2 library supports JIT : yes",
+        "Encrypted password support via crypt(3): yes",
+        "Built with gcc compiler version 14.2.0",
+        "",
+        "Available polling systems :",
+        "      epoll : pref=300,  test result OK",
+        "       poll : pref=200,  test result OK",
+        "     select : pref=150,  test result OK",
+        "Total: 3 (3 usable), will use epoll.",
+        "",
+        "Available multiplexer protocols :",
+        "(protocols marked as <default> cannot be specified using 'proto' keyword)",
+        "       qmux : mode=HTTP  side=FE|BE  mux=QMUX  flags=HTX|NO_UPG",
+        "       quic : mode=HTTP  side=FE|BE  mux=QUIC  flags=HTX|NO_UPG|FRAMED",
+        "         h2 : mode=HTTP  side=FE|BE  mux=H2    flags=HTX|HOL_RISK|NO_UPG",
+        "  <default> : mode=HTTP  side=FE|BE  mux=H1    flags=HTX",
+        "         h1 : mode=HTTP  side=FE|BE  mux=H1    flags=HTX|NO_UPG",
+        "       fcgi : mode=HTTP  side=BE     mux=FCGI  flags=HTX|HOL_RISK|NO_UPG",
+        "  <default> : mode=SPOP  side=BE     mux=SPOP  flags=HOL_RISK|NO_UPG",
+        "       spop : mode=SPOP  side=BE     mux=SPOP  flags=HOL_RISK|NO_UPG",
+        "  <default> : mode=TCP   side=FE|BE  mux=PASS  flags=",
+        "       none : mode=TCP   side=FE|BE  mux=PASS  flags=NO_UPG",
+        "",
+        "Available services : prometheus-exporter",
+        "Available filters :",
+        "\t[BWLIM] bwlim-in",
+        "\t[BWLIM] bwlim-out",
+        "\t[CACHE] cache",
+        "\t[COMP] comp-req",
+        "\t[COMP] comp-res",
+        "\t[COMP] compression",
+        "\t[FCGI] fcgi-app",
+        "\t[SPOE] spoe",
+        "\t[TRACE] trace"
+      ],
+      "generator_image": {
+        "image": "eqproxy-h3load:v07",
+        "id": "752ad07c08875855",
+        "tags": "[eqproxy-h3load:v07]",
+        "created": "2026-10-24T02:10:18.950764385+02:00"
+      },
+      "generator_binary_sha256": "f02af496e1951f598d6048c3d31926d1ea2a6995ce2cdb6765251840d142eade",
+      "probe_binary_sha256": "bb546e7e235850a919620ba984d3eed6f49ed01902bb75858dd192318b4da864",
+      "go_modules": [
+        "eqproxy-evidence/h3bench",
+        "github.com/davecgh/go-spew v1.1.1",
+        "github.com/jordanlewis/gcassert v0.0.0-20250430164644-389ef753e22e",
+        "github.com/pmezard/go-difflib v1.0.0",
+        "github.com/quic-go/go-ossfuzz-seeds v0.1.0",
+        "github.com/quic-go/qpack v0.6.0",
+        "github.com/quic-go/quic-go v0.64.1",
+        "github.com/stretchr/testify v1.12.1",
+        "go.uber.org/mock v0.5.2",
+        "go.yaml.in/yaml/v3 v3.0.5",
+        "golang.org/x/crypto v0.54.0",
+        "golang.org/x/mod v0.37.0",
+        "golang.org/x/net v0.56.0",
+        "golang.org/x/sync v0.22.0",
+        "golang.org/x/sys v0.47.0",
+        "golang.org/x/term v0.45.0",
+        "golang.org/x/text v0.40.0",
+        "golang.org/x/tools v0.47.0",
+        "gopkg.in/yaml.v3 v3.0.1"
+      ],
+      "certificate_sha256": "0c6cab2ee350fe29fa65783b19baa55c19444de71e9926e35ef093be4d018017",
+      "certificate": "CN=localhost, SAN DNS:localhost + IP:127.0.0.1"
+    },
+    "host": {
+      "uname": "Linux-6.8.0-147-generic-x86_64-with-glibc2.39",
+      "machine": "x86_64",
+      "cpu_model": "AMD EPYC 9645 96-Core Processor",
+      "host_cpus": 8,
+      "host_memory_bytes": 16767594496,
+      "load_average": [
+        0.12548828125,
+        3.89208984375,
+        4.875
+      ],
+      "docker": "client 29.6.1 / server 29.6.1",
+      "vm": "cpus=8 memory=16767594496"
+    },
+    "generator": {
+      "what": "quic-go 0.64.1 HTTP/3 client (docs/evidence/v07-h3-bench/load.go), real TLS verification against the fixture CA, no 0-RTT, no session resumption, closed-loop, no coordinated-omission correction",
+      "load": {
+        "conns": 8,
+        "streams": 8,
+        "warmup_s": 3,
+        "duration_s": 15
+      },
+      "handshake": {
+        "conns": 16,
+        "warmup_s": 2,
+        "duration_s": 10,
+        "0_rtt": "off (client does not attempt it; EQProxy does not implement it, ADR-0013)",
+        "session_resumption": "off (fresh handshake every dial)"
+      }
+    },
+    "topology": "one host (Linux-6.8.0-147-generic-x86_64-with-glibc2.39, AMD EPYC 9645 96-Core Processor, 8 CPUs exposed to Docker as cpus=8 memory=16767594496); origin, sink, both proxies and the generator are containers on one bridge network; no host port publishing on the measured path",
+    "equivalence": [
+      "same HTTP/1.1 origin (1 KiB, Content-Length, keep-alive) and same body",
+      "same certificate, TLS 1.3, ALPN h3, cubic congestion control, 30 s idle timeout",
+      "same container port 19443; HAProxy uses a dedicated quic4@ bind for QUIC",
+      "no compression enabled in either product; no rules/rewrites in this scenario",
+      "no health checks in either product for this scenario (static origin)",
+      "maxconn 20000 in both"
+    ],
+    "differences": [
+      "EQProxy translates every h3 request into one HTTP/1.1 exchange through its engine (architecture, ADR-0013); HAProxy forwards natively",
+      "HAProxy's TCP bind also offers h2/http1.1 (unused here); EQProxy's TCP path is part of the same listener"
+    ]
+  },
+  "calibration": {
+    "load_c8s8": {
+      "config": {
+        "mode": "load",
+        "conns": 8,
+        "streams": 8,
+        "warmup_s": 2,
+        "duration_s": 10
+      },
+      "generator": {
+        "mode": "load",
+        "target": "https://sink:9443/",
+        "conns": 8,
+        "streams": 8,
+        "warmup_s": 2,
+        "duration_s": 10,
+        "wall_s": 12.011070714,
+        "requests": 649195,
+        "ok": 649195,
+        "errors": 0,
+        "status_codes": {
+          "200": 649195
+        },
+        "bytes": 664775680,
+        "rps": 55309.619336659394,
+        "latency_ms": {
+          "count": 553098,
+          "min": 0.061347,
+          "p50": 0.995879,
+          "p95": 2.483379,
+          "p99": 3.369476,
+          "max": 6.939476,
+          "mean": 1.1565340853592085,
+          "histogram": [
+            {
+              "upper_ms": 0.5,
+              "count": 92678
+            },
+            {
+              "upper_ms": 1,
+              "count": 185166
+            },
+            {
+              "upper_ms": 2,
+              "count": 208995
+            },
+            {
+              "upper_ms": 3,
+              "count": 55187
+            },
+            {
+              "upper_ms": 5,
+              "count": 10668
+            },
+            {
+              "upper_ms": 7.5,
+              "count": 404
+            },
+            {
+              "upper_ms": 10,
+              "count": 0
+            },
+            {
+              "upper_ms": 15,
+              "count": 0
+            },
+            {
+              "upper_ms": 20,
+              "count": 0
+            },
+            {
+              "upper_ms": 30,
+              "count": 0
+            },
+            {
+              "upper_ms": 50,
+              "count": 0
+            },
+            {
+              "upper_ms": 75,
+              "count": 0
+            },
+            {
+              "upper_ms": 100,
+              "count": 0
+            },
+            {
+              "upper_ms": 200,
+              "count": 0
+            },
+            {
+              "upper_ms": 500,
+              "count": 0
+            },
+            {
+              "upper_ms": 0,
+              "count": 0
+            }
+          ]
+        },
+        "sanity": "ok",
+        "generator_cpu_seconds": 31717.069,
+        "generator_cpu_pct_one_core": 262.60344148700943
+      },
+      "sink": {
+        "cpu_percent_one_core": 298.2,
+        "memory_peak_bytes": 14094336
+      },
+      "note": "Local HTTP/3 sink (quic-go server, same binary) measures the client+sink pair; the slower of the two is the ceiling, so this is a lower bound on what the generator can push."
+    },
+    "handshake_c16": {
+      "config": {
+        "mode": "handshake",
+        "conns": 16,
+        "streams": null,
+        "warmup_s": 2,
+        "duration_s": 10
+      },
+      "generator": {
+        "mode": "handshake",
+        "target": "https://sink:9443/",
+        "conns": 16,
+        "warmup_s": 2,
+        "duration_s": 10,
+        "wall_s": 12.009924075,
+        "requests": 0,
+        "ok": 0,
+        "errors": 0,
+        "status_codes": null,
+        "bytes": 0,
+        "rps": 0,
+        "handshakes": 15897,
+        "handshakes_per_sec": 1589.697960735456,
+        "handshake_ms": {
+          "count": 15897,
+          "min": 2.193845,
+          "p50": 9.394179,
+          "p95": 16.623849,
+          "p99": 20.842154,
+          "max": 30.315527,
+          "mean": 9.925982481222869,
+          "histogram": [
+            {
+              "upper_ms": 0.5,
+              "count": 0
+            },
+            {
+              "upper_ms": 1,
+              "count": 0
+            },
+            {
+              "upper_ms": 2,
+              "count": 0
+            },
+            {
+              "upper_ms": 3,
+              "count": 28
+            },
+            {
+              "upper_ms": 5,
+              "count": 788
+            },
+            {
+              "upper_ms": 7.5,
+              "count": 3520
+            },
+            {
+              "upper_ms": 10,
+              "count": 4732
+            },
+            {
+              "upper_ms": 15,
+              "count": 5340
+            },
+            {
+              "upper_ms": 20,
+              "count": 1267
+            },
+            {
+              "upper_ms": 30,
+              "count": 221
+            },
+            {
+              "upper_ms": 50,
+              "count": 1
+            },
+            {
+              "upper_ms": 75,
+              "count": 0
+            },
+            {
+              "upper_ms": 100,
+              "count": 0
+            },
+            {
+              "upper_ms": 200,
+              "count": 0
+            },
+            {
+              "upper_ms": 500,
+              "count": 0
+            },
+            {
+              "upper_ms": 0,
+              "count": 0
+            }
+          ]
+        },
+        "sanity": "ok",
+        "generator_cpu_seconds": 23721.418000000005,
+        "generator_cpu_pct_one_core": 197.4898268314764
+      },
+      "sink": {
+        "cpu_percent_one_core": 354.2,
+        "memory_peak_bytes": 14094336
+      },
+      "note": "Local HTTP/3 sink (quic-go server, same binary) measures the client+sink pair; the slower of the two is the ceiling, so this is a lower bound on what the generator can push."
+    }
+  },
+  "results": {
+    "S-H3-01": {
+      "eqproxy": [
+        {
+          "scenario": "S-H3-01",
+          "product": "eqproxy",
+          "rep": 1,
+          "order_index": 0,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:26:59Z",
+          "ended_utc": "2026-10-24T00:27:18Z",
+          "wall_seconds": 18.53,
+          "generator": {
+            "mode": "load",
+            "target": "https://eqproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.013661482,
+            "requests": 641316,
+            "ok": 641316,
+            "errors": 0,
+            "status_codes": {
+              "200": 641316
+            },
+            "bytes": 656707584,
+            "rps": 37018.309575602885,
+            "latency_ms": {
+              "count": 555286,
+              "min": 0.149584,
+              "p50": 1.523925,
+              "p95": 3.429671,
+              "p99": 4.594813,
+              "max": 10.043247,
+              "mean": 1.727950435915857,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 4505
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 79785
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 318949
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 105333
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 43671
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 2966
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 76
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 1
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 41228.552,
+            "generator_cpu_pct_one_core": 227.96924538057567
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 271.8,
+              "cpu_seconds": 50.363,
+              "memory_bytes": 42508288,
+              "memory_peak_bytes": 46788608
+            },
+            "origin": {
+              "cpu_percent_one_core": 138.4,
+              "cpu_seconds": 25.65,
+              "memory_bytes": 12017664,
+              "memory_peak_bytes": 12574720
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 12001280,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "eqproxy",
+          "rep": 2,
+          "order_index": 1,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:27:58Z",
+          "ended_utc": "2026-10-24T00:28:17Z",
+          "wall_seconds": 18.464,
+          "generator": {
+            "mode": "load",
+            "target": "https://eqproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.014456616,
+            "requests": 654887,
+            "ok": 654887,
+            "errors": 0,
+            "status_codes": {
+              "200": 654887
+            },
+            "bytes": 670604288,
+            "rps": 37046.617594717,
+            "latency_ms": {
+              "count": 555700,
+              "min": 0.14625,
+              "p50": 1.514211,
+              "p95": 3.461609,
+              "p99": 4.697986,
+              "max": 9.943629,
+              "mean": 1.7267018959708462,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 4537
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 84592
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 313845
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 104351
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 44596
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 3705
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 74
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 41636.381,
+            "generator_cpu_pct_one_core": 230.27183996112606
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 273.3,
+              "cpu_seconds": 50.468,
+              "memory_bytes": 45805568,
+              "memory_peak_bytes": 48672768
+            },
+            "origin": {
+              "cpu_percent_one_core": 139.7,
+              "cpu_seconds": 25.789,
+              "memory_bytes": 12218368,
+              "memory_peak_bytes": 13209600
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.023,
+              "memory_bytes": 12087296,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "eqproxy",
+          "rep": 3,
+          "order_index": 0,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:28:17Z",
+          "ended_utc": "2026-10-24T00:28:36Z",
+          "wall_seconds": 18.513,
+          "generator": {
+            "mode": "load",
+            "target": "https://eqproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.013587548,
+            "requests": 645855,
+            "ok": 645855,
+            "errors": 0,
+            "status_codes": {
+              "200": 645855
+            },
+            "bytes": 661355520,
+            "rps": 36282.20139663369,
+            "latency_ms": {
+              "count": 544246,
+              "min": 0.138667,
+              "p50": 1.56467,
+              "p95": 3.460477,
+              "p99": 4.616076,
+              "max": 10.527333,
+              "mean": 1.7631311445651066,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 3720
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 72154
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 310348
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 109828
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 45129
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 3013
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 53
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 1
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 41322.168,
+            "generator_cpu_pct_one_core": 228.50064372766332
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 273.6,
+              "cpu_seconds": 50.652,
+              "memory_bytes": 45715456,
+              "memory_peak_bytes": 49328128
+            },
+            "origin": {
+              "cpu_percent_one_core": 138.9,
+              "cpu_seconds": 25.722,
+              "memory_bytes": 12398592,
+              "memory_peak_bytes": 13287424
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 11612160,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "eqproxy",
+          "rep": 4,
+          "order_index": 1,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:29:16Z",
+          "ended_utc": "2026-10-24T00:29:34Z",
+          "wall_seconds": 18.468,
+          "generator": {
+            "mode": "load",
+            "target": "https://eqproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.011218158,
+            "requests": 702239,
+            "ok": 702239,
+            "errors": 0,
+            "status_codes": {
+              "200": 702239
+            },
+            "bytes": 719092736,
+            "rps": 39535.003998413995,
+            "latency_ms": {
+              "count": 593026,
+              "min": 0.158077,
+              "p50": 1.427776,
+              "p95": 3.177264,
+              "p99": 4.241701,
+              "max": 9.146059,
+              "mean": 1.6180321217669829,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 5061
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 103401
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 348498
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 98039
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 36326
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 1662
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 39
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 41462.427,
+            "generator_cpu_pct_one_core": 229.2843164307352
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 273.9,
+              "cpu_seconds": 50.581,
+              "memory_bytes": 46428160,
+              "memory_peak_bytes": 47538176
+            },
+            "origin": {
+              "cpu_percent_one_core": 141.2,
+              "cpu_seconds": 26.076,
+              "memory_bytes": 12050432,
+              "memory_peak_bytes": 13287424
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.022,
+              "memory_bytes": 11689984,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "eqproxy",
+          "rep": 5,
+          "order_index": 0,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:29:35Z",
+          "ended_utc": "2026-10-24T00:29:54Z",
+          "wall_seconds": 18.502,
+          "generator": {
+            "mode": "load",
+            "target": "https://eqproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.012875536,
+            "requests": 693441,
+            "ok": 693441,
+            "errors": 0,
+            "status_codes": {
+              "200": 693441
+            },
+            "bytes": 710083584,
+            "rps": 39806.644106914566,
+            "latency_ms": {
+              "count": 597100,
+              "min": 0.147952,
+              "p50": 1.425902,
+              "p95": 3.145143,
+              "p99": 4.215299,
+              "max": 10.822674,
+              "mean": 1.6071004646658866,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 5490
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 106855
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 350805
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 97554
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 34805
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 1559
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 30
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 2
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 41530.469,
+            "generator_cpu_pct_one_core": 229.64339565356005
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 277.3,
+              "cpu_seconds": 51.301,
+              "memory_bytes": 45543424,
+              "memory_peak_bytes": 46866432
+            },
+            "origin": {
+              "cpu_percent_one_core": 138.8,
+              "cpu_seconds": 25.673,
+              "memory_bytes": 12271616,
+              "memory_peak_bytes": 13287424
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.022,
+              "memory_bytes": 11546624,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        }
+      ],
+      "haproxy": [
+        {
+          "scenario": "S-H3-01",
+          "product": "haproxy",
+          "rep": 1,
+          "order_index": 1,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:27:19Z",
+          "ended_utc": "2026-10-24T00:27:38Z",
+          "wall_seconds": 18.549,
+          "generator": {
+            "mode": "load",
+            "target": "https://haproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.015388528,
+            "requests": 974785,
+            "ok": 974785,
+            "errors": 0,
+            "status_codes": {
+              "200": 974785
+            },
+            "bytes": 998179840,
+            "rps": 56673.289407691955,
+            "latency_ms": {
+              "count": 850105,
+              "min": 0.088079,
+              "p50": 0.922684,
+              "p95": 2.629918,
+              "p99": 3.703488,
+              "max": 10.644676,
+              "mean": 1.1276728899359003,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 93593
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 387794
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 273563
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 70679
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 23163
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 1266
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 44
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 3
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 54409.197,
+            "generator_cpu_pct_one_core": 300.3047562756366
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 194.9,
+              "cpu_seconds": 36.144,
+              "memory_bytes": 32968704,
+              "memory_peak_bytes": 34205696
+            },
+            "origin": {
+              "cpu_percent_one_core": 153.1,
+              "cpu_seconds": 28.398,
+              "memory_bytes": 11960320,
+              "memory_peak_bytes": 13209600
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.022,
+              "memory_bytes": 11644928,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "haproxy",
+          "rep": 2,
+          "order_index": 0,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:27:39Z",
+          "ended_utc": "2026-10-24T00:27:57Z",
+          "wall_seconds": 18.497,
+          "generator": {
+            "mode": "load",
+            "target": "https://haproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.015567347,
+            "requests": 1060724,
+            "ok": 1060724,
+            "errors": 0,
+            "status_codes": {
+              "200": 1060724
+            },
+            "bytes": 1086181376,
+            "rps": 60559.452660456736,
+            "latency_ms": {
+              "count": 908396,
+              "min": 0.084723,
+              "p50": 0.870653,
+              "p95": 2.457798,
+              "p99": 3.426694,
+              "max": 9.594392,
+              "mean": 1.055113758159441,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 120844
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 436458
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 265648
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 66445
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 18309
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 675
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 17
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 54384.816,
+            "generator_cpu_pct_one_core": 300.03851095726384
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 200.1,
+              "cpu_seconds": 37.021,
+              "memory_bytes": 33267712,
+              "memory_peak_bytes": 34369536
+            },
+            "origin": {
+              "cpu_percent_one_core": 154.3,
+              "cpu_seconds": 28.535,
+              "memory_bytes": 12017664,
+              "memory_peak_bytes": 13209600
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.02,
+              "memory_bytes": 12140544,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "haproxy",
+          "rep": 3,
+          "order_index": 1,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:28:37Z",
+          "ended_utc": "2026-10-24T00:28:56Z",
+          "wall_seconds": 18.541,
+          "generator": {
+            "mode": "load",
+            "target": "https://haproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.023586129,
+            "requests": 1030166,
+            "ok": 1030166,
+            "errors": 0,
+            "status_codes": {
+              "200": 1030166
+            },
+            "bytes": 1054889984,
+            "rps": 58857.71431939972,
+            "latency_ms": {
+              "count": 882876,
+              "min": 0.097883,
+              "p50": 0.88773,
+              "p95": 2.543101,
+              "p99": 3.558231,
+              "max": 9.767684,
+              "mean": 1.0861941805394615,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 103638
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 426614
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 262045
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 69114
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 20540
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 913
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 12
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 54919.55800000001,
+            "generator_cpu_pct_one_core": 302.8242744135699
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 198.7,
+              "cpu_seconds": 36.849,
+              "memory_bytes": 33161216,
+              "memory_peak_bytes": 34025472
+            },
+            "origin": {
+              "cpu_percent_one_core": 153.5,
+              "cpu_seconds": 28.461,
+              "memory_bytes": 11943936,
+              "memory_peak_bytes": 13287424
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.022,
+              "memory_bytes": 11542528,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "haproxy",
+          "rep": 4,
+          "order_index": 0,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:28:56Z",
+          "ended_utc": "2026-10-24T00:29:15Z",
+          "wall_seconds": 18.464,
+          "generator": {
+            "mode": "load",
+            "target": "https://haproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.013791304,
+            "requests": 956090,
+            "ok": 956090,
+            "errors": 0,
+            "status_codes": {
+              "200": 956090
+            },
+            "bytes": 979036160,
+            "rps": 54617.461651347796,
+            "latency_ms": {
+              "count": 819278,
+              "min": 0.068788,
+              "p50": 0.953041,
+              "p95": 2.69559,
+              "p99": 3.803125,
+              "max": 9.363761,
+              "mean": 1.1704829182487322,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 69890
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 372617
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 279963
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 70064
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 25351
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 1357
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 36
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 53834.12100000001,
+            "generator_cpu_pct_one_core": 297.23323830919117
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 215.2,
+              "cpu_seconds": 39.739,
+              "memory_bytes": 33337344,
+              "memory_peak_bytes": 33968128
+            },
+            "origin": {
+              "cpu_percent_one_core": 154.4,
+              "cpu_seconds": 28.5,
+              "memory_bytes": 12120064,
+              "memory_peak_bytes": 13287424
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 12107776,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-01",
+          "product": "haproxy",
+          "rep": 5,
+          "order_index": 1,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:29:55Z",
+          "ended_utc": "2026-10-24T00:30:13Z",
+          "wall_seconds": 18.45,
+          "generator": {
+            "mode": "load",
+            "target": "https://haproxy:19443/",
+            "conns": 8,
+            "streams": 8,
+            "warmup_s": 3,
+            "duration_s": 15,
+            "wall_s": 18.012545527,
+            "requests": 798358,
+            "ok": 798358,
+            "errors": 0,
+            "status_codes": {
+              "200": 798358
+            },
+            "bytes": 817518592,
+            "rps": 43468.3782925557,
+            "latency_ms": {
+              "count": 652027,
+              "min": 0.09563,
+              "p50": 1.177574,
+              "p95": 3.489452,
+              "p99": 5.228135,
+              "max": 17.960758,
+              "mean": 1.470747650285973,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 42892
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 205557
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 272302
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 79513
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 43673
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 7058
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 808
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 208
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 16
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 54379.153000000006,
+            "generator_cpu_pct_one_core": 300.56841200305826
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 193.6,
+              "cpu_seconds": 35.715,
+              "memory_bytes": 32690176,
+              "memory_peak_bytes": 34512896
+            },
+            "origin": {
+              "cpu_percent_one_core": 156.5,
+              "cpu_seconds": 28.879,
+              "memory_bytes": 11960320,
+              "memory_peak_bytes": 13287424
+            },
+            "sink": {
+              "cpu_percent_one_core": 0.1,
+              "cpu_seconds": 0.027,
+              "memory_bytes": 11198464,
+              "memory_peak_bytes": 14094336
+            }
+          }
+        }
+      ]
+    },
+    "S-H3-02": {
+      "eqproxy": [
+        {
+          "scenario": "S-H3-02",
+          "product": "eqproxy",
+          "rep": 1,
+          "order_index": 0,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:30:14Z",
+          "ended_utc": "2026-10-24T00:30:27Z",
+          "wall_seconds": 12.478,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://eqproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.009669503,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 13317,
+            "handshakes_per_sec": 1331.6974797625196,
+            "handshake_ms": {
+              "count": 13317,
+              "min": 1.421326,
+              "p50": 11.948475,
+              "p95": 18.79872,
+              "p99": 22.97645,
+              "max": 38.011469,
+              "mean": 11.94633519846806,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 61
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 302
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 460
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 979
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 1884
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 6975
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 2225
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 416
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 15
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 22771.664,
+            "generator_cpu_pct_one_core": 189.59060401624797
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 111.6,
+              "cpu_seconds": 13.923,
+              "memory_bytes": 56348672,
+              "memory_peak_bytes": 57421824
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.026,
+              "memory_bytes": 12079104,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "eqproxy",
+          "rep": 2,
+          "order_index": 1,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:30:54Z",
+          "ended_utc": "2026-10-24T00:31:06Z",
+          "wall_seconds": 12.472,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://eqproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.010182271,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 12518,
+            "handshakes_per_sec": 1251.7828413118812,
+            "handshake_ms": {
+              "count": 12518,
+              "min": 1.496994,
+              "p50": 12.620968,
+              "p95": 20.25574,
+              "p99": 24.863543,
+              "max": 43.328992,
+              "mean": 12.703873980747742,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 24
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 242
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 419
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 738
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 1515
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 6289
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 2620
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 645
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 26
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 23141.965999999997,
+            "generator_cpu_pct_one_core": 192.6656566142707
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 112.8,
+              "cpu_seconds": 14.066,
+              "memory_bytes": 58953728,
+              "memory_peak_bytes": 60518400
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 11620352,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "eqproxy",
+          "rep": 3,
+          "order_index": 0,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:31:07Z",
+          "ended_utc": "2026-10-24T00:31:20Z",
+          "wall_seconds": 12.405,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://eqproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.011530354,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 14111,
+            "handshakes_per_sec": 1411.069721548129,
+            "handshake_ms": {
+              "count": 14111,
+              "min": 1.296409,
+              "p50": 11.281261,
+              "p95": 18.008952,
+              "p99": 21.912034,
+              "max": 33.306752,
+              "mean": 11.274018787825108,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 107
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 411
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 502
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 1225
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 2470
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 7261
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 1816
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 314
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 5
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 22201.791999999998,
+            "generator_cpu_pct_one_core": 184.81327015989865
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 111.8,
+              "cpu_seconds": 13.864,
+              "memory_bytes": 61030400,
+              "memory_peak_bytes": 61808640
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.023,
+              "memory_bytes": 12075008,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "eqproxy",
+          "rep": 4,
+          "order_index": 1,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:31:47Z",
+          "ended_utc": "2026-10-24T00:31:59Z",
+          "wall_seconds": 12.423,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://eqproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.011803585,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 14301,
+            "handshakes_per_sec": 1430.0310426160972,
+            "handshake_ms": {
+              "count": 14301,
+              "min": 1.351756,
+              "p50": 11.138186,
+              "p95": 17.35569,
+              "p99": 21.361691,
+              "max": 32.725621,
+              "mean": 11.125790086707209,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 94
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 385
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 480
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 1207
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 2706
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 7557
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 1609
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 256
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 7
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 22075.076,
+            "generator_cpu_pct_one_core": 183.75555782410177
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 112.1,
+              "cpu_seconds": 13.932,
+              "memory_bytes": 61505536,
+              "memory_peak_bytes": 62078976
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 11546624,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "eqproxy",
+          "rep": 5,
+          "order_index": 0,
+          "url": "https://eqproxy:19443/",
+          "started_utc": "2026-10-24T00:32:00Z",
+          "ended_utc": "2026-10-24T00:32:13Z",
+          "wall_seconds": 12.452,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://eqproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.009939317,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 13239,
+            "handshakes_per_sec": 1323.8850702832854,
+            "handshake_ms": {
+              "count": 13239,
+              "min": 1.581936,
+              "p50": 12.001507,
+              "p95": 18.595641,
+              "p99": 22.437555,
+              "max": 33.132898,
+              "mean": 12.01646928786166,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 39
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 254
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 385
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 851
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 1825
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 7385
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 2110
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 385
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 5
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 22703.445000000003,
+            "generator_cpu_pct_one_core": 189.01863023151637
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 112.8,
+              "cpu_seconds": 14.05,
+              "memory_bytes": 57999360,
+              "memory_peak_bytes": 58814464
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 12128256,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        }
+      ],
+      "haproxy": [
+        {
+          "scenario": "S-H3-02",
+          "product": "haproxy",
+          "rep": 1,
+          "order_index": 1,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:30:27Z",
+          "ended_utc": "2026-10-24T00:30:40Z",
+          "wall_seconds": 12.41,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://haproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.006616751,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 17277,
+            "handshakes_per_sec": 1727.6984414432359,
+            "handshake_ms": {
+              "count": 17277,
+              "min": 1.47528,
+              "p50": 8.306303,
+              "p95": 15.11279,
+              "p99": 19.107554,
+              "max": 36.960393,
+              "mean": 8.7927097542397,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 13
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 229
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 1775
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 4899
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 4858
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 4597
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 790
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 114
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 2
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 29986.270999999997,
+            "generator_cpu_pct_one_core": 249.71252087108255
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 202.7,
+              "cpu_seconds": 25.155,
+              "memory_bytes": 38150144,
+              "memory_peak_bytes": 38961152
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.023,
+              "memory_bytes": 11804672,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "haproxy",
+          "rep": 2,
+          "order_index": 0,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:30:41Z",
+          "ended_utc": "2026-10-24T00:30:53Z",
+          "wall_seconds": 12.392,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://haproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.009463166,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 17330,
+            "handshakes_per_sec": 1732.9976566405687,
+            "handshake_ms": {
+              "count": 17330,
+              "min": 1.530677,
+              "p50": 8.283439,
+              "p95": 14.991059,
+              "p99": 18.784267,
+              "max": 27.431974,
+              "mean": 8.76482312325446,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 12
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 202
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 1799
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 4970
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 4882
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 4601
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 757
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 107
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 30182.466,
+            "generator_cpu_pct_one_core": 251.28692799858473
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 205.1,
+              "cpu_seconds": 25.421,
+              "memory_bytes": 37421056,
+              "memory_peak_bytes": 38707200
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.024,
+              "memory_bytes": 11984896,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "haproxy",
+          "rep": 3,
+          "order_index": 1,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:31:20Z",
+          "ended_utc": "2026-10-24T00:31:33Z",
+          "wall_seconds": 12.375,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://haproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.006805007,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 19114,
+            "handshakes_per_sec": 1911.3725983712927,
+            "handshake_ms": {
+              "count": 19114,
+              "min": 1.444051,
+              "p50": 7.522295,
+              "p95": 13.831513,
+              "p99": 16.931637,
+              "max": 26.092357,
+              "mean": 7.95699226676781,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 22
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 477
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 2572
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 6437
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 5212
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 3838
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 516
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 40
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 29708.086000000003,
+            "generator_cpu_pct_one_core": 247.38147199287593
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 207.4,
+              "cpu_seconds": 25.661,
+              "memory_bytes": 37871616,
+              "memory_peak_bytes": 39108608
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.026,
+              "memory_bytes": 11776000,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "haproxy",
+          "rep": 4,
+          "order_index": 0,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:31:34Z",
+          "ended_utc": "2026-10-24T00:31:46Z",
+          "wall_seconds": 12.395,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://haproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.006071933,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 19307,
+            "handshakes_per_sec": 1930.4985628996535,
+            "handshake_ms": {
+              "count": 19307,
+              "min": 1.516624,
+              "p50": 7.465437,
+              "p95": 13.532396,
+              "p99": 16.579154,
+              "max": 27.409028,
+              "mean": 7.875427704822101,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 27
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 441
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 2678
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 6592
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 5329
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 3781
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 423
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 36
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 29537.859,
+            "generator_cpu_pct_one_core": 245.98201789065834
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 207.8,
+              "cpu_seconds": 25.76,
+              "memory_bytes": 38105088,
+              "memory_peak_bytes": 39407616
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.022,
+              "memory_bytes": 11853824,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        },
+        {
+          "scenario": "S-H3-02",
+          "product": "haproxy",
+          "rep": 5,
+          "order_index": 1,
+          "url": "https://haproxy:19443/",
+          "started_utc": "2026-10-24T00:32:13Z",
+          "ended_utc": "2026-10-24T00:32:26Z",
+          "wall_seconds": 12.352,
+          "generator": {
+            "mode": "handshake",
+            "target": "https://haproxy:19443/",
+            "conns": 16,
+            "warmup_s": 2,
+            "duration_s": 10,
+            "wall_s": 12.005516889,
+            "requests": 0,
+            "ok": 0,
+            "errors": 0,
+            "status_codes": null,
+            "bytes": 0,
+            "rps": 0,
+            "handshakes": 17028,
+            "handshakes_per_sec": 1702.7923832393906,
+            "handshake_ms": {
+              "count": 17028,
+              "min": 1.70543,
+              "p50": 8.420352,
+              "p95": 15.56122,
+              "p99": 19.276667,
+              "max": 31.111192,
+              "mean": 8.915496323819612,
+              "histogram": [
+                {
+                  "upper_ms": 0.5,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 1,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 2,
+                  "count": 17
+                },
+                {
+                  "upper_ms": 3,
+                  "count": 203
+                },
+                {
+                  "upper_ms": 5,
+                  "count": 1729
+                },
+                {
+                  "upper_ms": 7.5,
+                  "count": 4647
+                },
+                {
+                  "upper_ms": 10,
+                  "count": 4805
+                },
+                {
+                  "upper_ms": 15,
+                  "count": 4587
+                },
+                {
+                  "upper_ms": 20,
+                  "count": 915
+                },
+                {
+                  "upper_ms": 30,
+                  "count": 123
+                },
+                {
+                  "upper_ms": 50,
+                  "count": 2
+                },
+                {
+                  "upper_ms": 75,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 100,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 200,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 500,
+                  "count": 0
+                },
+                {
+                  "upper_ms": 0,
+                  "count": 0
+                }
+              ]
+            },
+            "sanity": "ok",
+            "generator_cpu_seconds": 30060.526,
+            "generator_cpu_pct_one_core": 250.35611561945936
+          },
+          "resources": {
+            "proxy": {
+              "cpu_percent_one_core": 203.7,
+              "cpu_seconds": 25.157,
+              "memory_bytes": 37593088,
+              "memory_peak_bytes": 38551552
+            },
+            "origin": {
+              "cpu_percent_one_core": 0.2,
+              "cpu_seconds": 0.027,
+              "memory_bytes": 10248192,
+              "memory_peak_bytes": 13287424
+            }
+          }
+        }
+      ]
+    }
+  },
+  "summaries": {
+    "S-H3-01": {
+      "eqproxy": {
+        "runs": 5,
+        "metric": "rps",
+        "median": 37046.617594717,
+        "min": 36282.20139663369,
+        "max": 39806.644106914566,
+        "latency_p50_ms": 1.514211,
+        "latency_p95_ms": 3.429671,
+        "latency_p99_ms": 4.594813,
+        "latency_p99_ms_max": 4.697986,
+        "cpu_percent_one_core": 273.6,
+        "cpu_percent_one_core_min": 271.8,
+        "cpu_percent_one_core_max": 277.3,
+        "memory_peak_mib": 45.34,
+        "origin_cpu_percent_one_core": 138.9,
+        "generator_cpu_percent_one_core": 229.2843164307352,
+        "errors_total": 0,
+        "status_codes": [
+          "200"
+        ]
+      },
+      "haproxy": {
+        "runs": 5,
+        "metric": "rps",
+        "median": 56673.289407691955,
+        "min": 43468.3782925557,
+        "max": 60559.452660456736,
+        "latency_p50_ms": 0.922684,
+        "latency_p95_ms": 2.629918,
+        "latency_p99_ms": 3.703488,
+        "latency_p99_ms_max": 5.228135,
+        "cpu_percent_one_core": 198.7,
+        "cpu_percent_one_core_min": 193.6,
+        "cpu_percent_one_core_max": 215.2,
+        "memory_peak_mib": 32.62,
+        "origin_cpu_percent_one_core": 154.3,
+        "generator_cpu_percent_one_core": 300.3047562756366,
+        "errors_total": 0,
+        "status_codes": [
+          "200"
+        ]
+      },
+      "gaps": {
+        "metric_eq_over_ha": 0.654,
+        "latency_p50_ha_over_eq": 0.609,
+        "latency_p99_ha_over_eq": 0.806,
+        "cpu_ratio_eq_over_ha": 1.377,
+        "note": "metric ratios > 1 favour EQProxy; latency ratios > 1 mean EQProxy had the lower end-to-end latency; cpu ratio > 1 means EQProxy spent more CPU per second for the same offered load."
+      }
+    },
+    "S-H3-02": {
+      "eqproxy": {
+        "runs": 5,
+        "metric": "handshakes_per_sec",
+        "median": 1331.6974797625196,
+        "min": 1251.7828413118812,
+        "max": 1430.0310426160972,
+        "latency_p50_ms": 11.948475,
+        "latency_p95_ms": 18.595641,
+        "latency_p99_ms": 22.437555,
+        "latency_p99_ms_max": 24.863543,
+        "cpu_percent_one_core": 112.1,
+        "cpu_percent_one_core_min": 111.6,
+        "cpu_percent_one_core_max": 112.8,
+        "memory_peak_mib": 57.71,
+        "origin_cpu_percent_one_core": 0.2,
+        "generator_cpu_percent_one_core": 189.01863023151637,
+        "errors_total": 0,
+        "status_codes": []
+      },
+      "haproxy": {
+        "runs": 5,
+        "metric": "handshakes_per_sec",
+        "median": 1732.9976566405687,
+        "min": 1702.7923832393906,
+        "max": 1930.4985628996535,
+        "latency_p50_ms": 8.283439,
+        "latency_p95_ms": 14.991059,
+        "latency_p99_ms": 18.784267,
+        "latency_p99_ms_max": 19.276667,
+        "cpu_percent_one_core": 205.1,
+        "cpu_percent_one_core_min": 202.7,
+        "cpu_percent_one_core_max": 207.8,
+        "memory_peak_mib": 37.16,
+        "origin_cpu_percent_one_core": 0.2,
+        "generator_cpu_percent_one_core": 249.71252087108255,
+        "errors_total": 0,
+        "status_codes": []
+      },
+      "gaps": {
+        "metric_eq_over_ha": 0.768,
+        "latency_p50_ha_over_eq": 0.693,
+        "latency_p99_ha_over_eq": 0.837,
+        "cpu_ratio_eq_over_ha": 0.547,
+        "note": "metric ratios > 1 favour EQProxy; latency ratios > 1 mean EQProxy had the lower end-to-end latency; cpu ratio > 1 means EQProxy spent more CPU per second for the same offered load."
+      }
+    }
+  }
+}

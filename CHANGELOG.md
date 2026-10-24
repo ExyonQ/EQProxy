@@ -102,6 +102,34 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Fixed
 
+- **A clean HTTP/3 close is no longer counted as a protocol error, and no
+  longer floods the log (S-H3-02).** The h3 error alone does not say whether a
+  peer ended the session normally, so EQProxy wrote
+  `WARN [h3] HTTP/3 connection error … ApplicationClose: 0x0` for every
+  connection a client closed the way RFC 9114 §8.1 describes and counted it in
+  `h3_connection_errors`: a 10 s handshake run produced **13 859–15 123** such
+  lines, one per handshake. `classify_h3_close` now reads the QUIC close reason
+  kept next to the connection: `H3_NO_ERROR` or application code `0` (what
+  aioquic and quic-go send) counts `h3_clean_closes` and logs nothing, while a
+  protocol code, a transport error, a stateless reset or a timeout still
+  counts `h3_connection_errors` and logs the cause — at both ends, the h3
+  handshake and the session. The periodic line reads
+  `h3[clean_closes=… connection_errors=…]`. Verified with 4 new unit tests
+  (one close code at a time, the transport errors that must stay errors, and
+  the two operator lines verbatim), 3 new dataplane E2E tests (application
+  code `0`, `H3_NO_ERROR`, and a protocol-error close that still counts and
+  logs while the listener keeps serving) and the release binary against
+  `aioquic` 1.2.0: two clean closes leave **0** WARN, an
+  `H3_GENERAL_PROTOCOL_ERROR` close leaves
+  exactly **1**, and the proxy serves again afterwards
+  (`h3[clean_closes=3 connection_errors=1]`). The S-H3-02 before/after
+  campaign on `netcup-bench` (two amd64 images built from one tree, five
+  repetitions each) measures **15 227 → 26 WARN lines** and **1.67 MiB →
+  5.08 KiB** of log per run at the same offered load, i.e. the noise is gone;
+  handshakes/s moved 1 251.5 → 1 331.7 (**+6.4 %**), which is inside the
+  −4.4 % drift the HAProxy control shows on the same scenario and is therefore
+  **not** claimed as a speedup. Evidence in
+  [docs/evidence/v07-h3-close.md](docs/evidence/v07-h3-close.md).
 - **Keep-alive idle wait used the client header-phase bound.** A connection
   that had already served an exchange was closed after
   `client_header_timeout` (default 5 s) of silence even though

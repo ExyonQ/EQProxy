@@ -1,0 +1,45 @@
+{
+  "date_utc": "2026-10-23T20:43:13.822623+00:00",
+  "binary": "/Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy",
+  "binary_sha256": "a902bce9e8ab0e50f4063e2bf757fa12f76f1e2d2e46f08456aa5c9b35f33059",
+  "client": "aioquic",
+  "proxy_port": 65354,
+  "origin_port": 65353,
+  "proxy_exit": 0,
+  "wall_seconds": 1.22,
+  "steps": [
+    {
+      "step": "clean_close_after_request",
+      "close_code": 0,
+      "status": 200,
+      "body_text": "hello from origin"
+    },
+    {
+      "step": "h3_no_error_close",
+      "close_code": 256,
+      "warn": 0
+    },
+    {
+      "step": "protocol_error_close",
+      "close_code": 257,
+      "warns": [
+        "WARN [h3] HTTP/3 connection error (peer 127.0.0.1:50404): Remote error: ApplicationClose: H3_GENERAL_PROTOCOL_ERROR [closed by peer: protocol error (code 257)]"
+      ]
+    },
+    {
+      "step": "served_after_closes",
+      "status": 200,
+      "body_text": "hello from origin"
+    }
+  ],
+  "warn_lines": [
+    "WARN [h3] HTTP/3 connection error (peer 127.0.0.1:50404): Remote error: ApplicationClose: H3_GENERAL_PROTOCOL_ERROR [closed by peer: protocol error (code 257)]"
+  ],
+  "final_metrics": "METRICS client[accepted=4 active=0 completed=4 rejected_maxconn=0 protocol_errors=0] proxy[no_server=0 queue_full=0 queue_timeout=0 retries=0 local_responses=0 redirects=0 direct=0] network[idle_timeouts=0 bytes_c2b=0 bytes_b2c=34] backend[connect_failures=0 tls_failures=0 discarded=0 reused=0 opened=2 proxied=2] phases[header_timeouts=0] proxy_proto[denied=0 invalid=0] cfg[reloads=0 reload_failures=0 last_swap_us=0] auth[denied=0 service_errors=0] dns[ok=0 failures=0 updates=0] maps[reloads=0 failures=0] mirror[sent=0 failures=0 skipped=0] h2[sessions_idle_closed=0 goaway=0 refused_retried=0] grpc[streams=0 errors=0] h3[clean_closes=3 connection_errors=1] ws[tunnels=0 failures=0] compression[gzip=0 brotli=0 bytes_in=0 bytes_out=0] (final)",
+  "origin_requests": [
+    "GET /hello HTTP/1.1",
+    "GET /hello HTTP/1.1"
+  ],
+  "plan_exit": 0,
+  "failures": []
+}
