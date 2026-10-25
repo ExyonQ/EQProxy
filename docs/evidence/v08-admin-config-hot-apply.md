@@ -208,9 +208,10 @@ suppression:
   `tests/test_production_e2e.py` **19 passed** with the goldens deliberately
   updated (ripgrep 321 → 309, tokio 2436 → 2366; every removed finding
   re-read in the pinned source, differences listed next to the goldens);
-  full suite **136 passed, 1 skipped** — the skip is the published-wheel check
-  for 0.2.7, which does not exist on PyPI yet, exactly the documented
-  pre-release state.
+  full suite **136 passed, 1 skipped** — the skip was the published-wheel check
+  for 0.2.7, which did not exist on PyPI at that moment, exactly the documented
+  pre-release state. The release that removed the skip, and the same gate
+  reproduced from the published wheel, are recorded in §2b.
 
 The gate now passes on the unchanged command:
 
@@ -232,6 +233,66 @@ exit 0
   (`let _ =` on infallible `String` writes/socket closes), **R08 88** (test
   clocks and bounded sleeps), **R14 6**, **R16 2**, **R05 1**. They are not
   claimed as clean; the profile gate is `high`.
+
+### 2b. Rust-Audit 0.2.7 published — the same gate reproduced from the wheel
+
+The green run in §2 executed the maintainer's checkout. That left one condition
+open: 0.2.7 existed only on disk, so a fresh install still shipped 0.2.6 and
+its 26 wrong claims. The release closed it on 2026-10-25.
+
+```console
+$ scripts/release.sh --cut v0.2.7 ~/.ssh/private.key   # in rust-ai-audit
+RELEASED   (exit 0)
+$ curl -s https://pypi.org/pypi/rust-audit/0.2.7/json \
+    | python3 -c 'import json,sys; [print(u["filename"]) for u in json.load(sys.stdin)["urls"]]'
+rust_audit-0.2.7-py3-none-any.whl
+rust_audit-0.2.7.tar.gz
+```
+
+- Tag `v0.2.7` on `b831ccd` (version bump plus the `README.md` / `SKILL.md`
+  verify-before-use pins). The release carries the signed set (`rust_audit.py`,
+  `SHA256SUMS`, `SHA256SUMS.sig`, `allowed_signers`) plus the pre-publish
+  gate's JSON receipt; the tag gate waits for a green suite on that exact
+  commit before tagging.
+- PyPI wheel sha256
+  `12f2da5aba550212c5f397491b81ec86ed4fe31d10c0d192f970cfa29d2e588b`, sdist
+  `5447ebe84e58bd5f23efbfbefac9249b79a1eebeb0945febf414ea5111e7dcf9`.
+- The wheel's `rust_audit.py` is sha256
+  `84b5ba5ba05931e7e318b1ee345ffe32f18cb473c051b33066f5938f0fb79b26` — the same
+  bytes as the checkout that produced §2 and as the `rust_audit.py` release
+  asset (`cmp` exit 0 against both).
+- `gh attestation verify <wheel> -R Doken-Tokuyama/Rust-Audit` → **exit 0**; the
+  same wheel with one appended byte → **exit 1** (`HTTP 404` for its digest), so
+  the check is not vacuous.
+- For contrast, the 0.2.6 wheel on PyPI carries `rust_audit.py` sha256
+  `e47f704f…565de43`, byte-identical to the engine that produced the red run in
+  §2 — the difference between red and green is the engine, not the arguments.
+
+The gate, reproduced from the published wheel rather than the checkout:
+
+```console
+$ python3.13 -m venv /tmp/ra027venv && /tmp/ra027venv/bin/pip install rust-audit==0.2.7
+$ /tmp/ra027venv/bin/python -c 'import rust_audit; print(rust_audit.VERSION)'
+0.2.7
+$ /tmp/ra027venv/bin/rust-audit scan /Volumes/Lexar/Cursor/EQProxy \
+    --format md,json --out /tmp/ra027scan --fail-on high
+exit 0
+```
+
+- The report names its engine as the installed module
+  (`/private/tmp/ra027venv/lib/python3.13/site-packages/rust_audit.py`, sha256
+  `84b5ba5b…f79b26`), which is what makes the run reproducible rather than
+  tied to a working tree.
+- Counts from the installed tool: **0 critical / 0 high / 212 medium / 58 low**
+  (`/tmp/ra027scan/rust-audit-20261025-032456.json`, exit 0; the earlier
+  `…032055.json` gave the same counts), identical to §2.
+- The tool's own live-index contract, which had to skip while 0.2.7 was
+  unreleased, now runs and passes:
+  `.venv/bin/python -m pytest tests/test_release_checks.py -q` → **17 passed**,
+  with
+  `test_the_declared_version_is_installable_and_carries_these_bytes` **PASSED**
+  — that test fails on any byte difference between PyPI and
+  `scripts/rust_audit.py`.
 
 ### 3. CodeGraph Rust — structure (advisory, verified in source)
 
@@ -289,11 +350,17 @@ three `.expect` removals, the green report and the uncommitted tool state).
   `allow_remote = true`; its listener and tokens are fixed at startup.
 - No RBAC beyond the read/write tokens, no durable audit sink, no panel UI, no
   certificate management.
-- The Rust-Audit corrections are committed in the tool's repository
-  (`6a78733`) but **unpublished** as 0.2.7. A fresh 0.2.6 checkout still
-  reports the 26 wrong claims and exits 1; the green run cites the exact
-  engine hash, not a released version. This page and the code it verifies
-  are committed together in EQProxy.
+- Rust-Audit **0.2.7 is published** (tag, signed assets, PyPI wheel; §2b), so
+  the gate is reproducible with `pip install rust-audit==0.2.7` and not only
+  from the maintainer's checkout. A fresh 0.2.6 install ships byte-identical
+  engine (`e47f704f…565de43`) to the red run, so it still reports the 26 wrong
+  claims — that version is immutable and was not yanked, because it is not
+  wrong about the code, only about six rule patterns.
+- What the release does **not** prove: the wheel is `py3-none-any` and was
+  exercised only on macOS aarch64 with CPython 3.13; the attestation proves
+  *built from that tag*, not behaviour on other platforms. The SSH chain on
+  the release assets was run by `release.sh` and by CI, not re-derived by hand
+  on this page.
 - Verified on macOS 15 aarch64 with a debug build only. The **Docker image**
   (both architectures, Docker Scout, live journeys in the container) and the
   release binary were **NOT EXECUTED** for this increment — it is an
