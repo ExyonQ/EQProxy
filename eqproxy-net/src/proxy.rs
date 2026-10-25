@@ -343,7 +343,13 @@ impl RateLimiter {
     /// Consumes one token for `ip`; `false` = over the limit (429).
     pub fn try_acquire(&self, ip: IpAddr) -> bool {
         let now = tokio::time::Instant::now();
-        let mut buckets = self.buckets.lock().expect("rate limiter lock");
+        // A panic while the bucket map was held is logged by the panic hook;
+        // the map is still consistent (every mutation is a single splice), so
+        // recover it instead of turning a poisoned lock into a proxy panic.
+        let mut buckets = self
+            .buckets
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if buckets.len() >= MAX_TRACKED_BUCKETS {
             buckets.retain(|_, bucket| now.duration_since(bucket.last) < BUCKET_IDLE_PRUNE);
         }
@@ -1036,6 +1042,9 @@ pub enum ProxyError {
 /// Everything fallible happens in phase 1 (fail-closed).
 enum PreparedSocket {
     Kept {
+        /// Position in `entries` when phase 1 matched it (stable: phase 2
+        /// only appends before the removal pass).
+        index: usize,
         start_quic: Option<quinn::Endpoint>,
     },
     Fresh {
@@ -1479,8 +1488,8 @@ impl BoundProxy {
             let kept = self
                 .entries
                 .iter()
-                .find(|e| e.listen == cfg.listen && current_cfg(&e.cfg).name == cfg.name);
-            let Some(entry) = kept else {
+                .position(|e| e.listen == cfg.listen && current_cfg(&e.cfg).name == cfg.name);
+            let Some(index) = kept else {
                 let name = cfg.name.clone();
                 let addr = cfg.listen;
                 let listener = match TcpListener::bind(addr).await {
@@ -1500,6 +1509,7 @@ impl BoundProxy {
             // a certificate/key/ALPN/mTLS change cannot be applied to it, and
             // silently serving the old one would diverge from the TCP side.
             // Fail closed (the running config keeps serving) until restart.
+            let entry = &self.entries[index];
             let running = current_cfg(&entry.cfg);
             let start_quic = if !cfg.quic {
                 None
@@ -1515,40 +1525,26 @@ impl BoundProxy {
             } else {
                 Some(open_quic(&cfg, entry.local)?)
             };
-            prepared.push((cfg, PreparedSocket::Kept { start_quic }));
+            prepared.push((cfg, PreparedSocket::Kept { index, start_quic }));
         }
 
-        // Phase 2 — commit: only infallible steps from here on.
+        // Phase 2 — commit: only infallible steps from here on. The
+        // positions phase 1 recorded stay valid because new entries are only
+        // appended; the old ones are dropped after the loop, which is also
+        // when the Drop impl stops their accept loop and QUIC endpoint.
         let mut summary = SwapSummary {
             kept: 0,
             added: 0,
             removed: 0,
         };
-        // Stop what is not kept (the Drop impl stops the accept loop and
-        // closes the QUIC endpoint).
-        self.entries.retain(|e| {
-            let kept = prepared.iter().any(|(cfg, prepared)| {
-                matches!(prepared, PreparedSocket::Kept { .. })
-                    && cfg.listen == e.listen
-                    && cfg.name == current_cfg(&e.cfg).name
-            });
-            if kept {
-                true
-            } else {
-                summary.removed += 1;
-                false
-            }
-        });
+        let mut keep = vec![false; self.entries.len()];
         for (cfg, prepared) in prepared {
             let name = cfg.name.clone();
             match prepared {
-                PreparedSocket::Kept { start_quic } => {
+                PreparedSocket::Kept { index, start_quic } => {
                     // Kept socket: swap the config new connections see.
-                    let entry = self
-                        .entries
-                        .iter_mut()
-                        .find(|e| e.listen == cfg.listen && current_cfg(&e.cfg).name == name)
-                        .expect("kept entry present (phase 1 matched it)");
+                    keep[index] = true;
+                    let entry = &mut self.entries[index];
                     let stop_quic = current_cfg(&entry.cfg).quic && !cfg.quic;
                     if let Some(endpoint) = start_quic {
                         // The endpoint reads the new config from the shared
@@ -1587,6 +1583,17 @@ impl BoundProxy {
                 }
             }
         }
+        // Old positions are marked in `keep`; entries appended above are past
+        // its end and belong to the new generation, so they stay.
+        let mut position = 0;
+        self.entries.retain(|_| {
+            let kept = keep.get(position).copied().unwrap_or(true);
+            position += 1;
+            if !kept {
+                summary.removed += 1;
+            }
+            kept
+        });
         self.spawn_background();
         Ok(summary)
     }

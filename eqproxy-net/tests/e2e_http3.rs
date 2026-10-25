@@ -308,7 +308,13 @@ impl Client {
                 .await
                 .expect("send body");
         }
-        stream.finish().await.expect("finish request");
+        // An explicit 502 (or a CONNECT refusal) can close the request stream
+        // before this FIN is flushed: the server answered, so the contract is
+        // the response asserted below, not a successful write into a stream it
+        // is already closing.
+        if let Err(err) = stream.finish().await {
+            eprintln!("request FIN raced the server's answer: {err:?}");
+        }
         let response = tokio::time::timeout(WAIT, stream.recv_response())
             .await
             .expect("response in time")

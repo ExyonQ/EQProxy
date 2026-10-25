@@ -685,15 +685,19 @@ fn plan(path: &Path) -> u8 {
 /// operator can eyeball exactly what `run` would bring up.
 fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
     use std::fmt::Write as _;
-    let mut backend_names: Vec<&str> = listeners.iter().map(|l| l.backend_name.as_str()).collect();
-    backend_names.sort_unstable();
-    backend_names.dedup();
+    // One entry per distinct default backend, taken from the resolved
+    // listeners themselves: the inventory cannot disagree with the model it
+    // prints (no name lookup to miss).
+    let mut backends: Vec<&ResolvedBackend> =
+        listeners.iter().map(|l| l.backend.as_ref()).collect();
+    backends.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+    backends.dedup_by(|a, b| a.name == b.name);
     let mut out = String::new();
     let _ = writeln!(
         out,
         "plan: {} listener(s), {} backend(s) — nothing started (dry run)",
         listeners.len(),
-        backend_names.len()
+        backends.len()
     );
     for listener in listeners {
         let mode = match listener.mode {
@@ -744,12 +748,7 @@ fn plan_report(config: &Config, listeners: &[ResolvedListener]) -> String {
             config.shutdown_grace
         );
     }
-    for name in backend_names {
-        let backend = &listeners
-            .iter()
-            .find(|l| l.backend_name == name)
-            .expect("backend referenced by a listener")
-            .backend;
+    for backend in backends {
         let proxy_protocol = match backend.proxy_protocol {
             ProxyProtocolMode::None => "none",
             ProxyProtocolMode::V1 => "v1",
