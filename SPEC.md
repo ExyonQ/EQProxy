@@ -239,6 +239,48 @@ not a requirement to operate the proxy.**
 Multi-instance: nothing that is not atomic is declared "atomic"; behaviour
 under network partitions and partial failures is documented.
 
+**Implemented so far (v0.8; [ADR-0017](docs/adr/0017-read-only-admin-plane.md),
+[ADR-0018](docs/adr/0018-first-write-path-server-state.md),
+[ADR-0019](docs/adr/0019-hot-config-writes-via-admin-api.md)):**
+an optional `[admin]` table opens a listener of its own with a bearer token
+(`token` or `token_file`, loopback unless `allow_remote = true`). It serves
+`GET /api/v1/status` (version, uptime, validated topology, per-server
+`ready`/`drain` state with health and in-flight count, and live counters as
+JSON), `GET /metrics` (the same counters as Prometheus text with a fixed
+series set) and one write, `PUT
+/api/v1/backends/{backend}/servers/{target}/state` (`ready` or `drain`).
+Writes need their own secret (`write_token`/`write_token_file`, distinct from
+the read one); without it the plane is read-only and every write is
+`403 write_disabled`. The write rejects `Origin` (no browser caller), needs
+`application/json`, a declared body of at most 1 KiB and an idempotent
+`{state}` document, and emits one `AUDIT` line per attempt (role, peer,
+outcome, transition; never the secret). A drained server takes no new
+requests, finishes its in-flight exchanges, and the state survives a `SIGHUP`
+reload. Every other route is `404`, every other method `405`; bodies are
+bounded (8 KiB head, 5 s exchange) and no secret appears in an answer or a
+log line. The plane is a separate socket and task: the dataplane keeps
+serving with it dead or unbound-by-config, and a configured plane that cannot
+bind fails startup.
+
+Hot configuration (v0.8, ADR-0019) adds `PUT /api/v1/backends/{name}` and
+`PUT /api/v1/listeners/{name}`: the body is that TOML table (`application/toml`,
+declared length up to 64 KiB, no `Origin`, write role), either the bare body
+or the complete section copied from the file, and it replaces the table,
+creating the name when absent. `GET /api/v1/status`
+returns a `revision` and an `ETag`; every write must send `If-Match` with it
+(missing: `428`; stale: `412` with the current revision). One configuration
+task serializes API writes and `SIGHUP`: it validates and resolves the whole
+candidate before the dataplane swaps, answers `200` only after the commit,
+and moves the revision and the reported topology only then. A valid candidate
+the dataplane refuses (bind conflict, frozen QUIC TLS) is `409`; a parse or
+validation failure is `400`; neither changes the running generation. A
+listener kept by name and address keeps its socket, and established
+connections drain on the generation they were accepted with. The changes are
+runtime-only: the file remains the baseline and the next `SIGHUP` replaces
+them. `DELETE`, persistence/drift, `maintenance` (with idle-pool closure),
+durable auditing, a per-user RBAC/session model, certificate management, a
+live topology view and the panel UI remain pending.
+
 ## 10. Extensions (WASM)
 
 Designed (scope); implementation in Phase 7. Single route:

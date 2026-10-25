@@ -24,9 +24,108 @@
 //! operational (like HAProxy before the first check); with no health check
 //! configured they stay operational forever.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
+
+/// Administration state of one backend server (v0.8, ADR-0018).
+///
+/// `Drain` removes the server from **new** selections immediately while the
+/// exchanges already in flight finish on it; `Ready` puts it back. The health
+/// machine (B11) is a separate axis: a drained server keeps being probed and
+/// keeps its `up`/`down` state, so an operator can see both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ServerMode {
+    /// Serving new exchanges.
+    #[default]
+    Ready,
+    /// Administratively removed: no new exchanges, in-flight ones finish.
+    Drain,
+}
+
+impl ServerMode {
+    /// Wire/JSON name (the only accepted spellings).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Drain => "drain",
+        }
+    }
+
+    /// Parses the wire name exactly (no aliases: a typo must not drain).
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ready" => Some(Self::Ready),
+            "drain" => Some(Self::Drain),
+            _ => None,
+        }
+    }
+}
+
+/// Administration state per `(backend, configured target)`, shared by every
+/// [`Balancer`] of that backend **and by the ones built by a SIGHUP reload**:
+/// a drain survives a config swap instead of silently returning the server to
+/// rotation. Keyed by the configured target (`HOSTNAME:PORT` or `IP:PORT`),
+/// never by the resolved address, so a DNS change does not lose the state.
+#[derive(Debug, Default)]
+pub struct ServerModes {
+    inner: Mutex<HashMap<String, HashMap<String, ServerMode>>>,
+}
+
+impl ServerModes {
+    /// Empty registry (every server starts `ready`).
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// State of one server (`Ready` when it was never touched).
+    #[must_use]
+    pub fn get(&self, backend: &str, target: &str) -> ServerMode {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .get(backend)
+            .and_then(|servers| servers.get(target))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Sets the state and returns the previous one (idempotent by design:
+    /// declaring the same state twice is not an error).
+    pub fn set(&self, backend: &str, target: &str, mode: ServerMode) -> ServerMode {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        inner
+            .entry(backend.to_owned())
+            .or_default()
+            .insert(target.to_owned(), mode)
+            .unwrap_or_default()
+    }
+}
+
+/// Live view of one server slot, as the admin plane reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerView {
+    /// Configured target, exactly as written (`HOSTNAME:PORT` or `IP:PORT`).
+    pub target: String,
+    /// Address currently in use (`None` while a name is unresolved).
+    pub addr: Option<SocketAddr>,
+    pub weight: u32,
+    /// Health machine (B11), independent of [`mode`](Self::mode).
+    pub up: bool,
+    /// Exchanges in flight on this slot.
+    pub active: u32,
+    /// Administrative state (ADR-0018).
+    pub mode: ServerMode,
+}
 
 /// Balancing algorithm of a backend (B-H5/B-N12/B-E6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -78,6 +177,9 @@ pub struct ResolvedServer {
 
 #[derive(Debug, Clone)]
 struct ServerState {
+    /// Target as configured: the key of the administration state, stable
+    /// across DNS re-resolutions (ADR-0018).
+    target: String,
     /// Current resolved address. `None` = name still unresolved (B-H13):
     /// the slot is never selected and the caller answers 503 with the
     /// `no_available_server` metric until DNS lands.
@@ -96,12 +198,17 @@ struct ServerState {
 /// Load balancer with shared health state (per backend).
 #[derive(Debug)]
 pub struct Balancer {
+    /// Backend name: one half of the administration-state key (ADR-0018).
+    backend: String,
     fall: u32,
     rise: u32,
     algorithm: Balance,
     slow_start: Duration,
     state: Mutex<Vec<ServerState>>,
     targets: Vec<ServerAddr>,
+    /// Shared administration state; `None` in unit constructions that do not
+    /// use the admin plane (every server is then `ready`).
+    modes: Option<Arc<ServerModes>>,
 }
 
 /// RAII in-flight slot (B-H5 leastconn): one held per exchange, released
@@ -160,6 +267,7 @@ impl Balancer {
         let state = servers
             .into_iter()
             .map(|s| ServerState {
+                target: s.addr.to_string(),
                 // Names start unresolved (B-H13): the resolver task fills
                 // them in; a literal is usable immediately.
                 addr: match &s.addr {
@@ -176,13 +284,56 @@ impl Balancer {
             })
             .collect::<Vec<ServerState>>();
         Self {
+            backend: String::new(),
             fall: fall.max(1),
             rise: rise.max(1),
             algorithm,
             slow_start,
             state: Mutex::new(state),
             targets,
+            modes: None,
         }
+    }
+
+    /// Binds the balancer to the shared administration state (ADR-0018): the
+    /// backend name and the registry a `drain` is written to. Must be called
+    /// before the balancer serves traffic (the CLI sets it while resolving).
+    #[must_use]
+    pub fn with_modes(mut self, backend: impl Into<String>, modes: Arc<ServerModes>) -> Self {
+        self.backend = backend.into();
+        self.modes = Some(modes);
+        self
+    }
+
+    /// Slow-start window (B14), needed when a builder rebuilds the balancer.
+    #[must_use]
+    pub fn slow_start(&self) -> Duration {
+        self.slow_start
+    }
+
+    /// Administrative state of a slot (ADR-0018).
+    fn mode_of(&self, server: &ServerState) -> ServerMode {
+        self.modes.as_ref().map_or(ServerMode::Ready, |modes| {
+            modes.get(&self.backend, &server.target)
+        })
+    }
+
+    /// Every slot as the admin plane reports it: configured target, current
+    /// address, weight, health, in-flight exchanges and administration state.
+    #[must_use]
+    pub fn servers_view(&self) -> Vec<ServerView> {
+        let state = self.state();
+        state
+            .iter()
+            .map(|server| ServerView {
+                target: server.target.clone(),
+                addr: server.addr,
+                weight: server.weight,
+                up: server.up,
+                active: server.active,
+                mode: self.mode_of(server),
+            })
+            .collect()
     }
 
     /// Shared state; a poisoned lock (a previous panic on another thread)
@@ -382,10 +533,12 @@ impl Balancer {
         exclude: &[SocketAddr],
     ) -> Option<usize> {
         let eligible = |idx: usize, state: &[ServerState]| {
-            // Unresolved name slots (B-H13) are never selectable.
+            // Unresolved name slots (B-H13) are never selectable, a drained
+            // one leaves rotation without touching its health (ADR-0018).
             state[idx].addr.is_some()
                 && state[idx].up
                 && state[idx].weight > 0
+                && self.mode_of(&state[idx]) == ServerMode::Ready
                 && !state[idx].addr.is_some_and(|a| exclude.contains(&a))
         };
         // Affinity pin (B-H8/B-N13/B-I8): preferred when eligible, else
@@ -884,5 +1037,104 @@ mod tests {
         assert_eq!(balancer.active_count(b), 1);
         drop(guard);
         assert_eq!(balancer.active_count(b), 0);
+    }
+
+    // ------------------------------------ ADR-0018: admin server state ---
+
+    #[test]
+    fn drain_removes_a_server_from_new_picks_and_ready_returns_it() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer = Balancer::new(vec![server(1, 1), server(2, 1)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        modes.set("api", "127.0.0.1:1", ServerMode::Drain);
+        for _ in 0..6 {
+            assert_eq!(
+                balancer.pick().map(|addr| addr.port()),
+                Some(2),
+                "the drained slot never wins a pick"
+            );
+        }
+        assert!(
+            balancer.is_up(ip(1)),
+            "drain is an admin decision, not a health failure"
+        );
+        assert_eq!(balancer.up_count(), 2, "both servers stay operational");
+
+        // Idempotent declaration, then back to rotation.
+        assert_eq!(
+            modes.set("api", "127.0.0.1:1", ServerMode::Drain),
+            ServerMode::Drain
+        );
+        assert_eq!(
+            modes.set("api", "127.0.0.1:1", ServerMode::Ready),
+            ServerMode::Drain
+        );
+        let picks: Vec<u16> = (0..4)
+            .filter_map(|_| balancer.pick())
+            .map(|addr| addr.port())
+            .collect();
+        assert_eq!(picks, vec![1, 2, 1, 2], "ready restores the rotation");
+    }
+
+    #[test]
+    fn all_drained_means_no_candidate() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer =
+            Balancer::new(vec![server(1, 1)], 1, 1).with_modes("api", Arc::clone(&modes));
+        modes.set("api", "127.0.0.1:1", ServerMode::Drain);
+        assert_eq!(
+            balancer.pick(),
+            None,
+            "the caller answers 503 when every server is drained"
+        );
+    }
+
+    #[test]
+    fn modes_are_per_backend_and_survive_a_rebuilt_balancer() {
+        let modes = Arc::new(ServerModes::new());
+        modes.set("api", "127.0.0.1:1", ServerMode::Drain);
+        // Same target in another backend is untouched.
+        assert_eq!(modes.get("other", "127.0.0.1:1"), ServerMode::Ready);
+        // A reload builds a new balancer with the same registry: the drain
+        // is still in force.
+        let rebuilt = Balancer::new(vec![server(1, 1), server(2, 1)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        assert_eq!(
+            rebuilt.pick().map(|addr| addr.port()),
+            Some(2),
+            "state outlives the Balancer it was declared on"
+        );
+        assert_eq!(
+            ServerMode::parse("drain"),
+            Some(ServerMode::Drain),
+            "wire name"
+        );
+        assert_eq!(ServerMode::parse("maintenance"), None, "no aliases");
+    }
+
+    #[test]
+    fn servers_view_reports_target_health_mode_and_in_flight() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer = Balancer::new(vec![server(9000, 1), server(9001, 2)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        modes.set("api", "127.0.0.1:9001", ServerMode::Drain);
+        let guard = balancer.pick_tracked(&[]).expect("pick").1;
+        let view = balancer.servers_view();
+        assert_eq!(view.len(), 2);
+        assert_eq!(view[0].target, "127.0.0.1:9000");
+        assert_eq!(view[0].addr, Some(ip(9000)));
+        assert_eq!(view[0].weight, 1);
+        assert!(view[0].up);
+        assert_eq!(view[0].mode, ServerMode::Ready);
+        assert_eq!(view[0].active, 1, "the held slot is visible");
+        assert_eq!(view[1].mode, ServerMode::Drain);
+        assert_eq!(view[1].active, 0);
+        assert_eq!(view[1].weight, 2);
+        drop(guard);
+        assert_eq!(
+            balancer.servers_view()[0].active,
+            0,
+            "the slot is released on drop"
+        );
     }
 }

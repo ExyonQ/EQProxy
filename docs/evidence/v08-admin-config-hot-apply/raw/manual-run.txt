@@ -1,0 +1,17 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/debug/eqproxy
+sha256: f59ed6ba45d9eadacf4c5ff345a0b406ae959a4f543bff15252fedbaddd54a88
+rustc: rustc 1.97.1 (8bab26f4f 2026-07-14)
+proxy=127.0.0.1:51635 admin=127.0.0.1:51636 origins={'origin-a': ('127.0.0.1', 51632), 'origin-b': ('127.0.0.1', 51633), 'origin-c': ('127.0.0.1', 51634)}
+log: INFO listener web listening on 127.0.0.1:51635
+log: INFO admin listening on 127.0.0.1:51636 (routes: /api/v1/status, /metrics, PUT /api/v1/backends/{name}, PUT /api/v1/listeners/{name})
+status before: {"backends": [{"balance": "round_robin", "health_check": false, "name": "api", "servers": [{"active": 1, "addr": "127.0.0.1:51632", "healthy": true, "resolved": "127.0.0.1:51632", "state": "ready", "weight": 1}]}], "listeners": [{"backend": "api", "listen": "127.0.0.1:51635", "maxconn": 1024, "mode": "http", "name": "web"}], "revision": "v1"}
+PUT backend api -> B: status=200 roundtrip_ms=1.8 applied={'elapsed_ms': 0, 'listeners': [{'listen': '127.0.0.1:51635', 'name': 'web'}], 'revision': 'v2', 'summary': 'listeners kept=1 added=0 removed=0'} etag="v2"
+PUT backend green (new): status=200 roundtrip_ms=1.5 applied={'elapsed_ms': 0, 'listeners': [{'listen': '127.0.0.1:51635', 'name': 'web'}], 'revision': 'v3', 'summary': 'listeners kept=1 added=0 removed=0'}
+PUT listener web -> green: status=200 roundtrip_ms=1.1 applied={'elapsed_ms': 0, 'listeners': [{'listen': '127.0.0.1:51635', 'name': 'web'}], 'revision': 'v4', 'summary': 'listeners kept=1 added=0 removed=0'}
+PUT backend api invalid table: status=400 body={"error":"invalid_config","message":"configuration error in /var/folders/7z/2dgl35v966d7hs3w_jbg8klr0000gn/T/eqproxy-evidence-5ntcqq0b/eqproxy.toml — field `backend.api.balance`: unknown variant `random`, expected one of `roundrobin`, `least_conn`, `least_request`, `leastconn`\nin `balance`\n\n  example: see eqproxy.toml.example"}
+PUT backend api stale If-Match: status=412 body={"error":"precondition_failed","revision":"v4"}
+two racing writers on v4: statuses=[200, 412]
+status after: {"backends": [{"balance": "round_robin", "health_check": false, "name": "api", "servers": [{"active": 0, "addr": "127.0.0.1:51632", "healthy": true, "resolved": "127.0.0.1:51632", "state": "ready", "weight": 1}]}, {"balance": "round_robin", "health_check": false, "name": "green", "servers": [{"active": 2, "addr": "127.0.0.1:51634", "healthy": true, "resolved": "127.0.0.1:51634", "state": "ready", "weight": 1}]}], "listeners": [{"backend": "green", "listen": "127.0.0.1:51635", "maxconn": 1024, "mode": "http", "name": "web"}], "revision": "v5"}
+traffic through every generation: {"failed": 0, "origin-a": 45, "origin-b": 33, "origin-c": 38} total=116
+audit lines: 7
+exit code: 0

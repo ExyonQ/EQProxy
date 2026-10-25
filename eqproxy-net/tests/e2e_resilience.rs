@@ -18,7 +18,7 @@ use eqproxy_net::proxy::{ForwardedMode, LocalResponse, QueueSettings, RetryPolic
 use eqproxy_net::tls::{self, TlsVersion};
 use eqproxy_net::{
     BoundProxy, ProxyMode, ProxyProtocolMode, ResolvedBackend, ResolvedListener, ResolvedServer,
-    bind,
+    SwapRequest, bind,
 };
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -980,7 +980,10 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
         2,
     );
     let cfg = tcp_listener("secure", Arc::new(backend)).with_server_tls(new_tls);
-    reload_tx.send(vec![cfg]).await.expect("send reload");
+    reload_tx
+        .send(SwapRequest::plain(vec![cfg]))
+        .await
+        .expect("send reload");
     let deadline = tokio::time::Instant::now() + WAIT;
     while metrics.snapshot().config_reloads == 0 {
         assert!(

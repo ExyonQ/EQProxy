@@ -3213,17 +3213,35 @@ fn run_slow_start_ramps_the_recovered_server_up() {
         "during the ramp the recovered server gets less than its fair share: {early:?}"
     );
 
-    // Phase 3: the ramp is over — the split is exactly fair.
-    std::thread::sleep(Duration::from_millis(2500));
-    let mut late = (0usize, 0usize);
-    for _ in 0..10 {
-        match marker_body(&proxy_addr).as_str() {
-            "a" => late.0 += 1,
-            "b" => late.1 += 1,
-            other => panic!("unexpected origin body {other:?}"),
+    // Phase 3: the ramp ends — the split becomes exactly fair. The window
+    // this is observed in is polled, not assumed: the ramp starts when the
+    // health checker marks B up, and under instrumentation that tick can
+    // arrive later than its 150 ms interval, so a fixed sleep is a race.
+    // Once the weights are equal SWRR alternates strictly, so every
+    // 10-request window is 5:5 from then on.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut window = 0u32;
+    let mut late;
+    loop {
+        window += 1;
+        late = (0, 0);
+        for _ in 0..10 {
+            match marker_body(&proxy_addr).as_str() {
+                "a" => late.0 += 1,
+                "b" => late.1 += 1,
+                other => panic!("unexpected origin body {other:?}"),
+            }
         }
+        if late == (5, 5) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the split never became exactly 1:1 after the slow-start window \
+             (window {window}: {late:?})"
+        );
+        std::thread::sleep(Duration::from_millis(100));
     }
-    assert_eq!(late, (5, 5), "after the window the split is exactly 1:1");
 
     wait_for_sigint_shutdown(&mut child, &config);
 }
@@ -5476,4 +5494,1063 @@ fn run_serves_brotli_over_h2c_to_a_real_client() {
     let _ = std::fs::remove_file(&body_path);
     let _ = std::fs::remove_file(&head_path);
     assert_eq!(status.code(), Some(0));
+}
+
+/// One request to the admin plane over a raw socket; returns
+/// `(status, head, body)` of the answer (the plane closes the connection).
+fn admin_exchange(addr: &str, request: &str) -> (u16, String, String) {
+    let mut client = TcpStream::connect(addr).expect("connect admin");
+    client
+        .write_all(request.as_bytes())
+        .expect("write admin request");
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("read timeout");
+    let mut raw = Vec::new();
+    let _ = client.read_to_end(&mut raw);
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .unwrap_or_else(|| panic!("the admin plane never completed a head: {text:?}"));
+    let status = head
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("no status line in the admin answer: {head}"));
+    (status, head.to_owned(), body.to_owned())
+}
+
+fn admin_get(addr: &str, path: &str, authorization: Option<&str>) -> (u16, String, String) {
+    let mut head = format!("GET {path} HTTP/1.1\r\nhost: admin\r\n");
+    if let Some(value) = authorization {
+        head.push_str(&format!("authorization: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    admin_exchange(addr, &head)
+}
+
+/// Reads one Prometheus counter from the exported text.
+fn prometheus_value(text: &str, name: &str) -> u64 {
+    text.lines()
+        .find_map(|line| {
+            let rest = line.strip_prefix(name)?.strip_prefix(' ')?;
+            rest.trim().parse::<u64>().ok()
+        })
+        .unwrap_or_else(|| panic!("{name} is missing from the export: {text}"))
+}
+
+/// The read-only admin plane through the **real** binary (v0.8, D6): the
+/// bearer token from `token_file` (trailing newline trimmed) gates both
+/// routes, the status JSON names the validated config, the Prometheus export
+/// moves with **real proxied traffic** on a separate listener, and SIGINT
+/// stops both planes cleanly. The dataplane assertion in the same run is what
+/// proves the plane is additive, not a substitute for proxying.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_serves_status_and_metrics_with_a_bearer_token() {
+    let backend = start_static_backend("hello-admin");
+    let token = "3f9a1c0d7b2e4f6a8c5d1e0b9a7c3f2d";
+    let token_path = std::env::temp_dir().join(format!(
+        "eqproxy-cli-e2e-{}-admin.token",
+        std::process::id()
+    ));
+    // A token file as an operator writes it: one secret plus a newline, which
+    // the CLI trims (a stray `\n` must not make the token unusable).
+    std::fs::write(&token_path, format!("{token}\n")).expect("write token file");
+    let config = temp_config(
+        "admin",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             \n\
+             [backend.api]\n\
+             server = \"{backend}\"\n\
+             \n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             token_file = \"{}\"\n",
+            token_path.display()
+        ),
+    );
+
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (admin)"),
+    );
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut proxy_addr = String::new();
+    let mut admin_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (proxy_addr.is_empty() || admin_addr.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing both binds"
+        );
+        if let Ok(mut log) = log.lock() {
+            log.push_str(&line);
+        }
+        if proxy_addr.is_empty()
+            && let Some(addr) = line.split("listening on ").nth(1)
+        {
+            proxy_addr = addr.trim().to_owned();
+        }
+        if let Some(rest) = line.split("admin listening on ").nth(1) {
+            admin_addr = rest
+                .split_whitespace()
+                .next()
+                .expect("admin address")
+                .to_owned();
+        }
+    }
+    assert!(
+        !proxy_addr.is_empty(),
+        "the dataplane address was not announced"
+    );
+    assert!(
+        !admin_addr.is_empty(),
+        "the admin address was not announced"
+    );
+    assert_ne!(proxy_addr, admin_addr, "the plane has its own listener");
+
+    // Keep draining stderr so the child never blocks on a full pipe.
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let reader = {
+        let log = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            for line in stderr.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(mut log) = log.lock() {
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+                if line_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    // Authentication first: without the token, nothing about the plane leaks.
+    let (status, head, body) = admin_get(&admin_addr, "/api/v1/status", None);
+    assert_eq!(status, 401, "anonymous status: {head}\n{body}");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("www-authenticate: bearer"),
+        "the plane advertises its scheme: {head}"
+    );
+    assert!(
+        !body.contains("listeners") && !body.contains(token),
+        "an unauthorized caller learns nothing: {body}"
+    );
+    for wrong in [
+        "Bearer wrong-token",
+        "Basic M2Y5",
+        &format!("Bearer {token}x"),
+    ] {
+        let (status, _, body) = admin_get(&admin_addr, "/api/v1/status", Some(wrong));
+        assert_eq!(status, 401, "{wrong:?} must be refused (body: {body})");
+    }
+
+    // The real token (from the file, newline trimmed) opens both routes.
+    let bearer = format!("Bearer {token}");
+    let (status, head, body) = admin_get(&admin_addr, "/api/v1/status", Some(&bearer));
+    assert_eq!(status, 200, "status: {head}\n{body}");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("content-type: application/json"),
+        "{head}"
+    );
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("status is valid JSON");
+    assert_eq!(parsed["listeners"][0]["name"], "web");
+    assert_eq!(parsed["listeners"][0]["mode"], "http");
+    // The status reports the port the dataplane really opened, not the
+    // configured `:0`: a dashboard must not show an unresolvable address.
+    assert_eq!(
+        parsed["listeners"][0]["listen"], proxy_addr,
+        "the reported address is the bound one: {body}"
+    );
+    assert_eq!(parsed["backends"][0]["name"], "api");
+    assert_eq!(
+        parsed["backends"][0]["servers"][0]["addr"],
+        backend.to_string()
+    );
+    assert!(parsed["uptime_seconds"].is_u64(), "{body}");
+    assert!(!body.contains(token), "the status never echoes the token");
+
+    // Baseline of the exported counters, then real traffic through the
+    // dataplane, then the same export: the plane reports the real counters.
+    let (status, head, metrics_before) = admin_get(&admin_addr, "/metrics", Some(&bearer));
+    assert_eq!(status, 200, "{head}");
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("content-type: text/plain; version=0.0.4"),
+        "{head}"
+    );
+    let proxied_before = prometheus_value(&metrics_before, "eqproxy_http_requests_proxied_total");
+
+    let response = proxied(
+        &proxy_addr,
+        b"GET /admin-e2e HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    assert_eq!(body_of(&response), "hello-admin", "{response}");
+
+    let (status, _, metrics_after) = admin_get(&admin_addr, "/metrics", Some(&bearer));
+    assert_eq!(status, 200);
+    assert_eq!(
+        prometheus_value(&metrics_after, "eqproxy_http_requests_proxied_total"),
+        proxied_before + 1,
+        "the export follows the dataplane\nbefore:\n{metrics_before}\nafter:\n{metrics_after}"
+    );
+    assert!(metrics_after.contains(&format!(
+        "eqproxy_build_info{{version=\"{}\"}} 1",
+        env!("CARGO_PKG_VERSION")
+    )));
+
+    // Routing errors once authenticated.
+    let (status, _, body) = admin_get(&admin_addr, "/nope", Some(&bearer));
+    assert_eq!(status, 404, "{body}");
+    let (status, head, _) = admin_exchange(
+        &admin_addr,
+        &format!("POST /metrics HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\n\r\n"),
+    );
+    assert_eq!(status, 405, "{head}");
+    assert!(head.to_ascii_lowercase().contains("allow: get"), "{head}");
+
+    // The plane still answers, and the dataplane never stopped serving.
+    let (status, _, _) = admin_get(&admin_addr, "/metrics", Some(&bearer));
+    assert_eq!(status, 200, "the plane survives the refusals");
+    let response = proxied(
+        &proxy_addr,
+        b"GET /after-admin-refusals HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "hello-admin", "{response}");
+
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    drop(line_rx);
+    let _ = reader.join();
+    remove_temp(&config);
+    let _ = std::fs::remove_file(&token_path);
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "clean shutdown with the admin plane up; log:\n{}",
+        log.lock().map(|l| l.clone()).unwrap_or_default()
+    );
+}
+
+/// One authenticated `PUT` against the admin plane.
+fn admin_put(addr: &str, path: &str, token: &str, body: &str) -> (u16, String, String) {
+    let request = format!(
+        "PUT {path} HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+        body.len()
+    );
+    admin_exchange(addr, &request)
+}
+
+/// The first write path through the **real** binary (v0.8, ADR-0018): the
+/// read token cannot drain, the write token can, the drained slot stops
+/// taking new requests (explicit 503 on a single-server backend), `ready`
+/// returns it, and every write leaves an `AUDIT` line without the secret.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_drains_a_server_with_the_write_token() {
+    let backend = start_static_backend("hello-write");
+    let read_token = "3f9a1c0d7b2e4f6a8c5d1e0b9a7c3f2d";
+    let write_token = "9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e";
+    let tag = format!("eqproxy-cli-e2e-{}-admin-write", std::process::id());
+    let read_path = std::env::temp_dir().join(format!("{tag}.read"));
+    let write_path = std::env::temp_dir().join(format!("{tag}.write"));
+    std::fs::write(&read_path, format!("{read_token}\n")).expect("write read token");
+    std::fs::write(&write_path, format!("{write_token}\n")).expect("write write token");
+    let config = temp_config(
+        "admin-write",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [backend.api]\n\
+             server = \"{backend}\"\n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             token_file = \"{}\"\n\
+             write_token_file = \"{}\"\n",
+            read_path.display(),
+            write_path.display()
+        ),
+    );
+
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (admin write)"),
+    );
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut proxy_addr = String::new();
+    let mut admin_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (proxy_addr.is_empty() || admin_addr.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing both binds"
+        );
+        if let Ok(mut log) = log.lock() {
+            log.push_str(&line);
+        }
+        if proxy_addr.is_empty()
+            && let Some(addr) = line.split("listening on ").nth(1)
+        {
+            proxy_addr = addr.trim().to_owned();
+        }
+        if let Some(rest) = line.split("admin listening on ").nth(1) {
+            admin_addr = rest
+                .split_whitespace()
+                .next()
+                .expect("admin address")
+                .to_owned();
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "dataplane address not announced");
+    assert!(!admin_addr.is_empty(), "admin address not announced");
+
+    // Keep draining stderr into the shared log.
+    let reader = {
+        let log = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            for line in stderr.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(mut log) = log.lock() {
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+            }
+        })
+    };
+
+    // The slot is addressed by its configured target, exactly as reported.
+    let (status, _, body) = admin_get(
+        &admin_addr,
+        "/api/v1/status",
+        Some(&format!("Bearer {read_token}")),
+    );
+    assert_eq!(status, 200, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    let target = parsed["backends"][0]["servers"][0]["addr"]
+        .as_str()
+        .expect("server target")
+        .to_owned();
+    assert_eq!(target, backend.to_string());
+    assert_eq!(parsed["backends"][0]["servers"][0]["state"], "ready");
+    let path = format!("/api/v1/backends/api/servers/{target}/state");
+
+    // The read role cannot drain; the write role can.
+    let (status, _, body) = admin_put(&admin_addr, &path, read_token, "{\"state\":\"drain\"}");
+    assert_eq!(status, 403, "read token must not write: {body}");
+    assert!(body.contains("forbidden"), "{body}");
+    let (status, _, body) = admin_put(&admin_addr, &path, write_token, "{\"state\":\"drain\"}");
+    assert_eq!(status, 200, "write token must drain: {body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("write json");
+    assert_eq!(parsed["state"], "drain");
+    assert_eq!(parsed["previous"], "ready");
+
+    // The live status reflects the drain without a restart.
+    let (status, _, body) = admin_get(
+        &admin_addr,
+        "/api/v1/status",
+        Some(&format!("Bearer {read_token}")),
+    );
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(parsed["backends"][0]["servers"][0]["state"], "drain");
+
+    // New requests find no server: explicit 503, and the origin is untouched.
+    let response = proxied(
+        &proxy_addr,
+        b"GET /while-drained HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 503"),
+        "a drained backend must answer 503: {response}"
+    );
+
+    // A SIGHUP reload rebuilds the balancers; the drain must survive it
+    // instead of silently returning the server to rotation.
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-HUP", &pid.to_string()])
+            .status()
+            .expect("run kill -HUP")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline
+        && !log
+            .lock()
+            .is_ok_and(|log| log.contains("config reload applied"))
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        log.lock()
+            .is_ok_and(|log| log.contains("config reload applied")),
+        "the SIGHUP reload must land: {:?}",
+        log.lock().map(|l| l.clone()).unwrap_or_default()
+    );
+    let (status, _, body) = admin_get(
+        &admin_addr,
+        "/api/v1/status",
+        Some(&format!("Bearer {read_token}")),
+    );
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(
+        parsed["backends"][0]["servers"][0]["state"], "drain",
+        "the drain must survive SIGHUP: {body}"
+    );
+    let response = proxied(
+        &proxy_addr,
+        b"GET /after-reload-while-drained HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 503"),
+        "a reload must not return a drained server to rotation: {response}"
+    );
+
+    // Back to rotation: the same server serves again.
+    let (status, _, body) = admin_put(&admin_addr, &path, write_token, "{\"state\":\"ready\"}");
+    assert_eq!(status, 200, "{body}");
+    let response = proxied(
+        &proxy_addr,
+        b"GET /after-ready HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "ready must return the server: {response}"
+    );
+    assert_eq!(body_of(&response), "hello-write");
+
+    // The audit trail names both outcomes and never the secrets.
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = reader.join();
+    remove_temp(&config);
+    let _ = std::fs::remove_file(&read_path);
+    let _ = std::fs::remove_file(&write_path);
+    let log = log.lock().map(|l| l.clone()).unwrap_or_default();
+    assert_eq!(status.code(), Some(0), "clean shutdown; log:\n{log}");
+    assert!(
+        log.contains("AUDIT ") && log.contains("\"to\":\"drain\""),
+        "the accepted write must be audited: {log}"
+    );
+    assert!(
+        log.contains("\"status\":403"),
+        "the refused write must be audited: {log}"
+    );
+    assert!(
+        !log.contains(read_token) && !log.contains(write_token),
+        "an audit line never carries a secret"
+    );
+}
+
+/// One authenticated `PUT` of a TOML table body (ADR-0019).
+fn admin_put_toml(
+    addr: &str,
+    path: &str,
+    token: &str,
+    if_match: Option<&str>,
+    body: &str,
+) -> (u16, String, String) {
+    let mut request = format!(
+        "PUT {path} HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\ncontent-type: application/toml\r\ncontent-length: {}\r\n",
+        body.len()
+    );
+    if let Some(revision) = if_match {
+        request.push_str(&format!("if-match: \"{revision}\"\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    admin_exchange(addr, &request)
+}
+
+/// Reads exactly one `Content-Length`-framed response from a connection that
+/// stays open (the body of a keep-alive exchange), returning the body.
+fn read_keepalive_response(stream: &mut TcpStream) -> String {
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 1024];
+    let head_end = loop {
+        if let Some(at) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            break at + 4;
+        }
+        let read = stream.read(&mut chunk).expect("read response head");
+        assert!(read > 0, "the proxy closed an established connection");
+        raw.extend_from_slice(&chunk[..read]);
+    };
+    let head = String::from_utf8_lossy(&raw[..head_end]).to_ascii_lowercase();
+    let length = head
+        .lines()
+        .find_map(|line| line.strip_prefix("content-length:"))
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .expect("framed response with content-length");
+    while raw.len() < head_end + length {
+        let read = stream.read(&mut chunk).expect("read response body");
+        assert!(read > 0, "truncated response body");
+        raw.extend_from_slice(&chunk[..read]);
+    }
+    String::from_utf8_lossy(&raw[head_end..head_end + length]).into_owned()
+}
+
+/// Authenticated status: parsed JSON plus the raw head (for `ETag`).
+fn admin_status(addr: &str, token: &str) -> (serde_json::Value, String) {
+    let (status, head, body) = admin_get(addr, "/api/v1/status", Some(&format!("Bearer {token}")));
+    assert_eq!(status, 200, "status: {head}\n{body}");
+    let parsed = serde_json::from_str(&body).expect("status is JSON");
+    (parsed, head)
+}
+
+/// Hot configuration through the **real** binary (v0.8, ADR-0019), under
+/// load: a backend is modified while four clients are proxying, a new backend
+/// is created and a listener is repointed to it; no request may fail. The
+/// same run proves the optimistic revision (`If-Match`: stale is 412, missing
+/// is 428), that an invalid table never reaches the dataplane, that a bind
+/// conflict is refused with the old generation still serving, and that the
+/// file remains the baseline on SIGHUP.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_applies_backend_config_under_traffic() {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+    #[derive(Default)]
+    struct Counts {
+        a: AtomicU64,
+        b: AtomicU64,
+        c: AtomicU64,
+        failed: AtomicU64,
+    }
+
+    // Origin A never closes its connections, so an established client
+    // connection can outlive the swap and must keep its accepted generation.
+    let origin_a = start_keepalive_origin("origin-a");
+    let origin_b = start_static_backend("origin-b");
+    let origin_c = start_static_backend("origin-c");
+    let read_token = "3f9a1c0d7b2e4f6a8c5d1e0b9a7c3f2d";
+    let write_token = "9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e";
+    let tag = format!("eqproxy-cli-e2e-{}-admin-config", std::process::id());
+    let read_path = std::env::temp_dir().join(format!("{tag}.read"));
+    let write_path = std::env::temp_dir().join(format!("{tag}.write"));
+    std::fs::write(&read_path, format!("{read_token}\n")).expect("write read token");
+    std::fs::write(&write_path, format!("{write_token}\n")).expect("write write token");
+    let config = temp_config(
+        "admin-config",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [backend.api]\n\
+             server = \"{origin_a}\"\n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             token_file = \"{}\"\n\
+             write_token_file = \"{}\"\n",
+            read_path.display(),
+            write_path.display()
+        ),
+    );
+
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (admin config)"),
+    );
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut proxy_addr = String::new();
+    let mut admin_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (proxy_addr.is_empty() || admin_addr.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing both binds"
+        );
+        if let Ok(mut log) = log.lock() {
+            log.push_str(&line);
+        }
+        if proxy_addr.is_empty()
+            && let Some(addr) = line.split("listening on ").nth(1)
+        {
+            proxy_addr = addr.trim().to_owned();
+        }
+        if let Some(rest) = line.split("admin listening on ").nth(1) {
+            admin_addr = rest
+                .split_whitespace()
+                .next()
+                .expect("admin address")
+                .to_owned();
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "dataplane address not announced");
+    assert!(!admin_addr.is_empty(), "admin address not announced");
+
+    // Keep draining stderr into the shared log.
+    let reader = {
+        let log = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            for line in stderr.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(mut log) = log.lock() {
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+            }
+        })
+    };
+
+    // Four concurrent clients hammer the proxy for the whole run: every
+    // configuration swap must be invisible to them.
+    let counts = std::sync::Arc::new(Counts::default());
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let mut loaders = Vec::new();
+    for _ in 0..4 {
+        let proxy = proxy_addr.clone();
+        let counts = std::sync::Arc::clone(&counts);
+        let stop = std::sync::Arc::clone(&stop);
+        loaders.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                let mut client = match TcpStream::connect(&proxy) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        counts.failed.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("load: connect failed: {error}");
+                        continue;
+                    }
+                };
+                let _ = client.set_read_timeout(Some(Duration::from_secs(5)));
+                if client
+                    .write_all(b"GET /under-load HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+                    .is_err()
+                {
+                    counts.failed.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let mut raw = Vec::new();
+                if client.read_to_end(&mut raw).is_err() {
+                    counts.failed.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let response = String::from_utf8_lossy(&raw);
+                if !response.starts_with("HTTP/1.1 200") {
+                    counts.failed.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("load: non-200: {response}");
+                    continue;
+                }
+                match body_of(&response) {
+                    "origin-a" => counts.a.fetch_add(1, Ordering::Relaxed),
+                    "origin-b" => counts.b.fetch_add(1, Ordering::Relaxed),
+                    "origin-c" => counts.c.fetch_add(1, Ordering::Relaxed),
+                    other => {
+                        counts.failed.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("load: unexpected body {other:?}");
+                        0
+                    }
+                };
+            }
+        }));
+    }
+    let wait_for = |what: &str, condition: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            if condition() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!(
+            "{what} never happened; counts a={} b={} c={} failed={}",
+            counts.a.load(Ordering::Relaxed),
+            counts.b.load(Ordering::Relaxed),
+            counts.c.load(Ordering::Relaxed),
+            counts.failed.load(Ordering::Relaxed)
+        );
+    };
+    wait_for("initial traffic", &|| {
+        counts.a.load(Ordering::Relaxed) >= 20
+    });
+
+    // A connection established **before** the swap, kept open across it.
+    let mut pinned = TcpStream::connect(&proxy_addr).expect("connect pinned client");
+    pinned
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .expect("pinned timeout");
+    pinned
+        .write_all(b"GET /pinned-before HTTP/1.1\r\nHost: t\r\n\r\n")
+        .expect("write pinned request");
+    assert_eq!(read_keepalive_response(&mut pinned), "origin-a");
+
+    let (status, head) = admin_status(&admin_addr, read_token);
+    let revision1 = status["revision"].as_str().expect("revision").to_owned();
+    assert_eq!(revision1, "v1");
+    assert!(head.to_ascii_lowercase().contains("etag: \"v1\""), "{head}");
+    assert_eq!(status["listeners"][0]["listen"], proxy_addr);
+    assert_eq!(
+        status["backends"][0]["servers"][0]["addr"],
+        origin_a.to_string()
+    );
+
+    // The read role and an unconditional write are both refused.
+    let body_a = format!("server = \"{origin_b}\"\n");
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        read_token,
+        Some(&revision1),
+        &body_a,
+    );
+    assert_eq!(code, 403, "the read token must not configure: {body}");
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        None,
+        &body_a,
+    );
+    assert_eq!(code, 428, "a config write is conditional: {body}");
+    assert!(body.contains("precondition_required"), "{body}");
+
+    // 1. Modify the live backend: origin A -> B, with the current revision.
+    let (code, head, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        Some(&revision1),
+        &body_a,
+    );
+    assert_eq!(code, 200, "backend update: {head}\n{body}");
+    let applied: serde_json::Value = serde_json::from_str(&body).expect("apply json");
+    assert_eq!(applied["revision"], "v2");
+    assert_eq!(applied["summary"], "listeners kept=1 added=0 removed=0");
+    assert!(
+        applied["elapsed_ms"].as_u64().expect("measured commit") < 1000,
+        "the roadmap gate is a swap under one second: {applied}"
+    );
+    assert!(
+        head.to_ascii_lowercase().contains("etag: \"v2\""),
+        "the answer carries the new revision: {head}"
+    );
+    wait_for("traffic on the new origin", &|| {
+        counts.b.load(Ordering::Relaxed) >= 10
+    });
+
+    // The established connection was accepted with the old generation: it
+    // keeps serving origin A while new connections already see B.
+    pinned
+        .write_all(b"GET /pinned-after HTTP/1.1\r\nHost: t\r\n\r\n")
+        .expect("write pinned request after the swap");
+    assert_eq!(
+        read_keepalive_response(&mut pinned),
+        "origin-a",
+        "an established connection must finish on the generation it accepted"
+    );
+    let response = proxied(
+        &proxy_addr,
+        b"GET /fresh-after HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "origin-b", "{response}");
+    drop(pinned);
+
+    // A stale revision is refused and changes nothing.
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        Some(&revision1),
+        &format!("server = \"{origin_c}\"\n"),
+    );
+    assert_eq!(code, 412, "a stale If-Match must fail: {body}");
+    let stale: serde_json::Value = serde_json::from_str(&body).expect("stale json");
+    assert_eq!(stale["error"], "precondition_failed");
+    assert_eq!(stale["revision"], "v2");
+
+    // 2. Create a brand-new backend while traffic keeps flowing.
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/green",
+        write_token,
+        Some("v2"),
+        &format!("server = \"{origin_c}\"\n"),
+    );
+    assert_eq!(code, 200, "new backend: {body}");
+    let applied: serde_json::Value = serde_json::from_str(&body).expect("apply json");
+    assert_eq!(applied["revision"], "v3");
+    assert!(
+        applied["elapsed_ms"].as_u64().expect("measured commit") < 1000,
+        "creating a backend is a sub-second swap: {applied}"
+    );
+    let (status, _) = admin_status(&admin_addr, read_token);
+    assert_eq!(status["revision"], "v3");
+    assert!(
+        status["backends"]
+            .as_array()
+            .expect("backends")
+            .iter()
+            .any(|backend| backend["name"] == "green"
+                && backend["servers"][0]["addr"] == origin_c.to_string()),
+        "the created backend must be reported: {status}"
+    );
+
+    // 3. Repoint the live listener at the new backend (same socket: kept).
+    let listener_body = "listen = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"green\"\n";
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/listeners/web",
+        write_token,
+        Some("v3"),
+        listener_body,
+    );
+    assert_eq!(code, 200, "listener update: {body}");
+    let applied: serde_json::Value = serde_json::from_str(&body).expect("apply json");
+    assert_eq!(applied["revision"], "v4");
+    assert_eq!(applied["summary"], "listeners kept=1 added=0 removed=0");
+    assert!(
+        applied["elapsed_ms"].as_u64().expect("measured commit") < 1000,
+        "repointing a listener is a sub-second swap: {applied}"
+    );
+    wait_for("traffic on the created backend", &|| {
+        counts.c.load(Ordering::Relaxed) >= 10
+    });
+    let (status, _) = admin_status(&admin_addr, read_token);
+    assert_eq!(status["listeners"][0]["backend"], "green");
+    assert_eq!(status["listeners"][0]["listen"], proxy_addr);
+
+    // 4. An invalid table is refused before the dataplane sees it.
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        Some("v4"),
+        "balance = \"random\"\n",
+    );
+    assert_eq!(code, 400, "invalid config: {body}");
+    let invalid: serde_json::Value = serde_json::from_str(&body).expect("invalid json");
+    assert_eq!(invalid["error"], "invalid_config");
+    assert_eq!(
+        admin_status(&admin_addr, read_token).0["revision"],
+        "v4",
+        "a refused candidate must not advance the revision"
+    );
+
+    // 5. A bind conflict is refused atomically: the old generation serves.
+    let held = TcpListener::bind("127.0.0.1:0").expect("hold a port");
+    let held_addr = held.local_addr().expect("held addr");
+    let conflict = format!("listen = \"{held_addr}\"\nmode = \"http\"\nbackend = \"green\"\n");
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/listeners/web",
+        write_token,
+        Some("v4"),
+        &conflict,
+    );
+    assert_eq!(code, 409, "a bind conflict is refused: {body}");
+    let rejected: serde_json::Value = serde_json::from_str(&body).expect("rejected json");
+    assert_eq!(rejected["error"], "swap_rejected");
+    drop(held);
+    let (status, _) = admin_status(&admin_addr, read_token);
+    assert_eq!(status["revision"], "v4");
+    assert_eq!(status["listeners"][0]["listen"], proxy_addr);
+    let response = proxied(
+        &proxy_addr,
+        b"GET /after-rejected-swap HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "origin-c", "{response}");
+
+    // 6. SIGHUP re-reads the file, which is still the baseline: the runtime
+    //    changes are replaced by the file's generation, atomically.
+    send_signal(&child, "-HUP");
+    // The revision is the observable commit point: API applies log the same
+    // "config reload applied" line, so the log alone cannot tell this reload
+    // apart from the earlier writes.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut status = admin_status(&admin_addr, read_token).0;
+    while Instant::now() < deadline && status["revision"] != "v5" {
+        std::thread::sleep(Duration::from_millis(20));
+        status = admin_status(&admin_addr, read_token).0;
+    }
+    assert_eq!(
+        status["revision"],
+        "v5",
+        "the SIGHUP reload must commit a new revision: {status}\nlog:\n{}",
+        log.lock().map(|l| l.clone()).unwrap_or_default()
+    );
+    assert_eq!(status["listeners"][0]["backend"], "api");
+    assert_eq!(
+        status["backends"][0]["servers"][0]["addr"],
+        origin_a.to_string()
+    );
+    wait_for("traffic back on the file generation", &|| {
+        let before = counts.a.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(30));
+        counts.a.load(Ordering::Relaxed) > before
+    });
+
+    // Two writers that read the same revision: exactly one may commit; the
+    // other is told to re-read. This is what serializing the revision check
+    // and the swap in one task buys.
+    let mut racers = Vec::new();
+    for body in [
+        format!("server = \"{origin_a}\"\n"),
+        format!("server = \"{origin_b}\"\n"),
+    ] {
+        let admin = admin_addr.clone();
+        racers.push(std::thread::spawn(move || {
+            admin_put_toml(
+                &admin,
+                "/api/v1/backends/api",
+                write_token,
+                Some("v5"),
+                &body,
+            )
+            .0
+        }));
+    }
+    let mut codes: Vec<u16> = racers
+        .into_iter()
+        .map(|racer| racer.join().expect("racer thread"))
+        .collect();
+    codes.sort_unstable();
+    assert_eq!(codes, vec![200, 412], "one writer commits, one re-reads");
+    let (status, _) = admin_status(&admin_addr, read_token);
+    assert_eq!(status["revision"], "v6");
+
+    stop.store(true, Ordering::Relaxed);
+    for loader in loaders {
+        loader.join().expect("loader thread");
+    }
+    let failed = counts.failed.load(Ordering::Relaxed);
+    let total = counts.a.load(Ordering::Relaxed)
+        + counts.b.load(Ordering::Relaxed)
+        + counts.c.load(Ordering::Relaxed);
+    assert_eq!(
+        failed,
+        0,
+        "no request may fail across the swaps (a={} b={} c={} total={total})",
+        counts.a.load(Ordering::Relaxed),
+        counts.b.load(Ordering::Relaxed),
+        counts.c.load(Ordering::Relaxed)
+    );
+    assert!(total >= 100, "the load must be real: {total} requests");
+    assert!(
+        counts.a.load(Ordering::Relaxed) > 0
+            && counts.b.load(Ordering::Relaxed) > 0
+            && counts.c.load(Ordering::Relaxed) > 0,
+        "each generation must have served: a={} b={} c={}",
+        counts.a.load(Ordering::Relaxed),
+        counts.b.load(Ordering::Relaxed),
+        counts.c.load(Ordering::Relaxed)
+    );
+
+    send_signal(&child, "-INT");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = reader.join();
+    remove_temp(&config);
+    let _ = std::fs::remove_file(&read_path);
+    let _ = std::fs::remove_file(&write_path);
+    let log = log.lock().map(|l| l.clone()).unwrap_or_default();
+    assert_eq!(status.code(), Some(0), "clean shutdown; log:\n{log}");
+    assert!(
+        log.contains("\"status\":200"),
+        "successful config writes are audited: {log}"
+    );
+    assert!(
+        !log.contains(read_token) && !log.contains(write_token),
+        "{log}"
+    );
 }

@@ -1,5 +1,5 @@
 #:schema ./eqproxy.schema.json
-# Example EQProxy configuration (v0.6).
+# Example EQProxy configuration (v0.8).
 #
 # Validation errors: file, line, field, cause and a fix example.
 #
@@ -11,6 +11,29 @@ schema_version = 1
 
 # Drain window on shutdown (SIGINT): live connections may finish.
 shutdown_grace = "10s"
+
+# Administration plane (v0.8, D6; ADR-0017/0018/0019): its own listener and
+# task, never the public address. Absent = off. Every route needs the bearer
+# token; without it the answer is 401 and nothing about the plane is
+# disclosed. Routes: GET /api/v1/status (topology, revision and counters as
+# JSON), GET /metrics (Prometheus text, fixed series set), and — only with a
+# write token — PUT /api/v1/backends/{backend}/servers/{target}/state
+# (`ready`/`drain`), PUT /api/v1/backends/{name} and
+# PUT /api/v1/listeners/{name}. The table PUTs replace that TOML table, are
+# validated as a whole document and need `If-Match: "<revision>"` from the
+# status answer; a 200 means the dataplane already swapped. They are runtime
+# only: SIGHUP re-reads this file and replaces them.
+#[admin]
+#listen = "127.0.0.1:9001"     # IP:PORT; loopback unless allow_remote
+#token_file = "/etc/eqproxy/admin.token"   # read token: one of token/token_file
+#                                          # (≥ 16 bytes; newline trimmed)
+#token = "0123456789abcdef"    # inline alternative: travels with the file
+#write_token_file = "/etc/eqproxy/admin-write.token"  # write token, distinct
+#                                                      # from the read one;
+#                                                      # without it the plane
+#                                                      # is read-only
+#allow_remote = false          # a non-loopback bind sends the tokens in the
+#                              # clear (no TLS on the plane in this slice)
 
 [listener.web]
 listen = "127.0.0.1:8080"   # IP:PORT (port 0 = ephemeral)

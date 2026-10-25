@@ -156,6 +156,26 @@ impl ResolvedBackend {
         self
     }
 
+    /// Binds this backend's balancer to the shared administration state
+    /// (ADR-0018). Built after [`with_balance`](Self::with_balance) so the
+    /// algorithm and the slow-start window survive the rebuild; called before
+    /// the backend serves traffic, so no live slot is lost.
+    #[must_use]
+    pub fn with_server_modes(mut self, modes: Arc<crate::balancer::ServerModes>) -> Self {
+        let (fall, rise) = self.balancer.thresholds();
+        self.balancer = Arc::new(
+            crate::Balancer::with_options(
+                self.servers.clone(),
+                fall,
+                rise,
+                self.balancer.algorithm(),
+                self.balancer.slow_start(),
+            )
+            .with_modes(self.name.clone(), modes),
+        );
+        self
+    }
+
     /// Session affinity (B-H8/B-N13/B-I8).
     #[must_use]
     pub fn with_affinity(mut self, affinity: ResolvedAffinity) -> Self {
@@ -1189,6 +1209,39 @@ impl Drop for Entry {
     }
 }
 
+/// One candidate configuration handed to the serving dataplane.
+///
+/// `reply` is how a caller (the admin config API) learns whether the swap was
+/// committed: the answer is sent **after** the commit phase, with the real
+/// summary, the bound addresses and the measured latency. The SIGHUP path
+/// sends `reply: None` and keeps the existing fire-and-log behaviour.
+pub struct SwapRequest {
+    pub listeners: Vec<ResolvedListener>,
+    pub reply: Option<tokio::sync::oneshot::Sender<Result<SwapOutcome, String>>>,
+}
+
+impl SwapRequest {
+    /// A swap whose outcome is only logged (SIGHUP, tests).
+    #[must_use]
+    pub fn plain(listeners: Vec<ResolvedListener>) -> Self {
+        Self {
+            listeners,
+            reply: None,
+        }
+    }
+}
+
+/// Outcome of a committed swap.
+#[derive(Debug)]
+pub struct SwapOutcome {
+    pub summary: SwapSummary,
+    /// Real bound addresses after the swap (`(listener name, address)`), so a
+    /// configured port 0 can be reported by its assigned port.
+    pub listeners: Vec<(String, SocketAddr)>,
+    /// Commit latency measured by the dataplane, not assumed.
+    pub elapsed: Duration,
+}
+
 /// What a hot swap changed (logged; rendering unit-tested).
 /// A rebind (same name, new address) counts as removed + added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1617,17 +1670,17 @@ impl BoundProxy {
         mut self,
         mut shutdown: Shutdown,
         grace: Duration,
-        mut reloads: tokio::sync::mpsc::Receiver<Vec<ResolvedListener>>,
+        mut reloads: tokio::sync::mpsc::Receiver<SwapRequest>,
     ) -> Result<(), ProxyError> {
         loop {
             tokio::select! {
                 _ = shutdown.wait() => break,
                 // `Some(..)`: when the channel closes, this branch is
                 // disabled and only shutdown is left.
-                Some(listeners) = reloads.recv() => {
+                Some(request) = reloads.recv() => {
                     // The swap latency is measured (PP-04/05), not assumed.
                     let started = std::time::Instant::now();
-                    match self.apply(listeners).await {
+                    match self.apply(request.listeners).await {
                         Ok(summary) => {
                             let elapsed = started.elapsed();
                             self.metrics.config_reloads.fetch_add(1, Ordering::Relaxed);
@@ -1636,10 +1689,23 @@ impl BoundProxy {
                                 Ordering::Relaxed,
                             );
                             eprintln!("INFO config reload applied: {summary} in {elapsed:?}");
+                            if let Some(reply) = request.reply {
+                                // Sent only after the commit phase: a 200 from
+                                // the API means the dataplane is already
+                                // serving the candidate.
+                                let _ = reply.send(Ok(SwapOutcome {
+                                    summary,
+                                    listeners: self.local_addrs(),
+                                    elapsed,
+                                }));
+                            }
                         }
                         Err(err) => {
                             self.metrics.config_reload_failures.fetch_add(1, Ordering::Relaxed);
                             eprintln!("ERROR config reload rejected: {err}");
+                            if let Some(reply) = request.reply {
+                                let _ = reply.send(Err(err.to_string()));
+                            }
                         }
                     }
                 }

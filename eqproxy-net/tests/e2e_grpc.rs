@@ -654,7 +654,14 @@ async fn grpc_dead_backend_is_an_explicit_502() {
     let (addr, metrics, handle, serve) = start_proxy(proxy_with_h2_backend(dead_addr)).await;
     let mut client = h2_connect(addr).await;
     let (response, mut send) = grpc_open(&mut client, "/pkg.Service/Bidi").await;
-    send_all(&mut send, &frame(b"lost")).await.expect("send");
+    // The dead backend makes the proxy answer 502 and reset the stream; under
+    // nextest's scheduling that reset can reach the client before this first
+    // DATA frame is flushed. The contract under test is the explicit 502 (and
+    // the counted dial), not a successful send into a stream the server is
+    // already closing.
+    if let Err(err) = send_all(&mut send, &frame(b"lost")).await {
+        eprintln!("first DATA frame reached a stream already closed by the 502: {err:?}");
+    }
     let response = tokio::time::timeout(WAIT, response)
         .await
         .expect("answer in time")

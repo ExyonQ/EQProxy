@@ -12,7 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use eqproxy_core::Metrics;
-use eqproxy_net::proxy::{self, ProxyMode, ResolvedListener, SwapSummary};
+use eqproxy_net::proxy::{self, ProxyMode, ResolvedListener, SwapRequest, SwapSummary};
 
 /// Echo backend that tags every echoed chunk with one byte (`A`, `B`, …),
 /// so the client can observe **which** backend served it.
@@ -171,10 +171,10 @@ async fn supervisor_counts_reloads_and_rejects_fail_closed() {
     let server = tokio::spawn(proxy.serve_with_reloads(signal, Duration::from_secs(2), rx));
 
     // Bad candidate: a second listener on the held port → bind conflict.
-    tx.send(vec![
+    tx.send(SwapRequest::plain(vec![
         tcp_listener("web", listen, a),
         tcp_listener("extra", held_addr, b),
-    ])
+    ]))
     .await
     .expect("send bad reload");
     wait_until("config_reload_failures == 1", || {
@@ -195,7 +195,7 @@ async fn supervisor_counts_reloads_and_rejects_fail_closed() {
     );
 
     // Good candidate: same listener, new backend.
-    tx.send(vec![tcp_listener("web", listen, b)])
+    tx.send(SwapRequest::plain(vec![tcp_listener("web", listen, b)]))
         .await
         .expect("send good reload");
     wait_until("config_reloads == 1", || {

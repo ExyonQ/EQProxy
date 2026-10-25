@@ -77,6 +77,85 @@ pub fn parse_str(source: &str, file: &Path) -> Result<Config, ConfigError> {
     }
 }
 
+/// Parses one `[backend.<name>]` table for a hot write (ADR-0019).
+///
+/// Accepts both shapes an operator has at hand: the **body** of the table
+/// (`server = "…"`, nested tables as inline tables or `[tls]` headers) and the
+/// **complete section** copied from the file (`[backend.<name>]` and its
+/// nested `[backend.<name>.…]` tables). The caller inserts the result into a
+/// candidate document and validates the whole document.
+pub fn parse_backend_table(
+    source: &str,
+    file: &Path,
+    name: &str,
+) -> Result<BackendConfig, ConfigError> {
+    parse_table(source, file, "backend", name)
+}
+
+/// Parses one `[listener.<name>]` table for a hot write (ADR-0019).
+pub fn parse_listener_table(
+    source: &str,
+    file: &Path,
+    name: &str,
+) -> Result<ListenerConfig, ConfigError> {
+    parse_table(source, file, "listener", name)
+}
+
+/// One table, with the same field-path and example reporting as a whole
+/// document. Line numbers are absent: the body arrived over HTTP, not from a
+/// file with numbered lines. A body that carries the section itself is
+/// unwrapped, so a copy-paste from the config keeps working; a body with only
+/// that table's keys is used as-is.
+fn parse_table<T: serde::de::DeserializeOwned>(
+    source: &str,
+    file: &Path,
+    kind: &str,
+    name: &str,
+) -> Result<T, ConfigError> {
+    let section = format!("{kind}.{name}");
+    let value = toml::from_str::<toml::Value>(source).map_err(|err| ConfigError {
+        file: file.to_path_buf(),
+        location: err
+            .span()
+            .and_then(|span| offset_location(source, span.start)),
+        example: example_for(&section, &err.to_string()),
+        field: Some(section.clone()),
+        cause: err.to_string(),
+    })?;
+    let unwrapped = value
+        .get(kind)
+        .and_then(|tables| tables.get(name))
+        .cloned()
+        .unwrap_or(value);
+    match serde_path_to_error::deserialize(unwrapped) {
+        Ok(value) => Ok(value),
+        Err(err) => {
+            let reported = err.path().to_string();
+            let inner = err.into_inner();
+            let cause = inner.to_string();
+            // The caller may have sent the section header (`backend.api.…`);
+            // strip one copy so the field is named exactly once. A missing
+            // field reports `"."`, which is no path at all.
+            let prefix = format!("{section}.");
+            let trimmed = reported.trim_matches('.');
+            let rest = trimmed.strip_prefix(&prefix).unwrap_or(trimmed);
+            let rest = rest.trim_matches('.');
+            let field = if rest.is_empty() {
+                section.clone()
+            } else {
+                format!("{section}.{rest}")
+            };
+            Err(ConfigError {
+                file: file.to_path_buf(),
+                location: None,
+                example: example_for(&field, &cause),
+                field: Some(field),
+                cause,
+            })
+        }
+    }
+}
+
 /// Configuration error exceeding the resource budget (ADR-0002).
 fn oversized(file: &Path, size: usize) -> ConfigError {
     ConfigError {
@@ -174,6 +253,57 @@ pub const SCHEMA_FILE: &str = include_str!("../../eqproxy.schema.json");
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn backend_table_accepts_the_body_and_the_whole_section() {
+        let file = PathBuf::from("http.toml");
+        let body = parse_backend_table(
+            "server = \"127.0.0.1:9000\"\n[tls]\nverify = false\n",
+            &file,
+            "api",
+        )
+        .expect("body form");
+        assert_eq!(body.server.as_deref(), Some("127.0.0.1:9000"));
+        assert_eq!(body.tls.as_ref().map(|tls| tls.verify), Some(false));
+
+        let section = parse_backend_table(
+            "[backend.api]\nserver = \"127.0.0.1:9001\"\n\
+             [backend.api.health_check]\ntype = \"tcp\"\n",
+            &file,
+            "api",
+        )
+        .expect("whole-section form");
+        assert_eq!(section.server.as_deref(), Some("127.0.0.1:9001"));
+        assert!(section.health_check.is_some());
+    }
+
+    #[test]
+    fn a_table_typo_is_reported_with_its_section_path() {
+        let err = parse_backend_table(
+            "[backend.api]\nservers = []\nbalanse = \"leastconn\"\n",
+            Path::new("http.toml"),
+            "api",
+        )
+        .expect_err("unknown key");
+        assert_eq!(err.field.as_deref(), Some("backend.api.balanse"));
+        assert!(err.cause.contains("balanse"), "{err}");
+    }
+
+    #[test]
+    fn listener_table_accepts_a_full_section_and_requires_its_keys() {
+        let file = PathBuf::from("http.toml");
+        let listener = parse_listener_table(
+            "[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n",
+            &file,
+            "web",
+        )
+        .expect("listener section");
+        assert_eq!(listener.listen, "127.0.0.1:8080");
+        assert_eq!(listener.backend, "api");
+        let err = parse_listener_table("mode = \"http\"\n", &file, "web")
+            .expect_err("missing listen/backend");
+        assert_eq!(err.field.as_deref(), Some("listener.web"));
+    }
 
     #[test]
     fn offset_location_maps_offsets_to_line_and_column() {

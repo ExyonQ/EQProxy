@@ -16,8 +16,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, RwLock};
 
 use clap::{Parser, Subcommand};
 
@@ -25,10 +25,13 @@ use eqproxy_config::error::ConfigError;
 use eqproxy_config::schema::Config;
 use eqproxy_config::validate::{self, CheckResult};
 use eqproxy_core::{Metrics, RequestFacts, shutdown};
+use eqproxy_net::admin::{AdminTopology, ApplyMessage, ApplyReply, ConfigChange};
 use eqproxy_net::health::HealthCheck;
+use eqproxy_net::proxy::SwapRequest;
 use eqproxy_net::tls::{self, TlsVersion};
 use eqproxy_net::{
-    ProxyMode, ProxyProtocolMode, ResolvedBackend, ResolvedListener, ResolvedServer, bind,
+    AdminState, ListenerInfo, ProxyMode, ProxyProtocolMode, ResolvedAdmin, ResolvedBackend,
+    ResolvedListener, ResolvedServer, bind,
 };
 
 /// Writes a generated report to stdout, treating a reader that closed the
@@ -300,31 +303,6 @@ fn validate(path: &Path) -> u8 {
         path.display()
     );
     0
-}
-
-/// The SIGHUP gate (S-CFG-01): the same checks as startup, without side
-/// effects. A rejected candidate never reaches the dataplane and the
-/// running config keeps serving. Errors come back as text for the
-/// "config reload rejected" line.
-fn reload_gate(path: &Path) -> Result<Vec<ResolvedListener>, String> {
-    let (config, result) = load_and_check(path).map_err(|err| err.to_string())?;
-    for warning in &result.warnings {
-        eprintln!("warning: {warning}");
-    }
-    if !result.is_valid() {
-        return Err(result
-            .errors
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("; "));
-    }
-    let listeners = resolve(&config, base_dir(path))
-        .map_err(|msg| format!("inconsistent configuration after validation: {msg}"))?;
-    if listeners.is_empty() {
-        return Err("the configuration defines no listeners; nothing to serve".to_owned());
-    }
-    Ok(listeners)
 }
 
 /// Compares two configurations for the pre-apply safety workflow (Phase 3).
@@ -1885,10 +1863,324 @@ fn load_maps(
     Ok(Arc::new(registry))
 }
 
+/// Resolves `[admin]` (v0.8, D6): the listener address and the bearer
+/// token. The token file is read here, fail-closed like certificates; the
+/// running process never re-reads it (changing it needs a restart).
+fn resolve_admin(config: &Config, base_dir: &Path) -> Result<Option<ResolvedAdmin>, String> {
+    let Some(admin) = &config.admin else {
+        return Ok(None);
+    };
+    let listen: SocketAddr = admin
+        .listen
+        .parse()
+        .map_err(|_| format!("admin.listen invalid: \"{}\"", admin.listen))?;
+    let token = admin_secret(
+        admin.token.as_deref(),
+        admin.token_file.as_deref(),
+        base_dir,
+        "token",
+    )?
+    .ok_or_else(|| "admin.token: set exactly one of token or token_file".to_owned())?;
+    let write_token = admin_secret(
+        admin.write_token.as_deref(),
+        admin.write_token_file.as_deref(),
+        base_dir,
+        "write_token",
+    )?;
+    if let Some(write) = &write_token
+        && write == &token
+    {
+        // Defence in depth: validation already refuses a shared secret.
+        return Err(
+            "admin.write_token equals admin.token: one secret per privilege level".to_owned(),
+        );
+    }
+    Ok(Some(ResolvedAdmin {
+        listen,
+        token,
+        write_token,
+    }))
+}
+
+/// Reads one admin secret (`<field>` or `<field>_file`, trailing newline
+/// trimmed) and enforces the minimum length. `None` when neither is set.
+fn admin_secret(
+    token: Option<&str>,
+    file: Option<&Path>,
+    base_dir: &Path,
+    field: &str,
+) -> Result<Option<Arc<str>>, String> {
+    let value = match (token, file) {
+        (Some(token), None) => token.to_owned(),
+        (None, Some(file)) => {
+            let path = if file.is_absolute() {
+                file.to_path_buf()
+            } else {
+                base_dir.join(file)
+            };
+            let raw = std::fs::read_to_string(&path)
+                .map_err(|error| format!("admin.{field}_file cannot be read: {error}"))?;
+            raw.trim_end_matches(['\r', '\n']).to_owned()
+        }
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "admin.{field}: set exactly one of {field} or {field}_file"
+            ));
+        }
+    };
+    if value.len() < eqproxy_config::schema::MIN_ADMIN_TOKEN_BYTES {
+        return Err(format!(
+            "admin.{field} is {} bytes; use at least {}",
+            value.len(),
+            eqproxy_config::schema::MIN_ADMIN_TOKEN_BYTES
+        ));
+    }
+    Ok(Some(Arc::from(value.as_str())))
+}
+
+/// The listener view the API reports. `bound` carries the addresses the
+/// dataplane really opened, so a configured port 0 is reported by its
+/// assigned port (the operator asked what is running, not what was written).
+fn listener_infos(config: &Config, bound: &[(String, SocketAddr)]) -> Vec<ListenerInfo> {
+    config
+        .listener
+        .iter()
+        .map(|(name, listener)| ListenerInfo {
+            name: name.clone(),
+            listen: bound
+                .iter()
+                .find(|(bound_name, _)| bound_name == name)
+                .map_or_else(|| listener.listen.clone(), |(_, addr)| addr.to_string()),
+            mode: match listener.mode {
+                eqproxy_config::schema::ListenerMode::Http => "http",
+                eqproxy_config::schema::ListenerMode::Tcp => "tcp",
+            }
+            .to_owned(),
+            backend: listener.backend.clone(),
+            maxconn: listener.maxconn,
+        })
+        .collect()
+}
+
+/// The applied generation the API reports and `If-Match` guards. The
+/// configuration task is its only writer.
+fn admin_topology(
+    config: &Config,
+    bound: &[(String, SocketAddr)],
+    backends: Vec<Arc<ResolvedBackend>>,
+    revision: String,
+) -> AdminTopology {
+    AdminTopology {
+        revision,
+        listeners: listener_infos(config, bound),
+        backends,
+    }
+}
+
+/// Single writer of the configuration (ADR-0019): API `PUT`s and SIGHUP
+/// arrive in one queue, so a revision check and the swap it authorizes can
+/// never interleave with another write. The candidate is parsed, validated
+/// and resolved **before** the dataplane is asked to swap; the applied
+/// document and the revision advance only after the swap commits.
+struct ConfigApplier {
+    path: PathBuf,
+    config: Config,
+    revision: u64,
+    modes: Arc<eqproxy_net::ServerModes>,
+    topology: Arc<RwLock<AdminTopology>>,
+    reloads: tokio::sync::mpsc::Sender<SwapRequest>,
+    metrics: Arc<Metrics>,
+}
+
+impl ConfigApplier {
+    async fn run(
+        mut self,
+        mut messages: tokio::sync::mpsc::Receiver<ApplyMessage>,
+        mut shutdown: shutdown::Shutdown,
+    ) {
+        loop {
+            tokio::select! {
+                _ = shutdown.wait() => break,
+                message = messages.recv() => {
+                    let Some(message) = message else { break };
+                    let reply = self.handle(&message).await;
+                    // A closed receiver (the caller went away) is not an error.
+                    let _ = message.reply.send(reply);
+                }
+            }
+        }
+    }
+
+    async fn handle(&mut self, message: &ApplyMessage) -> ApplyReply {
+        if matches!(message.change, ConfigChange::Reload) {
+            return self.reload().await;
+        }
+        let current = format!("v{}", self.revision);
+        if message.if_match.as_deref() != Some(current.as_str()) {
+            return ApplyReply::Precondition { revision: current };
+        }
+        let mut candidate = self.config.clone();
+        match &message.change {
+            ConfigChange::Backend { name, table } => {
+                match eqproxy_config::parse_backend_table(table, &self.path, name) {
+                    Ok(backend) => {
+                        candidate.backend.insert(name.clone(), backend);
+                    }
+                    Err(err) => {
+                        return ApplyReply::Invalid {
+                            message: err.to_string(),
+                        };
+                    }
+                }
+            }
+            ConfigChange::Listener { name, table } => {
+                match eqproxy_config::parse_listener_table(table, &self.path, name) {
+                    Ok(listener) => {
+                        candidate.listener.insert(name.clone(), listener);
+                    }
+                    Err(err) => {
+                        return ApplyReply::Invalid {
+                            message: err.to_string(),
+                        };
+                    }
+                }
+            }
+            ConfigChange::Reload => unreachable!("handled above"),
+        }
+        self.apply_candidate(candidate).await
+    }
+
+    async fn reload(&mut self) -> ApplyReply {
+        let loaded = match load_and_check(&self.path) {
+            Ok(loaded) => loaded,
+            Err(err) => return self.reload_failed(err.to_string()),
+        };
+        let (config, result) = loaded;
+        for warning in &result.warnings {
+            eprintln!("warning: {warning}");
+        }
+        if !result.is_valid() {
+            return self.reload_failed(
+                result
+                    .errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+        }
+        self.apply_candidate(config).await
+    }
+
+    fn reload_failed(&self, message: String) -> ApplyReply {
+        self.metrics
+            .config_reload_failures
+            .fetch_add(1, Ordering::Relaxed);
+        eprintln!("ERROR config reload rejected: {message}");
+        ApplyReply::Invalid { message }
+    }
+
+    /// Validates and resolves the whole candidate, then asks the dataplane to
+    /// swap. Nothing is committed until the dataplane confirms, and a failed
+    /// validation never reaches it (the running generation keeps serving).
+    async fn apply_candidate(&mut self, candidate: Config) -> ApplyReply {
+        let result = validate::check(&candidate, "", &self.path);
+        for warning in &result.warnings {
+            eprintln!("warning: {warning}");
+        }
+        if !result.is_valid() {
+            return ApplyReply::Invalid {
+                message: result
+                    .errors
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            };
+        }
+        let (listeners, backends) =
+            match resolve_with(&candidate, base_dir(&self.path), &self.modes) {
+                Ok(resolved) => resolved,
+                Err(message) => {
+                    return ApplyReply::Invalid {
+                        message: format!("inconsistent configuration after validation: {message}"),
+                    };
+                }
+            };
+        if listeners.is_empty() {
+            return ApplyReply::Invalid {
+                message: "the configuration defines no listeners; nothing to serve".to_owned(),
+            };
+        }
+        let (reply, outcome) = tokio::sync::oneshot::channel();
+        if self
+            .reloads
+            .send(SwapRequest {
+                listeners,
+                reply: Some(reply),
+            })
+            .await
+            .is_err()
+        {
+            return ApplyReply::Rejected {
+                message: "the dataplane is not accepting swaps".to_owned(),
+            };
+        }
+        let outcome = match outcome.await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(message)) => return ApplyReply::Rejected { message },
+            Err(_) => {
+                return ApplyReply::Rejected {
+                    message: "the dataplane dropped the swap without an answer".to_owned(),
+                };
+            }
+        };
+        self.revision += 1;
+        let revision = format!("v{}", self.revision);
+        let view = admin_topology(&candidate, &outcome.listeners, backends, revision.clone());
+        *self
+            .topology
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = view;
+        self.config = candidate;
+        ApplyReply::Applied {
+            revision,
+            summary: outcome.summary.to_string(),
+            elapsed_ms: u64::try_from(outcome.elapsed.as_millis()).unwrap_or(u64::MAX),
+            listeners: outcome
+                .listeners
+                .into_iter()
+                .map(|(name, addr)| (name, addr.to_string()))
+                .collect(),
+        }
+    }
+}
+
 /// Resolves the validated config to the dataplane model: parsed
 /// addresses, shared backends (one [`Balancer`] per backend), PEM-loaded
 /// TLS and health checks. `base_dir` is the base of relative paths.
 fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, String> {
+    // One-off registry: the check paths (`config validate`, `plan`) only need
+    // the listeners, and no state can be declared there.
+    resolve_with(config, base_dir, &Arc::new(eqproxy_net::ServerModes::new()))
+        .map(|(listeners, _)| listeners)
+}
+
+/// [`resolve`] with a shared administration-state registry (ADR-0018): the
+/// same registry is handed to every balancer and to the admin plane, and the
+/// resolved backends come back for the admin's live view.
+fn resolve_with(
+    config: &Config,
+    base_dir: &Path,
+    modes: &Arc<eqproxy_net::ServerModes>,
+) -> Result<
+    (
+        Vec<ResolvedListener>,
+        Vec<Arc<eqproxy_net::ResolvedBackend>>,
+    ),
+    String,
+> {
     let maps = load_maps(config, base_dir)?;
     let mut backends: std::collections::BTreeMap<String, Arc<ResolvedBackend>> =
         std::collections::BTreeMap::new();
@@ -2001,10 +2293,11 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
             .map_err(|e| format!("backend.{name}.tls: {e}"))?;
             resolved = resolved.with_tls(tls);
         }
+        resolved = resolved.with_server_modes(Arc::clone(modes));
         backends.insert(name.clone(), Arc::new(resolved));
     }
 
-    config
+    let listeners = config
         .listener
         .iter()
         .map(|(name, listener)| {
@@ -2304,7 +2597,8 @@ fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, St
             resolved = resolved.with_quic(listener.quic);
             Ok(resolved)
         })
-        .collect()
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((listeners, backends.into_values().collect()))
 }
 
 fn tls_version(version: eqproxy_config::schema::TlsVersion) -> TlsVersion {
@@ -2353,8 +2647,11 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         return 1;
     }
 
-    let listeners = match resolve(&config, base_dir(&path)) {
-        Ok(listeners) => listeners,
+    // One registry for the whole process: the admin plane writes to it and
+    // every balancer (startup and each SIGHUP reload) reads it (ADR-0018).
+    let modes = Arc::new(eqproxy_net::ServerModes::new());
+    let (listeners, live_backends) = match resolve_with(&config, base_dir(&path), &modes) {
+        Ok(resolved) => resolved,
         Err(msg) => {
             eprintln!("error: inconsistent configuration after validation: {msg}");
             return 1;
@@ -2364,6 +2661,13 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         eprintln!("error: the configuration defines no listeners; nothing to serve");
         return 1;
     }
+    let admin_cfg = match resolve_admin(&config, base_dir(&path)) {
+        Ok(admin) => admin,
+        Err(msg) => {
+            eprintln!("error: {msg}");
+            return 1;
+        }
+    };
 
     let metrics = Arc::new(Metrics::default());
     let bound = match bind(listeners, Arc::clone(&metrics)).await {
@@ -2378,6 +2682,69 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
     }
 
     let (handle, signal) = shutdown::channel();
+    // One queue for every configuration mutation (ADR-0019): the admin API
+    // and SIGHUP both land here, so the revision check and the swap it
+    // authorizes are serialized in a single consumer.
+    let (apply_tx, apply_rx) = tokio::sync::mpsc::channel::<ApplyMessage>(8);
+    let topology = Arc::new(RwLock::new(admin_topology(
+        &config,
+        &bound.local_addrs(),
+        live_backends,
+        "v1".to_owned(),
+    )));
+    // Bind the admin plane only after the dataplane is open, and fail the
+    // process when it cannot open: a configured plane that silently downgrades
+    // is worse than not starting. Dropping `bound` on this path closes the
+    // dataplane sockets, so startup stays all-or-nothing.
+    let admin = match admin_cfg {
+        Some(cfg) => {
+            let writable = cfg.write_token.is_some();
+            let state = Arc::new(AdminState {
+                version: env!("CARGO_PKG_VERSION"),
+                started: std::time::Instant::now(),
+                topology: Arc::clone(&topology),
+                modes: Arc::clone(&modes),
+                metrics: Arc::clone(&metrics),
+                metrics_detailed: config.metrics.detailed,
+                // Without a write token the plane stays read-only; the sender
+                // exists so a later-generated token cannot be implied.
+                apply: writable.then(|| apply_tx.clone()),
+            });
+            match eqproxy_net::admin::bind(cfg, state).await {
+                Ok(handle) => {
+                    eprintln!(
+                        "INFO admin listening on {} (routes: /api/v1/status, /metrics{})",
+                        handle.local_addr(),
+                        if writable {
+                            ", PUT /api/v1/backends/{name}, PUT /api/v1/listeners/{name}"
+                        } else {
+                            " (read-only)"
+                        }
+                    );
+                    Some(handle)
+                }
+                Err(err) => {
+                    eprintln!("error: admin plane cannot bind: {err}");
+                    return 1;
+                }
+            }
+        }
+        None => None,
+    };
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(4);
+    let grace = config.shutdown_grace;
+    let applier = tokio::spawn(
+        ConfigApplier {
+            path: path.clone(),
+            config,
+            revision: 1,
+            modes: Arc::clone(&modes),
+            topology: Arc::clone(&topology),
+            reloads: reload_tx,
+            metrics: Arc::clone(&metrics),
+        }
+        .run(apply_rx, signal.clone()),
+    );
 
     // Metrics reporter: exits on the shutdown signal.
     let reporter_metrics = Arc::clone(&metrics);
@@ -2401,13 +2768,13 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         }
     });
 
-    // SIGHUP → hot config reload (S-CFG-01, unix): re-read the file, run
-    // the startup gate and send the resolved listeners to the dataplane.
-    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(4);
+    // SIGHUP → hot config reload (S-CFG-01, unix). The signal does not touch
+    // the dataplane directly: it asks the same single configuration task that
+    // serves the API, which re-reads the file, validates it and swaps (or
+    // rejects) as one serialized generation.
     #[cfg(unix)]
     {
-        let hup_path = path.clone();
-        let hup_metrics = Arc::clone(&metrics);
+        let hup_apply = apply_tx.clone();
         tokio::spawn(async move {
             let mut hup =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
@@ -2418,28 +2785,32 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
                     }
                 };
             while hup.recv().await.is_some() {
-                match reload_gate(&hup_path) {
-                    Ok(listeners) => {
-                        if reload_tx.send(listeners).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(msg) => {
-                        hup_metrics
-                            .config_reload_failures
-                            .fetch_add(1, Ordering::Relaxed);
-                        eprintln!("ERROR config reload rejected: {msg}");
-                    }
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                if hup_apply
+                    .send(ApplyMessage {
+                        change: ConfigChange::Reload,
+                        if_match: None,
+                        reply,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
                 }
+                // The task logs validation rejections; the swap outcome is
+                // logged by the dataplane when it commits or refuses.
+                let _ = answer.await;
             }
         });
     }
     #[cfg(not(unix))]
-    let _ = reload_tx;
+    let _ = apply_tx;
 
-    let serve_result = bound
-        .serve_with_reloads(signal, config.shutdown_grace, reload_rx)
-        .await;
+    let serve_result = bound.serve_with_reloads(signal, grace, reload_rx).await;
+    let _ = applier.await;
+    if let Some(admin) = admin {
+        admin.shutdown().await;
+    }
     let _ = reporter.await;
     eprintln!("METRICS {} (final)", metrics.snapshot());
     match serve_result {
@@ -2485,6 +2856,7 @@ mod tests {
             maps: BTreeMap::new(),
             shutdown_grace: Duration::from_secs(10),
             metrics: eqproxy_config::schema::MetricsConfig::default(),
+            admin: None,
         };
         let backend = Arc::new(ResolvedBackend::new(
             "api",

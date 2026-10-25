@@ -7,6 +7,8 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use serde::Serialize;
+
 /// Global counters of the traffic process.
 #[derive(Debug, Default)]
 pub struct Metrics {
@@ -133,7 +135,7 @@ pub struct Metrics {
 }
 
 /// Immutable snapshot of the counters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MetricsSnapshot {
     pub connections_accepted: u64,
     pub connections_rejected: u64,
@@ -186,6 +188,108 @@ pub struct MetricsSnapshot {
     pub compression_bytes_out: u64,
     pub h3_clean_closes: u64,
     pub h3_connection_errors: u64,
+}
+
+impl MetricsSnapshot {
+    /// Prometheus text exposition (v0.8, D6): bounded cardinality — every
+    /// series is a fixed name with no labels, so a scrape cannot grow the
+    /// index (CE4). Counters carry the `_total` suffix Prometheus expects;
+    /// `connections_active` and the last swap duration are gauges.
+    #[must_use]
+    pub fn prometheus(&self) -> String {
+        use std::fmt::Write as _;
+
+        let counters: &[(&str, u64)] = &[
+            ("connections_accepted", self.connections_accepted),
+            ("connections_rejected", self.connections_rejected),
+            ("connections_completed", self.connections_completed),
+            ("connect_failures", self.connect_failures),
+            ("idle_timeouts", self.idle_timeouts),
+            ("bytes_client_to_backend", self.bytes_client_to_backend),
+            ("bytes_backend_to_client", self.bytes_backend_to_client),
+            ("http_requests_proxied", self.http_requests_proxied),
+            ("http_requests_rejected", self.http_requests_rejected),
+            ("rate_limited", self.rate_limited),
+            ("auth_denied", self.auth_denied),
+            ("auth_service_errors", self.auth_service_errors),
+            ("header_timeouts", self.header_timeouts),
+            ("tls_handshake_failures", self.tls_handshake_failures),
+            ("no_available_server", self.no_available_server),
+            (
+                "backend_connections_reused",
+                self.backend_connections_reused,
+            ),
+            (
+                "backend_connections_opened",
+                self.backend_connections_opened,
+            ),
+            (
+                "backend_connections_discarded",
+                self.backend_connections_discarded,
+            ),
+            ("config_reloads", self.config_reloads),
+            ("config_reload_failures", self.config_reload_failures),
+            ("queue_full", self.queue_full),
+            ("queue_timeout", self.queue_timeout),
+            ("retry_attempts", self.retry_attempts),
+            ("proxy_protocol_denied", self.proxy_protocol_denied),
+            ("proxy_protocol_invalid", self.proxy_protocol_invalid),
+            ("local_responses_served", self.local_responses_served),
+            ("redirects_served", self.redirects_served),
+            ("direct_responses_served", self.direct_responses_served),
+            ("dns_resolutions", self.dns_resolutions_ok),
+            ("dns_resolution_failures", self.dns_resolution_failures),
+            ("dns_address_updates", self.dns_address_updates),
+            ("map_reloads", self.map_reloads),
+            ("map_reload_failures", self.map_reload_failures),
+            ("requests_mirrored", self.requests_mirrored),
+            ("mirror_failures", self.mirror_failures),
+            ("mirror_skipped", self.mirror_skipped),
+            ("h2_sessions_idle_closed", self.h2_sessions_idle_closed),
+            ("h2_goaway_received", self.h2_goaway_received),
+            ("h2_refused_retried", self.h2_refused_retried),
+            ("grpc_streams", self.grpc_streams),
+            ("grpc_stream_errors", self.grpc_stream_errors),
+            ("ws_tunnels", self.ws_tunnels),
+            ("ws_failures", self.ws_failures),
+            (
+                "compression_gzip_responses",
+                self.compression_gzip_responses,
+            ),
+            (
+                "compression_brotli_responses",
+                self.compression_brotli_responses,
+            ),
+            ("compression_bytes_in", self.compression_bytes_in),
+            ("compression_bytes_out", self.compression_bytes_out),
+            ("h3_clean_closes", self.h3_clean_closes),
+            ("h3_connection_errors", self.h3_connection_errors),
+        ];
+        let mut out = String::with_capacity(4096);
+        for (name, value) in counters {
+            let _ = writeln!(out, "# TYPE eqproxy_{name}_total counter");
+            let _ = writeln!(out, "eqproxy_{name}_total {value}");
+        }
+        let _ = writeln!(out, "# TYPE eqproxy_connections_active gauge");
+        let _ = writeln!(
+            out,
+            "eqproxy_connections_active {}",
+            self.connections_active
+        );
+        let _ = writeln!(out, "# TYPE eqproxy_config_reload_last_swap_seconds gauge");
+        let _ = writeln!(
+            out,
+            "eqproxy_config_reload_last_swap_seconds {:.6}",
+            self.config_reload_duration_us as f64 / 1_000_000.0
+        );
+        let _ = writeln!(out, "# TYPE eqproxy_build_info gauge");
+        let _ = writeln!(
+            out,
+            "eqproxy_build_info{{version=\"{}\"}} 1",
+            env!("CARGO_PKG_VERSION")
+        );
+        out
+    }
 }
 
 impl Metrics {

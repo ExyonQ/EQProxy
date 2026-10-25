@@ -4,6 +4,17 @@
   "description": "Full EQProxy configuration.",
   "type": "object",
   "properties": {
+    "admin": {
+      "description": "Administration plane (v0.8): read-only API and metrics. Absent = off.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AdminConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "backend": {
       "description": "Backends defined by name.",
       "type": "object",
@@ -46,6 +57,57 @@
     "schema_version"
   ],
   "$defs": {
+    "AdminConfig": {
+      "description": "Administration plane (v0.8, D6): read-only API and metrics on its own\nlistener, never on the proxy's public address (SPEC §9). Absent = off.",
+      "type": "object",
+      "properties": {
+        "allow_remote": {
+          "description": "Allow binding a non-loopback address (default false): the admin\nplane has no TLS in this slice, so a remote bind sends the bearer\ntoken in the clear.",
+          "type": "boolean",
+          "default": false
+        },
+        "listen": {
+          "description": "Listen `IP:PORT` for the admin plane. Loopback unless `allow_remote`.",
+          "type": "string"
+        },
+        "token": {
+          "description": "Bearer token required on every request. Prefer [`token_file`](Self::token_file):\na token in the TOML travels wherever the file is copied.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "token_file": {
+          "description": "File holding the bearer token (one trailing newline trimmed).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "write_token": {
+          "description": "Bearer token that may **write** (ADR-0018): `PUT` on the server-state\nroute. Absent = the whole plane stays read-only. Must differ from\n[`token`](Self::token): one secret per privilege level.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "write_token_file": {
+          "description": "File holding the write token (one trailing newline trimmed).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "listen"
+      ]
+    },
     "AffinityConfig": {
       "description": "Session affinity of a backend (B-H8/B-N13/B-I8).",
       "type": "object",

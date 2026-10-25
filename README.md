@@ -29,7 +29,7 @@ diagnostics, configuration, administration, extensibility and security.
 > by SNI (exact name, then wildcard, then the listener default), and the `eqproxy`
 > CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
 > `schema` — the public JSON Schema for editor completion, `diff`, `plan`,
-> offline `apply`/`rollback`, `doctor`), with **424 tests**
+> offline `apply`/`rollback`, `doctor`), with **460 tests**
 > green plus two Docker-gated harnesses (evidence from the v0.6 gate, not
 > re-run for v0.7.0):
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against

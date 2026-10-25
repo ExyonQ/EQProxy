@@ -10,6 +10,9 @@ description = "EQProxy dataplane: listeners, connections and bounded TCP proxy"
 eqproxy-core = { path = "../eqproxy-core", version = "0.7.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
+# Admin plane (v0.8): status JSON and Prometheus text.
+serde = { workspace = true }
+serde_json = { workspace = true }
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pki-types = "1"

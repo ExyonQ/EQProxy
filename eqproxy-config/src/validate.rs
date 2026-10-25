@@ -13,7 +13,8 @@ use crate::find_line;
 use crate::schema::{
     Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_AUTH_USERS,
     MAX_LOCAL_RESPONSE_BYTES, MAX_MAP_RELOAD_INTERVAL, MAX_QUEUE, MAX_RETRIES, MAX_RULES,
-    MAX_SECTIONS, MAX_SERVER_WEIGHT, MAX_SPLIT_TARGETS, MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
+    MAX_SECTIONS, MAX_SERVER_WEIGHT, MAX_SPLIT_TARGETS, MIN_ADMIN_TOKEN_BYTES,
+    MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
 };
 
 /// Result of validating a full configuration.
@@ -90,6 +91,149 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             "shutdown_grace = \"10s\"".to_owned(),
             "shutdown_grace",
         );
+    }
+
+    // Administration plane (v0.8, D6): loopback by default, a real secret,
+    // and never the public listener's address. SPEC §9 requires the strict
+    // separation between public and administration, so none of this is a
+    // warning: a config that would expose the plane is rejected.
+    if let Some(admin) = &config.admin {
+        let section = "[admin]";
+        match admin.listen.parse::<SocketAddr>() {
+            Ok(addr) => {
+                if !addr.ip().is_loopback() && !admin.allow_remote {
+                    err(
+                        "admin.listen".to_owned(),
+                        format!(
+                            "{} is not a loopback address; this slice has no TLS and would send the bearer token in the clear",
+                            admin.listen
+                        ),
+                        "listen = \"127.0.0.1:9001\" (or allow_remote = true deliberately)"
+                            .to_owned(),
+                        section,
+                    );
+                }
+                // Port 0 asks the kernel for a free port, so two `:0` binds
+                // cannot collide (each gets its own ephemeral port); only a
+                // concrete port is a real overlap.
+                let shared = addr.port() != 0
+                    && config.listener.values().any(|listener| {
+                        listener
+                            .listen
+                            .parse::<SocketAddr>()
+                            .is_ok_and(|public| public == addr)
+                    });
+                if shared {
+                    err(
+                        "admin.listen".to_owned(),
+                        format!("{} is also a [listener.*] address", admin.listen),
+                        "give the admin plane its own port, never the public one".to_owned(),
+                        section,
+                    );
+                }
+            }
+            Err(_) => err(
+                "admin.listen".to_owned(),
+                format!("\"{}\" is not an IP:PORT address", admin.listen),
+                "listen = \"127.0.0.1:9001\"".to_owned(),
+                section,
+            ),
+        }
+        match (&admin.token, &admin.token_file) {
+            (Some(_), Some(_)) | (None, None) => err(
+                "admin.token".to_owned(),
+                "set exactly one of token or token_file".to_owned(),
+                "token_file = \"/etc/eqproxy/admin.token\"".to_owned(),
+                section,
+            ),
+            (Some(token), None) => {
+                if token.trim() != token {
+                    err(
+                        "admin.token".to_owned(),
+                        "token has leading or trailing whitespace".to_owned(),
+                        "token = \"...\" with no surrounding spaces".to_owned(),
+                        section,
+                    );
+                } else if token.len() < MIN_ADMIN_TOKEN_BYTES {
+                    err(
+                        "admin.token".to_owned(),
+                        format!(
+                            "token is {} bytes; use at least {MIN_ADMIN_TOKEN_BYTES}",
+                            token.len()
+                        ),
+                        "openssl rand -hex 32 > admin.token and use token_file".to_owned(),
+                        section,
+                    );
+                }
+            }
+            (None, Some(path)) => {
+                if path.as_os_str().is_empty() {
+                    err(
+                        "admin.token_file".to_owned(),
+                        "token_file is empty".to_owned(),
+                        "token_file = \"/etc/eqproxy/admin.token\"".to_owned(),
+                        section,
+                    );
+                }
+            }
+        }
+        // Write privilege (v0.8, ADR-0018): its own secret, never the read
+        // one. Absent = the plane stays read-only, which is the default.
+        match (&admin.write_token, &admin.write_token_file) {
+            (Some(_), Some(_)) => err(
+                "admin.write_token".to_owned(),
+                "set exactly one of write_token or write_token_file".to_owned(),
+                "write_token_file = \"/etc/eqproxy/admin-write.token\"".to_owned(),
+                section,
+            ),
+            // No write secret: every write is refused (`403 write_disabled`).
+            (None, None) => {}
+            (Some(token), None) => {
+                if token.trim() != token {
+                    err(
+                        "admin.write_token".to_owned(),
+                        "token has leading or trailing whitespace".to_owned(),
+                        "write_token = \"...\" with no surrounding spaces".to_owned(),
+                        section,
+                    );
+                } else if token.len() < MIN_ADMIN_TOKEN_BYTES {
+                    err(
+                        "admin.write_token".to_owned(),
+                        format!(
+                            "token is {} bytes; use at least {MIN_ADMIN_TOKEN_BYTES}",
+                            token.len()
+                        ),
+                        "openssl rand -hex 32 > admin-write.token and use write_token_file"
+                            .to_owned(),
+                        section,
+                    );
+                } else if admin.token.as_deref().is_some_and(|read| read == token) {
+                    err(
+                        "admin.write_token".to_owned(),
+                        "the write token equals the read token: one secret per privilege level"
+                            .to_owned(),
+                        "use a different secret with `openssl rand -hex 32`".to_owned(),
+                        section,
+                    );
+                }
+            }
+            (None, Some(path)) => {
+                if path.as_os_str().is_empty() {
+                    err(
+                        "admin.write_token_file".to_owned(),
+                        "write_token_file is empty".to_owned(),
+                        "write_token_file = \"/etc/eqproxy/admin-write.token\"".to_owned(),
+                        section,
+                    );
+                }
+            }
+        }
+        if admin.allow_remote {
+            result.warnings.push(
+                "admin.allow_remote = true: the admin plane listens beyond loopback and this slice has no TLS; the bearer token travels in the clear"
+                    .to_owned(),
+            );
+        }
     }
 
     // Data maps (C10/PP-02): one source per map, bounded data, sane
@@ -1460,6 +1604,7 @@ mod tests {
             maps: BTreeMap::new(),
             shutdown_grace: Duration::from_secs(10),
             metrics: crate::schema::MetricsConfig::default(),
+            admin: None,
         };
         for i in 0..backends {
             config.backend.insert(
@@ -2595,6 +2740,131 @@ server = "127.0.0.1:9000"
             valid.errors.is_empty(),
             "a TLS + http listener must accept quic: {:?}",
             valid.errors
+        );
+    }
+
+    /// Administration plane (v0.8): loopback by default, one real secret,
+    /// and never the public listener's address.
+    #[test]
+    fn admin_plane_is_loopback_with_one_secret() {
+        let base = "schema_version = 1\n\
+                    [listener.web]\n\
+                    listen = \"127.0.0.1:8080\"\n\
+                    backend = \"api\"\n\
+                    [backend.api]\n\
+                    server = \"127.0.0.1:9000\"\n";
+        let ok = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(ok.errors.is_empty(), "{:?}", ok.errors);
+
+        let remote = check_source(&format!(
+            "{base}[admin]\nlisten = \"0.0.0.0:9001\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(
+            remote
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.listen")),
+            "a non-loopback bind without allow_remote must be rejected: {:?}",
+            remote.errors
+        );
+
+        let allowed = check_source(&format!(
+            "{base}[admin]\nlisten = \"0.0.0.0:9001\"\ntoken = \"0123456789abcdef\"\nallow_remote = true\n"
+        ));
+        assert!(allowed.errors.is_empty(), "{:?}", allowed.errors);
+        assert!(
+            allowed.warnings.iter().any(|w| w.contains("allow_remote")),
+            "a remote bind must warn that the token travels in the clear"
+        );
+
+        let short = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"short\"\n"
+        ));
+        assert!(short.errors.iter().any(|e| e.cause.contains("at least")));
+
+        let both = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\ntoken_file = \"admin.token\"\n"
+        ));
+        assert!(both.errors.iter().any(|e| e.cause.contains("exactly one")));
+
+        let shared = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:8080\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(
+            shared
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("also a [listener.*] address"))
+        );
+
+        let malformed = check_source(&format!(
+            "{base}[admin]\nlisten = \"localhost\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(
+            malformed
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("not an IP:PORT"))
+        );
+
+        // Ephemeral binds (`:0`) never collide: the kernel hands each one a
+        // different port, so this is a valid configuration (used by tests
+        // and by a supervisor that does not care about the number).
+        let ephemeral = check_source(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             [backend.api]\n\
+             server = \"127.0.0.1:9000\"\n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             token = \"0123456789abcdef\"\n",
+        );
+        assert!(
+            ephemeral.errors.is_empty(),
+            "two ephemeral binds are not a collision: {:?}",
+            ephemeral.errors
+        );
+
+        // Write privilege (ADR-0018): optional, its own distinct secret.
+        let writable = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\nwrite_token = \"fedcba9876543210\"\n"
+        ));
+        assert!(writable.errors.is_empty(), "{:?}", writable.errors);
+
+        let same = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\nwrite_token = \"0123456789abcdef\"\n"
+        ));
+        assert!(
+            same.errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.write_token")
+                    && e.cause.contains("equals the read token")),
+            "privilege levels must not share a secret: {:?}",
+            same.errors
+        );
+
+        let two_write_sources = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\nwrite_token = \"fedcba9876543210\"\nwrite_token_file = \"admin-write.token\"\n"
+        ));
+        assert!(
+            two_write_sources
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("exactly one"))
+        );
+
+        let short_write = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\nwrite_token = \"short\"\n"
+        ));
+        assert!(
+            short_write
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("at least"))
         );
     }
 }

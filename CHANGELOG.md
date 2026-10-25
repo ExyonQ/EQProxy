@@ -5,6 +5,64 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ## [Unreleased]
 
+### Added
+
+- **Read-only administration plane (v0.8 slice 1, D6/B-H12/B-N14/B-I14/B-E8;
+  ADR-0017).** An optional `[admin]` table opens a listener of its own, with a
+  bearer token from `token` or `token_file` (at least 16 bytes, constant-time
+  comparison, never echoed). It serves `GET /api/v1/status` (version, uptime,
+  the validated listeners/backends/servers and the live counters as JSON) and
+  `GET /metrics` (Prometheus text with a fixed series set — the only label is
+  the build version, so a scrape cannot grow the index). Every route requires
+  the token (401 with `WWW-Authenticate` otherwise), only `GET` is served
+  (405 + `Allow: GET`), unknown routes are 404, heads over 8 KiB are 431 and
+  an exchange has 5 s. The plane is a separate socket and task: the dataplane
+  keeps serving with it dead (E2E test aborts it mid-run), and a configured
+  plane that cannot bind fails startup. Validation keeps the plane on loopback
+  unless `allow_remote = true` (this slice has no TLS there), refuses a
+  concrete port already used by a `[listener.*]` (two `:0` binds are not a
+  collision: the kernel picks distinct ports) and requires exactly one secret.
+  `eqproxy config schema` exports the new keys; `eqproxy.toml.example`
+  documents them. Writes, RBAC, auditing and the panel UI remain pending.
+
+- **Per-server drain over the admin plane (v0.8 slice 2, B-H12/B-E8/H3;
+  ADR-0018).** `PUT /api/v1/backends/{backend}/servers/{target}/state` with
+  `{"state":"ready"|"drain"}` takes a server out of selection without
+  touching its in-flight exchanges, and `ready` returns it. The write needs
+  its own `write_token`/`write_token_file`, distinct from the read token; with
+  no write secret every write is `403 write_disabled`, and the read role gets
+  `403 forbidden`. The request must be JSON, at most 1 KiB, declare its
+  length, and carry no `Origin` (a browser never belongs on the plane); each
+  attempt writes one `AUDIT` JSON line (role, peer, outcome, `from`/`to`,
+  never the secret). `GET /api/v1/status` now reports per server the
+  configured target, the resolved address, weight, `state`, `healthy` and
+  `active`, so a drain is observable (H3). The state registry is shared by
+  every balancer and survives `SIGHUP`; with every server drained the proxy
+  answers the existing explicit `503` and counts `no_available_server`. With
+  `maintenance`, idle-pool closure, a durable audit sink and live topology
+  still pending (ADR-0018).
+
+- **Hot backend and listener configuration through the API (v0.8 slice 3,
+  B-E1/H2/CE2; ADR-0019).** `PUT /api/v1/backends/{name}` and
+  `PUT /api/v1/listeners/{name}` take that TOML table — bare body or the full
+  section copied from the file — (`application/toml`, declared length up to
+  64 KiB, `Origin` refused, write role), create the name when absent and
+  replace the table otherwise. The
+  status answer now carries a `revision` and the same value as `ETag`; every
+  write is conditional: missing `If-Match` is `428`, a stale one is `412`
+  with the current revision. One configuration task serializes API writes
+  and `SIGHUP`, validates and resolves the **whole** document first (missing
+  certificates or maps, unknown backends, invalid tables are `400` and never
+  reach the dataplane), and answers `200` only after the swap commits; a bind
+  conflict or a frozen QUIC endpoint is `409` and leaves the old generation
+  serving. A listener kept by name and address keeps its socket, so four
+  concurrent clients proxied across a backend change, a backend creation and
+  a listener repoint with **zero failed requests** in the E2E (real binary,
+  real origins), each generation observed in the responses. Runtime changes
+  are not written to the file: the next `SIGHUP` re-reads the baseline and
+  replaces them (asserted in the same test). `DELETE`, persistence, drift and
+  RBAC beyond the two tokens remain pending.
+
 ### Changed
 
 - **The Docker Hub page is published by CI, not edited on the website.**

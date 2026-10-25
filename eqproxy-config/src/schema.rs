@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -36,6 +37,10 @@ pub const MAX_AUTH_USERS: usize = 1024;
 
 /// Maximum `retries` per backend (B-H7).
 pub const MAX_RETRIES: u32 = 5;
+
+/// Minimum bearer-token length of the admin plane (v0.8): a short token is
+/// brute-forceable by anyone who can reach the port.
+pub const MIN_ADMIN_TOKEN_BYTES: usize = 16;
 
 fn default_maxconn() -> u32 {
     1024
@@ -401,6 +406,35 @@ pub struct MetricsConfig {
     /// Per-server counters (bounded by [`MAX_SECTIONS`]).
     #[serde(default)]
     pub detailed: bool,
+}
+
+/// Administration plane (v0.8, D6): read-only API and metrics on its own
+/// listener, never on the proxy's public address (SPEC §9). Absent = off.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AdminConfig {
+    /// Listen `IP:PORT` for the admin plane. Loopback unless `allow_remote`.
+    pub listen: String,
+    /// Bearer token required on every request. Prefer [`token_file`](Self::token_file):
+    /// a token in the TOML travels wherever the file is copied.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// File holding the bearer token (one trailing newline trimmed).
+    #[serde(default)]
+    pub token_file: Option<PathBuf>,
+    /// Bearer token that may **write** (ADR-0018): `PUT` on the server-state
+    /// route. Absent = the whole plane stays read-only. Must differ from
+    /// [`token`](Self::token): one secret per privilege level.
+    #[serde(default)]
+    pub write_token: Option<String>,
+    /// File holding the write token (one trailing newline trimmed).
+    #[serde(default)]
+    pub write_token_file: Option<PathBuf>,
+    /// Allow binding a non-loopback address (default false): the admin
+    /// plane has no TLS in this slice, so a remote bind sends the bearer
+    /// token in the clear.
+    #[serde(default)]
+    pub allow_remote: bool,
 }
 
 /// One header condition of a routing rule (exactly one of `exact`,
@@ -806,6 +840,9 @@ pub struct Config {
     /// Metrics options (D1/D5): detailed counters are opt-in (CE4).
     #[serde(default)]
     pub metrics: MetricsConfig,
+    /// Administration plane (v0.8): read-only API and metrics. Absent = off.
+    #[serde(default)]
+    pub admin: Option<AdminConfig>,
 }
 
 /// A frontend: where to listen and which backend to send to.

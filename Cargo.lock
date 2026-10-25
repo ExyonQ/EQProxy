@@ -334,6 +334,7 @@ dependencies = [
  "base64",
  "md-5",
  "regex",
+ "serde",
  "tokio",
 ]
 
@@ -353,6 +354,8 @@ dependencies = [
  "quinn",
  "rustls",
  "rustls-pki-types",
+ "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tokio-rustls",

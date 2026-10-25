@@ -16,7 +16,7 @@ use tokio::task::JoinHandle;
 
 use eqproxy_core::{Metrics, shutdown};
 use eqproxy_net::tls::{self, SniCertPem, TlsVersion};
-use eqproxy_net::{BoundProxy, ProxyMode, ResolvedBackend, ResolvedListener, bind};
+use eqproxy_net::{BoundProxy, ProxyMode, ResolvedBackend, ResolvedListener, SwapRequest, bind};
 
 const WAIT: Duration = Duration::from_secs(5);
 const CERT: &[u8] = include_bytes!("fixtures/cert.pem");
@@ -329,7 +329,10 @@ async fn sni_set_swaps_in_hot_with_the_certificate_reload() {
 
     // Reload: the same name now answers with the beta certificate.
     let second = listener_with(backend, &["alpha.example.test"], BETA, BETA_KEY);
-    reload_tx.send(vec![second]).await.expect("send reload");
+    reload_tx
+        .send(SwapRequest::plain(vec![second]))
+        .await
+        .expect("send reload");
     let deadline = tokio::time::Instant::now() + WAIT;
     while metrics.snapshot().config_reloads == 0 {
         assert!(
