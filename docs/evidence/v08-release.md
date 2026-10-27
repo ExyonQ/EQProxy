@@ -155,14 +155,80 @@ TOMLs the run used are next to them.
   `USER 65532`; the panel's TLS story on the admin plane is out of scope
   (ADR-0017).
 
-## Publication checklist
+## Publication run — 2026-10-27
 
-Done in the tree: workspace `0.8.0` in [Cargo.toml](../../Cargo.toml), the four
-crate pins and [Cargo.lock](../../Cargo.lock); the CHANGELOG section
-`## [v0.8.0] — 2026-10-27`; the README status/install references
-([README.md](../../README.md)).
+The tree was committed as `b550e33`, tagged `v0.8.0` (annotated, Doken) and
+pushed at 13:33Z. [`release.yml`](../../.github/workflows/release.yml) run
+[40513029637](https://github.com/ExyonQ/EQProxy/actions/runs/40513029637)
+finished **success** in 2 h 03 m (13:33:18Z → 15:36:23Z) with all six jobs
+green: `guard`, `darwin`, `linux`, `image`, `release`, `Docker Hub page`.
 
-Remaining, and deliberately not done here: commit the release tree, create
-the annotated `v0.8.0` tag and push it, let `release.yml` build the candidate,
-pass Scout on the published digests, promote, publish the release and then
-re-pull and exercise the published artifacts.
+### Gate on the pushed artifact (not a local image)
+
+| What | Result |
+|---|---|
+| Candidate index | `ghcr.io/exyonq/eqproxy:0.8.0-candidate@sha256:f3bf57b3…48a0` |
+| Scout `linux/amd64` | **0C 0H 0M 0L**, 69 packages, "no vulnerable packages detected", exit 0 |
+| Scout `linux/arm64` | same result, from the same attestation SBOM |
+| Scout CLI / base | 1.25.0 (the workflow pin) / `wolfi-base` `360896efb075` |
+| Image E2E on the candidate | `--version`, `validate` (h2 ALPN accepted, h3-on-TCP rejected), `config apply`, live traffic — both architectures |
+| Promotion | tags `0.8.0` **and** `latest` → the scanned index, GHCR and Docker Hub |
+
+Read back after the promotion with `imagetools inspect`: the index
+`sha256:f3bf57b3…48a0` is what both registries serve for `0.8.0` and `latest`,
+with per-architecture manifests amd64 `sha256:8e977cbc…32d2` and arm64
+`sha256:c7b59632…56d7` — the same two manifests CI had re-pulled and
+exercised from both registries.
+
+### Release assets
+
+`eqproxy-darwin-amd64|arm64`, `eqproxy-linux-amd64|arm64`, the source
+tarball, four CycloneDX SBOMs, the two Scout reports and `SHA256SUMS.txt`,
+published (not draft, not prerelease) at 15:35:59Z.
+
+## Post-publication verification (maintainer machine, macOS 26.5.1 arm64)
+
+Independent of CI, against the **published** artifacts:
+
+```console
+$ shasum -a 256 eqproxy-darwin-arm64 eqproxy-linux-amd64
+77ef032a40e3f9beef6e73d5c5ceb1cc4ae0ed6291506eae795d46f4fd8879f7  eqproxy-darwin-arm64   # == SHA256SUMS.txt
+befca49ccf4e8421d063d9393024fc945a397e93c36944cee426aca5c2b12fa1  eqproxy-linux-amd64    # == SHA256SUMS.txt
+$ ./eqproxy-darwin-arm64 --version
+eqproxy 0.8.0
+```
+
+- **Binary journey** against the published darwin binary
+  ([transcript](v08-release/raw/binary-published-20261027T164405Z/journey.txt),
+  harness in `scripts/evidence/v08-release/journey-published.sh`, local-only):
+  `config validate`, live traffic reaching both origins,
+  `PUT /api/v1/backends/api/servers/…/state` with `{"state":"drain"}` → 200,
+  status reporting `drain`, **10/10** requests to the surviving origin, back to
+  `ready` and traffic to both again, plus the `AUDIT` line for the admin write —
+  9 `PASS`, `ALL PASS`, exit 0. A first
+  attempt reused one secret as `token` and `write_token`; the product refused
+  it ("one secret per privilege level") and the harness was fixed — the
+  refusal is the documented boundary, not a bug.
+- **Container E2E against the published Docker Hub tag**
+  ([`container-e2e.sh`](../../scripts/evidence/v08-release/container-e2e.sh)):
+  **20 PASS / 0 FAIL** on `linux/arm64` (`push-20261027T154430Z`, transcript in
+  [raw/push-20261027T154430Z](v08-release/raw/push-20261027T154430Z/)) and
+  **20 PASS / 0 FAIL** on `linux/amd64` (`push-amd-20261027T154441Z`, same
+  directory layout). Both runs cover `--version`, `config validate`, live
+  traffic through two nginx origins, the admin status, the panel login and
+  drain, and the return to `ready`.
+- **Scout on the published tag**: `docker scout cves --only-severity
+  critical,high --exit-code --platform linux/{amd64,arm64}
+  exyonq/eqproxy:0.8.0` → exit 0 on both, "No vulnerable packages detected".
+- **Source tarball**: 2242 entries, none under `ROADMAP EQPROXY/`,
+  `SERVIDORES.md`, `.dockerignore` or `scripts/`.
+
+### What remains unverified after publication
+
+- The **differential corpus** against HAProxy/nginx and the benchmark pages
+  are separate campaigns; publishing the image does not re-run them.
+- Protocol matrix beyond HTTP/1.1 live traffic (h2/h3/gRPC/WS) has its own
+  pages and its own evidence; the container runs here prove the image, not the
+  protocol matrix.
+- CodeGraph was **not re-indexed** after the docs-only commits that closed the
+  increment: the Rust structure is unchanged, and an index is not a test run.

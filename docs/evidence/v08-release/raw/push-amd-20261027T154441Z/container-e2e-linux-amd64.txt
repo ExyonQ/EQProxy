@@ -1,0 +1,53 @@
+image:    exyonq/eqproxy:0.8.0
+platform: linux/amd64
+version:  0.8.0
+run:      push-amd-20261027T154441Z
+
+$ docker run --rm --platform linux/amd64 exyonq/eqproxy:0.8.0 --version
+Unable to find image 'exyonq/eqproxy:0.8.0' locally
+0.8.0: Pulling from exyonq/eqproxy
+44136fa355b3: Already exists
+55224d6d3a53: Pulling fs layer
+c42a004edf02: Pulling fs layer
+c42a004edf02: Already exists
+c42a004edf02: Pull complete
+db7e9b0844be: Download complete
+11a19d428404: Download complete
+55224d6d3a53: Download complete
+55224d6d3a53: Pull complete
+Digest: sha256:f3bf57b32682d6d710f56befb5cf9648bf72c8c3a5fbc8a1bd0a691f928c48a0
+Status: Image is up to date for exyonq/eqproxy:0.8.0
+eqproxy 0.8.0
+PASS the image reports eqproxy 0.8.0
+$ printf <valid config> | docker run --rm -i --platform linux/amd64 exyonq/eqproxy:0.8.0 config validate --config /dev/stdin
+config OK: 1 listener(s), 1 backend(s) in /dev/stdin
+PASS config validate accepts the document
+PASS the proxy answers live traffic over HTTP: 200
+PASS the backend nginx page came through the proxy
+PASS the exchange really reached an HTTP backend
+PASS the admin plane answers /api/v1/status with the read token: 200
+PASS status lists 10.88.0.10:80 ready
+PASS status lists 10.88.0.11:80 ready
+status: revision=v1 servers=10.88.0.10:80=ready,10.88.0.11:80=ready
+PASS an anonymous /panel answers the login page: 200
+PASS the login page is the panel, not the API
+PASS the panel login exchanges the token for a session: 303
+PASS the session cookie is HttpOnly
+PASS the session cookie is SameSite=Strict
+PASS the session cookie is scoped to /panel
+PASS the write session reads the dashboard: 200
+PASS the dashboard lists the container servers
+PASS the write token drains a container backend: 200
+PASS status publishes the drain of 10.88.0.10:80: drain
+PASS the dataplane keeps serving from the remaining backend: 10
+PASS the write token returns the drained backend: 200
+
+--- container log (linux/amd64) ---
+INFO listener web listening on 0.0.0.0:18082
+INFO admin listening on 0.0.0.0:19090 (routes: /api/v1/status, /metrics, PUT /api/v1/backends/{name}, PUT /api/v1/listeners/{name}, PUT /api/v1/backends/{backend}/servers/{target}/state, POST /api/v1/certificates/reload, panel /panel)
+AUDIT {"event":"admin_write","ts_unix":1793115895,"remote":"192.168.65.1:46101","role":"operate","method":"POST","path":"/panel/login","status":303,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793115895,"remote":"192.168.65.1:38873","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/10.88.0.10:80/state","status":200,"backend":"api","server":"10.88.0.10:80","from":"ready","to":"drain"}
+AUDIT {"event":"admin_write","ts_unix":1793115895,"remote":"192.168.65.1:41229","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/10.88.0.10:80/state","status":200,"backend":"api","server":"10.88.0.10:80","from":"drain","to":"ready"}
+
+container E2E linux/amd64: 20 PASS, 0 FAIL
+ALL PASS

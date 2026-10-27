@@ -1,0 +1,29 @@
+binary: eqproxy 0.8.0 sha256 77ef032a40e3f9beef6e73d5c5ceb1cc4ae0ed6291506eae795d46f4fd8879f7
+ports: dataplane 61629 admin 61632 origins a=61625 b=61628
+PASS the published binary validates the journey config
+PASS live traffic reaches origin a
+PASS live traffic reaches origin b
+PASS PUT drain on origin a answers 200
+PASS status reports origin a as drain
+PASS 10/10 requests after the drain go to origin b
+PASS PUT ready puts origin a back in rotation
+PASS origin a serves traffic again
+./journey.sh: line 123: 69024 Terminated: 15          "$BIN" run --config "$WORK/eqproxy.toml" > "$WORK/proxy.log" 2>&1
+PASS the proxy logged its audited admin write
+ALL PASS
+./journey.sh: line 42: 69016 Terminated: 15          python3 - "$1" "$2" > "$WORK/be-$2.log" 2>&1  <<'PY'
+import socket, sys
+port, label = int(sys.argv[1]), sys.argv[2].encode()
+body = b"origin-" + label + b"\n"
+resp = (b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode()
+        + b"\r\nConnection: close\r\n\r\n" + body)
+s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(("127.0.0.1", port)); s.listen(64)
+while True:
+    c, _ = s.accept()
+    try:
+        c.recv(65536); c.sendall(resp)
+    finally:
+        c.close()
+PY
+

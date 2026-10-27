@@ -1,0 +1,10 @@
+schema_version = 1
+[listener.web]
+listen = "0.0.0.0:18082"
+mode = "http"
+backend = "api"
+[backend.api]
+servers = [
+  { addr = "10.89.0.10:80" },
+  { addr = "10.89.0.11:80" },
+]

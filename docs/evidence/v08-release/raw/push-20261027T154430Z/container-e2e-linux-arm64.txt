@@ -1,0 +1,40 @@
+image:    exyonq/eqproxy:0.8.0
+platform: linux/arm64
+version:  0.8.0
+run:      push-20261027T154430Z
+
+$ docker run --rm --platform linux/arm64 exyonq/eqproxy:0.8.0 --version
+eqproxy 0.8.0
+PASS the image reports eqproxy 0.8.0
+$ printf <valid config> | docker run --rm -i --platform linux/arm64 exyonq/eqproxy:0.8.0 config validate --config /dev/stdin
+config OK: 1 listener(s), 1 backend(s) in /dev/stdin
+PASS config validate accepts the document
+PASS the proxy answers live traffic over HTTP: 200
+PASS the backend nginx page came through the proxy
+PASS the exchange really reached an HTTP backend
+PASS the admin plane answers /api/v1/status with the read token: 200
+PASS status lists 10.89.0.10:80 ready
+PASS status lists 10.89.0.11:80 ready
+status: revision=v1 servers=10.89.0.10:80=ready,10.89.0.11:80=ready
+PASS an anonymous /panel answers the login page: 200
+PASS the login page is the panel, not the API
+PASS the panel login exchanges the token for a session: 303
+PASS the session cookie is HttpOnly
+PASS the session cookie is SameSite=Strict
+PASS the session cookie is scoped to /panel
+PASS the write session reads the dashboard: 200
+PASS the dashboard lists the container servers
+PASS the write token drains a container backend: 200
+PASS status publishes the drain of 10.89.0.10:80: drain
+PASS the dataplane keeps serving from the remaining backend: 10
+PASS the write token returns the drained backend: 200
+
+--- container log (linux/arm64) ---
+INFO listener web listening on 0.0.0.0:18082
+INFO admin listening on 0.0.0.0:19090 (routes: /api/v1/status, /metrics, PUT /api/v1/backends/{name}, PUT /api/v1/listeners/{name}, PUT /api/v1/backends/{backend}/servers/{target}/state, POST /api/v1/certificates/reload, panel /panel)
+AUDIT {"event":"admin_write","ts_unix":1793115875,"remote":"192.168.65.1:60293","role":"operate","method":"POST","path":"/panel/login","status":303,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793115875,"remote":"192.168.65.1:27548","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/10.89.0.10:80/state","status":200,"backend":"api","server":"10.89.0.10:80","from":"ready","to":"drain"}
+AUDIT {"event":"admin_write","ts_unix":1793115875,"remote":"192.168.65.1:26506","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/10.89.0.10:80/state","status":200,"backend":"api","server":"10.89.0.10:80","from":"drain","to":"ready"}
+
+container E2E linux/arm64: 20 PASS, 0 FAIL
+ALL PASS
