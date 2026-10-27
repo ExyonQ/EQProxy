@@ -10,8 +10,9 @@ toolchain, so the claim no longer rests on a CI log alone.
 
 ## Host and toolchain
 
-- Netcup AMD64 host, kernel `6.8.0-147-generic` (Ubuntu SMP), 8 vCPU, 15 GiB.
-  Worked as `root`.
+- Netcup AMD64 host, Ubuntu 24.04.4 LTS, kernel `6.8.0-147-generic`, 8 vCPU,
+  15 GiB. Sessions 1–3 below ran as `root`; the full suite in §4 ran as an
+  unprivileged user.
 - Checkout of `main` at `ae3d950`, synced from the working tree of the same
   contents: `cargo 1.99.1 (5f94df478 2026-08-27)` /
   `rustc 1.99.1 (58cf8f9c3 2026-10-13)` /
@@ -79,22 +80,52 @@ maintainer's macOS account are unprivileged. It is recorded here because a
 root user of this repository will hit it, and because the first run would
 otherwise look like a Linux failure.
 
-## 4. The image's Linux binary, built by the pinned builder (section C)
+## 4. The whole workspace suite, as an unprivileged user (follow-up run)
+
+`cargo test --workspace` — the same command CI's `linux-tier1` job runs —
+executed on this host as **uid 10022 (`eqverify`)**, not as root, against the
+tree of `main` at `bdaa115` (`sha256` of `eqproxy-cli/tests/cli_e2e.rs`,
+`rust-toolchain.toml`, `ci.yml` and `docker/Dockerfile` equal the HEAD
+checkout's). The user's `rustup` resolves the pin:
+`1.99.1-x86_64-unknown-linux-gnu (overridden by
+'/srv/eqproxy-verify/rust-toolchain.toml')`.
+
+```console
+$ setpriv --reuid=10022 --regid=10022 --clear-groups env HOME=/home/eqverify \
+    bash -c 'cd /srv/eqproxy-verify && export PATH="$HOME/.cargo/bin:$PATH" && cargo test --workspace'
+```
+
+```
+== started:  2026-10-27T21:03:17Z ==
+== finished: 2026-10-27T21:05:40Z ==    CARGO-TEST-EXIT=0
+30 targets with a result line  ->  559 passed; 0 failed; 2 ignored
+```
+
+The 2 min 23 s include the rebuild cargo demanded after the checkout moved
+(the artifacts had been built under `/root`). Full raw log:
+[`full-suite-eqverify.txt`](v08-linux-e2e-admin/raw/full-suite-eqverify.txt)
+(889 lines); the Linux-gated ACL test (line 605) and the privilege-sensitive
+reload (line 610) are both `ok`, and no target printed a failure or a panic.
+The total matches the release workflow's Linux figure — 559, one more than
+macOS (558) — so that count is now verified outside CI, by a real
+unprivileged process on a real Linux kernel.
+
+## 5. The image's Linux binary, built by the pinned builder (section C)
 
 The same session built the release image's builder stage — recorded in full
 in [v08-toolchain-pin](v08-toolchain-pin.md) §2, where it belongs.
 
-## 5. Limits and NOT EXECUTED
+## 6. Limits and NOT EXECUTED
 
 - The unprivileged leg ran the **compiled test binary** through `setpriv`,
   not `cargo test` as that user: the server's checkout lives under `/root`,
   which uid 65534 cannot traverse. The binary is the artifact cargo built in
   the same session; nothing was rebuilt or patched for the run.
-- **The full Linux suite (the 559-test count) remains CI's line**: this page
-  proves the Linux-gated target compiles and passes and that the whole
-  workspace links on Linux. It does not re-run every target's tests on
-  Linux — `cargo test --workspace` runs in CI's `linux-tier1` job on every
-  push.
+- **The Linux suite no longer rests on CI alone** (§4): `cargo test
+  --workspace` as uid 10022, 30 targets, 559 passed, 0 failed, 2 ignored.
+  What that does not replace: CI re-runs the suite on GitHub's own runner on
+  every push, and the timing-sensitive journeys (health checks, slow start,
+  idle timeouts) passed **once** on this host, not as a soak.
 - **arm64 Linux: NOT EXECUTED here.** The ACL journey on a native arm64 host
   is CI's `ubuntu-24.04-arm` leg (`.github/workflows/ci.yml`); the Netcup
   host is amd64 only.
