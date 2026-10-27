@@ -1,0 +1,33 @@
+== pre-fix cli_e2e (HEAD 4c7a89a) as the extra target tests/prefix_hang.rs, run as root ==
+binary under test: target/debug/deps/prefix_hang-<hash>  (same source as the shipped cli_e2e.rs before the fix)
+started:  2026-10-27T21:49:33Z
+   Compiling clap v4.6.7
+   Compiling mimalloc v0.1.52
+   Compiling rustls-webpki v0.103.16
+   Compiling quinn-proto v0.11.19
+   Compiling tokio-rustls v0.26.6
+   Compiling h3-quinn v0.0.10
+   Compiling eqproxy-net v0.8.0 (/srv/eqproxy-verify/eqproxy-net)
+   Compiling eqproxy-cli v0.8.0 (/srv/eqproxy-verify/eqproxy-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 49.50s
+     Running tests/prefix_hang.rs (target/debug/deps/prefix_hang-1aa75c0bcd488642)
+
+running 1 test
+REPRO-EXIT=124   (124 = the timeout had to kill a run with no deadline)
+finished: 2026-10-27T21:51:03Z
+
+== what the hung run did to the socket it was told to refuse ==
+srw-rw---- 1 root 54321 0 Oct 27 22:26 /tmp/eqproxy-cli-e2e-747265-admin-reload.sock
+srw-rw---- 1 root 54321 0 Oct 27 22:50 /tmp/eqproxy-cli-e2e-795767-admin-reload.sock
+== the config it wrote last (group 54321, the 'impossible' policy) ==
+/tmp/eqproxy-cli-e2e-747265-admin-unix-reload.toml:unix_socket_mode = "0660"
+/tmp/eqproxy-cli-e2e-747265-admin-unix-reload.toml:unix_socket_gid = 54321
+/tmp/eqproxy-cli-e2e-747265-admin-unix-reload.toml:unix_socket_allow_uids = []
+/tmp/eqproxy-cli-e2e-795767-admin-unix-reload.toml:unix_socket_mode = "0660"
+/tmp/eqproxy-cli-e2e-795767-admin-unix-reload.toml:unix_socket_gid = 54321
+/tmp/eqproxy-cli-e2e-795767-admin-unix-reload.toml:unix_socket_allow_uids = []
+== leftover processes from the timed-out run ==
+(none)
+== cleanup ==
+removed tests/prefix_hang.rs and the demo socket
+== done ==

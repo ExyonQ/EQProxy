@@ -1,0 +1,22 @@
+== R2) cli_e2e reload step, as root (uid 0): the step declares its skip ==
+started:  2026-10-27T21:40:28Z
+   Compiling clap v4.6.7
+   Compiling mimalloc v0.1.52
+   Compiling eqproxy-config v0.8.0 (/srv/eqproxy-verify/eqproxy-config)
+   Compiling rustls-webpki v0.103.16
+   Compiling quinn-proto v0.11.19
+   Compiling tokio-rustls v0.26.6
+   Compiling h3-quinn v0.0.10
+   Compiling eqproxy-net v0.8.0 (/srv/eqproxy-verify/eqproxy-net)
+   Compiling eqproxy-cli v0.8.0 (/srv/eqproxy-verify/eqproxy-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 47.85s
+     Running tests/cli_e2e.rs (target/debug/deps/cli_e2e-770260638c261fed)
+
+running 1 test
+SKIP (running as root): the reload can only be refused for an unprivileged process, and root is allowed to chown the socket to group 54321, so this step is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+test run_admin_plane_reloads_unix_socket_policy_on_sighup ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.18s
+
+R2-EXIT=0
+finished: 2026-10-27T21:41:16Z

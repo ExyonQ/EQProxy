@@ -8532,32 +8532,51 @@ fn run_admin_plane_reloads_unix_socket_policy_on_sighup() {
 
     // 2. A policy the process cannot write is refused as a whole: the socket
     //    keeps 0660, the group and the deny list, and nothing is swapped.
-    std::fs::write(&config, body("0660", "unix_socket_gid = 54321\n", ""))
-        .expect("write the impossible policy");
-    send_signal(&child, "-HUP");
-    let rejected = wait_for_stderr(
-        &mut stderr,
-        "ERROR admin unix socket policy cannot be applied",
-    );
-    assert!(
-        rejected.contains("unix_socket_gid") || rejected.contains("Operation not permitted"),
-        "the rejection names the failing operation: {rejected}"
-    );
-    let metadata = std::fs::metadata(&socket_path).expect("socket metadata");
-    assert_eq!(
-        metadata.permissions().mode() & 0o777,
-        0o660,
-        "a refused reload must not roll the mode back or forward"
-    );
-    assert_eq!(metadata.gid(), gid);
-    let mut stream = UnixStream::connect(&socket_path).expect("connect after the rejection");
-    let _ = stream.write_all(authorized.as_bytes());
-    let mut still_denied = String::new();
-    let _ = stream.read_to_string(&mut still_denied);
-    assert!(
-        still_denied.is_empty(),
-        "the denied list must survive the rejected reload: {still_denied}"
-    );
+    //
+    //    An **unprivileged** process is the premise of this step: root is
+    //    allowed to `chown(2)` the socket to group 54321, so for it the reload
+    //    is **applied**, not rejected, and the log line this step waits for
+    //    never arrives (the run would block, not fail). A root run therefore
+    //    declares the step skipped, with the reason printed, and carries on
+    //    with step 3; CI's runners and normal developer runs are unprivileged,
+    //    where the refusal is meaningful. What root does verify about a live
+    //    reload is step 1: mode, group and allowlist applied as a whole.
+    if current_ids().0 == 0 {
+        eprintln!(
+            "SKIP (running as root): the reload can only be refused for an \
+             unprivileged process, and root is allowed to chown the socket to \
+             group 54321, so this step is not run. CI and normal developer \
+             runs are unprivileged; the reason is intentional, not a missing \
+             assertion."
+        );
+    } else {
+        std::fs::write(&config, body("0660", "unix_socket_gid = 54321\n", ""))
+            .expect("write the impossible policy");
+        send_signal(&child, "-HUP");
+        let rejected = wait_for_stderr(
+            &mut stderr,
+            "ERROR admin unix socket policy cannot be applied",
+        );
+        assert!(
+            rejected.contains("unix_socket_gid") || rejected.contains("Operation not permitted"),
+            "the rejection names the failing operation: {rejected}"
+        );
+        let metadata = std::fs::metadata(&socket_path).expect("socket metadata");
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            0o660,
+            "a refused reload must not roll the mode back or forward"
+        );
+        assert_eq!(metadata.gid(), gid);
+        let mut stream = UnixStream::connect(&socket_path).expect("connect after the rejection");
+        let _ = stream.write_all(authorized.as_bytes());
+        let mut still_denied = String::new();
+        let _ = stream.read_to_string(&mut still_denied);
+        assert!(
+            still_denied.is_empty(),
+            "the denied list must survive the rejected reload: {still_denied}"
+        );
+    }
 
     // 3. Back to owner-only and admitting the owner: the same socket answers
     //    again, so the reload works in both directions.

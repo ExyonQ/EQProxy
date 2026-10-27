@@ -12,7 +12,9 @@ toolchain, so the claim no longer rests on a CI log alone.
 
 - Netcup AMD64 host, Ubuntu 24.04.4 LTS, kernel `6.8.0-147-generic`, 8 vCPU,
   15 GiB. Sessions 1–3 below ran as `root`; the full suite in §4 ran as an
-  unprivileged user.
+  unprivileged user, and §7 runs the same host both ways (`root` and uid
+  10022). The server tree is a source copy without `.git`, so each file's
+  `sha256` is the identity of what ran.
 - Checkout of `main` at `ae3d950`, synced from the working tree of the same
   contents: `cargo 1.99.1 (5f94df478 2026-08-27)` /
   `rustc 1.99.1 (58cf8f9c3 2026-10-13)` /
@@ -78,7 +80,9 @@ The test *requires* an unprivileged uid: it asserts that `chown(2)` to group
 it. That is an environment prerequisite, not a defect — CI's runners and the
 maintainer's macOS account are unprivileged. It is recorded here because a
 root user of this repository will hit it, and because the first run would
-otherwise look like a Linux failure.
+otherwise look like a Linux failure. §7 is the fix for exactly that: the test
+now states the premise itself, so the same root run prints the reason and
+passes 16 of 16 instead of failing on it.
 
 ## 4. The whole workspace suite, as an unprivileged user (follow-up run)
 
@@ -132,6 +136,101 @@ in [v08-toolchain-pin](v08-toolchain-pin.md) §2, where it belongs.
 - The kernel-level contract (ACL support of the filesystem, `SO_PEERCRED`,
   `connect(2)` enforcement) is exercised against `/tmp` on this host; CI's
   journey exercises `/srv`, `/etc` and `/var/log` as root with `setpriv`.
+- **The root runs are single passes on one host** (§7): as root the workspace
+  reports 559 passed, 0 failed, 2 ignored, with both premises declared and
+  skipped. That is the same suite under a different uid, not a soak, and it
+  does not replace CI's unprivileged run, where the two blocks execute.
 
-The increment's audit legs (Veyra Proof, Rust Audit, CodeGraph, Hindsight)
-are recorded in [v08-slow-start](v08-slow-start.md) §4.
+## 7. Both tests declare their root premise (follow-up)
+
+§3 recorded a prerequisite that lived in a comment *outside* the programme:
+the refusal blocks of
+[`admin_unix_socket_policy_reloads_without_a_restart`](../../eqproxy-net/tests/e2e_admin.rs#L1218)
+and of
+[`run_admin_plane_reloads_unix_socket_policy_on_sighup`](../../eqproxy-cli/tests/cli_e2e.rs#L8460)
+assert that a `chown(2)`/`chgrp(2)` to group 54321 is refused, which is false
+for root. Both now ask their own uid first and, as root, print the reason and
+let the rest of the test run
+([`e2e_admin.rs:1301`](../../eqproxy-net/tests/e2e_admin.rs#L1301),
+[`cli_e2e.rs:8544`](../../eqproxy-cli/tests/cli_e2e.rs#L8544)):
+
+```rust
+// An **unprivileged** process is the premise of this block: root is allowed
+// to `chown(2)` to a foreign group, so the refusal asserted here does not
+// exist for it. A root run therefore declares the block skipped, with the
+// reason printed, instead of failing on a premise that is absent;
+// the rest of the test keeps running.
+if current_ids().0 == 0 {
+    eprintln!("SKIP (running as root): ... the reason is intentional, not a missing assertion.");
+} else {
+    ... the chown(2) refusal, its PermissionDenied kind, the untouched
+    mode/group and the file still owned by the group it had ...
+}
+```
+
+No assertion was deleted or softened: the mode, the group, the restore to
+owner-only, the still-refused peer and the final `200` keep running as root,
+and the refusal itself keeps running — unskipped — wherever the process is
+unprivileged, CI included. Before the change the second test did not merely
+fail as root, it **blocked** (`wait_for_stderr` reads lines with no deadline,
+and the log line it waits for cannot appear when the reload is *applied*): the
+pre-fix source of `4c7a89a` run as root through the `timeout` guard had to be
+killed at 90 s, exit `124`, with the socket it was told to refuse left as
+`0660 root 54321`
+([`prefix-hang-as-root.txt`](v08-linux-e2e-admin/raw/prefix-hang-as-root.txt)).
+
+Runs, all on this host, all with the pinned toolchain, on the tree these edits
+produce — `sha256` of `eqproxy-net/tests/e2e_admin.rs` `20b67d56…`,
+`eqproxy-cli/tests/cli_e2e.rs` `1714fe9c…`, `rust-toolchain.toml` `1f8615e3…`,
+`ci.yml` `1ed217d5…`, equal in the working tree and in the server checkout
+(the server copy has no `.git`; the `sha256` is the identity):
+
+| # | Command, as | Result | Raw |
+|---|---|---|---|
+| R1 | `cargo test -p eqproxy-cli --test cli_e2e run_admin_plane_reloads_unix_socket_policy_on_sighup -- --nocapture`, **uid 10022** | `1 passed; 0 failed`, no skip: the refusal block ran | [cli-e2e-reload-as-eqverify.txt](v08-linux-e2e-admin/raw/cli-e2e-reload-as-eqverify.txt) |
+| R2 | the same, **root** | `1 passed; 0 failed`, `SKIP (running as root): …` printed first | [cli-e2e-reload-as-root.txt](v08-linux-e2e-admin/raw/cli-e2e-reload-as-root.txt) |
+| R3 | `cargo test -p eqproxy-net --test e2e_admin -- --nocapture`, **root** | `16 passed; 0 failed`, `SKIP (running as root): …` before the reload test's `ok` | [e2e-admin-as-root.txt](v08-linux-e2e-admin/raw/e2e-admin-as-root.txt) |
+| R4 | `cargo test --workspace`, **root** | `30 targets` → `559 passed; 0 failed; 2 ignored`, exit `0` | [full-suite-root.txt](v08-linux-e2e-admin/raw/full-suite-root.txt) |
+| R5 | `cargo test --workspace`, **uid 10022** | `30 targets` → `559 passed; 0 failed; 2 ignored`, exit `0`, **0 skip lines** | [full-suite-eqverify2.txt](v08-linux-e2e-admin/raw/full-suite-eqverify2.txt), [summary](v08-linux-e2e-admin/raw/full-suite-eqverify2-summary.txt) |
+
+Both totals come from the same arithmetic over each log, not from a summary the
+runner prints:
+
+```console
+$ grep -oE "[0-9]+ passed; [0-9]+ failed; [0-9]+ ignored" full-suite-root.txt \
+    | awk -F'[ ;]+' '{p+=$1; f+=$3; i+=$5} END {print "targets="NR" passed="p" failed="f" ignored="i}'
+targets=30 passed=559 failed=0 ignored=2
+$ grep -cE "^test result: FAILED" full-suite-root.txt
+0
+```
+
+The difference between §3 and R3 is the whole point of the change: the first
+root run of that target was `15 passed; 1 failed` on a premise root does not
+have, kept verbatim as
+[netcup-e2e-admin-as-root.txt](v08-linux-e2e-admin/raw/netcup-e2e-admin-as-root.txt),
+and the rerun of the fixed tree is `16 passed; 0 failed` twice — as root and as
+uid 10022
+([e2e-admin-root-vs-eqverify.txt](v08-linux-e2e-admin/raw/e2e-admin-root-vs-eqverify.txt),
+16 of 16 in both halves). R5 is the `559` the release workflow's Linux leg
+reports, re-measured off CI on the changed tree; R4 shows the same suite does
+not look broken under a uid that cannot observe the refusal.
+
+### What the skip does not prove
+
+- It does not prove the refusal on a platform where the process is root: that
+  observation is impossible there, which is why it is skipped and named.
+- As root, step 2 of the CLI journey is the only part of it that does not run;
+  step 1 (mode, group and allowlist applied as a whole on `SIGHUP`) and step 3
+  (restore to owner-only) still execute and still assert.
+- macOS still compiles the ACL test out (`cfg(target_os = "linux")`), so the
+  macOS count stays 558 and the Linux count stays 559; the skips are *inside*
+  a test, they do not add or remove one.
+
+### Audit legs of this increment
+
+| Leg | Command | Result |
+|---|---|---|
+| Veyra Proof | `veyra audit . --profile standard` | **ACCEPTED**, exit `0`, [`.veyra/evidence/20261027T215246Z/`](../../.veyra/evidence/20261027T215246Z/) (local, untracked): 11 tools OK (`rustfmt`, `cargo check`, `clippy`, `cargo test`, `cargo-audit`, `veyra-anti-theater`, `nextest`, `llvm-cov`, `deny`, `machete`, `veyra-e2e`); `dylint` and `semver-checks` **SKIPPED** by the tool's own policy; `cargo-geiger` **INCONCLUSIVE** (coverage warning, a lower bound, not a pass) |
+| Rust Audit | `python3.13 /Volumes/Lexar/Cursor/rust-ai-audit/scripts/rust_audit.py scan . --format md --out report --fail-on high` | exit `0`, `report/rust-audit-20261027-225305.md` (local): critical `0`, high `0`, medium `240`, low `85`. No finding names a line this increment touched (`e2e_admin.rs:1295–1330`, `cli_e2e.rs:8535–8570`) |
+| CodeGraph Rust | `codegraph-rust index . --stats-json /tmp/cg-index-v08-skip.json`, then `agent impact` and `agent context` | fresh index for this tree: `files: 62`, `lines: 61549`, `nodes: 7026`, `edges: 12282`, `graph_complete: true`, `vector_index_ready: true`, `index_ms: 970922`. **Checked in the source**: the skip is at [`cli_e2e.rs:8544`](../../eqproxy-cli/tests/cli_e2e.rs#L8544) inside `run_admin_plane_reloads_unix_socket_policy_on_sighup` (8460–8605); `wait_for_unix_admin` (:8307) is shared with `run_admin_plane_enforces_group_mode_and_uid_allowlist` (:8367, :8406); `ConfigApplier::restore_admin_unix` ([`main.rs:2397`](../../eqproxy-cli/src/main.rs#L2397)) calls `UnixSocketPolicy::apply` ([`admin.rs:184`](../../eqproxy-net/src/admin.rs#L184)); `peer_allowed` ([`admin.rs:824`](../../eqproxy-net/src/admin.rs#L824)) is the single uid decision point, fail-closed for `uid: None` and `Tcp`. **Not confirmed**: the same answer states the library counterpart `admin_unix_socket_policy_reloads_without_a_restart` “has no root skip” — false, the skip is at [`e2e_admin.rs:1301`](../../eqproxy-net/tests/e2e_admin.rs#L1301); it also could not read the SIGHUP dispatch or the `getsockopt` source of `Peer::Unix { uid }`, and the first `agent impact` attempt errored while Ollama restarted (retried once `/api/tags` answered) |
+| Hindsight | `~/.local/bin/hindsight-note` | note left at the close of the increment |

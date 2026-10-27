@@ -1,0 +1,18 @@
+== R1) cli_e2e reload step, as eqverify (uid 10022): the refusal block RUNS ==
+started:  2026-10-27T21:38:20Z
+   Compiling rustls-webpki v0.103.16
+   Compiling quinn-proto v0.11.19
+   Compiling tokio-rustls v0.26.6
+   Compiling h3-quinn v0.0.10
+   Compiling eqproxy-net v0.8.0 (/srv/eqproxy-verify/eqproxy-net)
+   Compiling eqproxy-cli v0.8.0 (/srv/eqproxy-verify/eqproxy-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 33.22s
+     Running tests/cli_e2e.rs (target/debug/deps/cli_e2e-770260638c261fed)
+
+running 1 test
+test run_admin_plane_reloads_unix_socket_policy_on_sighup ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 0.18s
+
+R1-EXIT=0
+finished: 2026-10-27T21:38:53Z

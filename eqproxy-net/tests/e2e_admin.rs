@@ -1213,6 +1213,10 @@ async fn a_tcp_admin_plane_exposes_no_unix_socket_policy() {
     handle.shutdown().await;
 }
 
+/// The live policy reloads without rebinding the listener. One block — the
+/// refusal of a `chown(2)` to a foreign group — only exists for an
+/// **unprivileged** process and declares itself skipped as root; see the
+/// comment there for the reason.
 #[cfg(unix)]
 #[tokio::test]
 async fn admin_unix_socket_policy_reloads_without_a_restart() {
@@ -1287,25 +1291,41 @@ async fn admin_unix_socket_policy_reloads_without_a_restart() {
 
     // A group the process cannot own is an error, and the live policy and the
     // file are exactly as they were: a failed reload never widens anything.
-    let refused = UnixSocketOptions {
-        mode: 0o660,
-        gid: Some(54321),
-        allow_uids: Vec::new().into(),
-        acl_uids: Vec::new().into(),
-    };
-    let error = policy
-        .apply(&refused)
-        .expect_err("an unprivileged chown to a foreign group must fail");
-    assert_eq!(
-        error.kind(),
-        std::io::ErrorKind::PermissionDenied,
-        "{error}"
-    );
-    assert_eq!(policy.options().mode, 0o600, "the mode was not changed");
-    assert_eq!(policy.options().gid, None, "the group was not changed");
-    let metadata = std::fs::metadata(&path).expect("socket metadata");
-    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
-    assert_eq!(metadata.gid(), gid, "the file kept the group it had");
+    //
+    // An **unprivileged** process is the premise of this block: root is
+    // allowed to `chown(2)` to a foreign group, so the refusal asserted here
+    // does not exist for it. A root run therefore declares the block skipped,
+    // with the reason printed, instead of failing on a premise that is absent;
+    // the rest of the test keeps running. CI's runners and the developers'
+    // accounts are unprivileged, which is where the refusal is meaningful.
+    if current_ids().0 == 0 {
+        eprintln!(
+            "SKIP (running as root): the reload must refuse an unprivileged \
+             chown to a foreign group, and root is allowed to perform it, so \
+             this block is not run. CI and normal developer runs are \
+             unprivileged; the reason is intentional, not a missing assertion."
+        );
+    } else {
+        let refused = UnixSocketOptions {
+            mode: 0o660,
+            gid: Some(54321),
+            allow_uids: Vec::new().into(),
+            acl_uids: Vec::new().into(),
+        };
+        let error = policy
+            .apply(&refused)
+            .expect_err("an unprivileged chown to a foreign group must fail");
+        assert_eq!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied,
+            "{error}"
+        );
+        assert_eq!(policy.options().mode, 0o600, "the mode was not changed");
+        assert_eq!(policy.options().gid, None, "the group was not changed");
+        let metadata = std::fs::metadata(&path).expect("socket metadata");
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.gid(), gid, "the file kept the group it had");
+    }
     let answer = unix_request(&path, &authorized).await;
     assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
 
