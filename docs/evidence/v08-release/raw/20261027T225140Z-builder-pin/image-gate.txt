@@ -1,0 +1,42 @@
+== run 20261027T225140Z-builder-pin ==
+Tue Oct 27 22:51:40 UTC 2026
+== tools ==
+client 29.8.2  server 29.8.2 linux/arm64
+github.com/docker/buildx v0.37.2 2d379c0c3f22da0d2759d132a0ec81ca949098f0
+
+== images under test ==
+arm64  id=sha256:d1f7342cc1462cba9c8882fc7ee84035e90a93fede5dbf319dbf96566ec67c37  size=50509179
+amd64  id=sha256:3277ef25056e05112ec223a180b989d4fdb3c8717a59551868630120030d0952  size=15378749
+== the pinned builder and the tree it built ==
+25:ARG RUST_VERSION=1.99.1
+channel = 1.99.1
+b829be95f0c89e3e362d131e2528888a8867ed92e9b9810dad627ed84711468a  docker/Dockerfile
+1f8615e3fbec7f3a1fcaf67c05b37f2ec81b217e2c8d350d388f57d09bb7295a  rust-toolchain.toml
+7621d2d46651e24eec3f63f2edf7c0c651f2ab82707681068db9ea5cf877f070  Cargo.lock
+c93cdb6
+
+== Docker Scout: linux/arm64 ==
+    i New version 1.28.0 available (installed version is 1.25.0) at https://github.com/docker/scout-cli
+    ...Storing image for indexing
+    ✓ Image stored for indexing
+    ✓ SBOM obtained from attestation, 69 packages found
+    ✓ Provenance obtained from attestation
+    ...Pulling
+    ✓ Pulled
+    ✓ No vulnerable package detected
+    ✓ Report written to docs/evidence/v08-release/raw/20261027T225140Z-builder-pin/scout-arm64.md
+SCOUT-ARM64-EXIT=0
+
+== Docker Scout: linux/amd64 ==
+    i New version 1.28.0 available (installed version is 1.25.0) at https://github.com/docker/scout-cli
+    ...Storing image for indexing
+    ✓ Image stored for indexing
+    ✓ SBOM obtained from attestation, 69 packages found
+    ✓ Provenance obtained from attestation
+    ...Pulling
+    ✓ Pulled
+    ✓ No vulnerable package detected
+    ✓ Report written to docs/evidence/v08-release/raw/20261027T225140Z-builder-pin/scout-amd64.md
+SCOUT-AMD64-EXIT=0
+
+== container E2E, linux/arm64 (native on this host) ==

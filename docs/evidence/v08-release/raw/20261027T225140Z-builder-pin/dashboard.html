@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EQProxy panel</title>
+<link rel="stylesheet" href="/panel/app.css">
+</head>
+<body>
+<h1>EQProxy <span class="muted">panel</span></h1>
+<p class="muted">version 0.8.0 · uptime 0s · revision v1 · role operate</p>
+<form method="post" action="/panel/logout"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><button type="submit">Log out</button></form>
+<h2>Listeners</h2>
+<table>
+<tr><th>name</th><th>listen</th><th>mode</th><th>backend</th><th>maxconn</th><th>TLS (sha256)</th></tr>
+<tr><td>web</td><td>0.0.0.0:18082</td><td>http</td><td>api</td><td>1024</td><td>—</td></tr>
+</table>
+<h2>Backend api</h2>
+<p class="muted">balance round_robin · all_backups false · health_check false</p>
+<table>
+<tr><th>server</th><th>state</th><th>healthy</th><th>active</th><th>drained</th><th>weight</th><th>backup</th><th>priority</th><th>state change</th></tr>
+<tr><td>10.88.0.10:80</td><td>ready</td><td>true</td><td>0</td><td>false</td><td>1</td><td>false</td><td>0</td><td><form method="post" action="/panel/servers/api/10.88.0.10%3A80/state"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><input type="hidden" name="state" value="ready"><button type="submit">ready</button></form><form method="post" action="/panel/servers/api/10.88.0.10%3A80/state"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><input type="hidden" name="state" value="drain"><button type="submit">drain</button></form><form method="post" action="/panel/servers/api/10.88.0.10%3A80/state"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><input type="hidden" name="state" value="maintenance"><button type="submit">maintenance</button></form></td></tr>
+<tr><td>10.88.0.11:80</td><td>ready</td><td>true</td><td>0</td><td>false</td><td>1</td><td>false</td><td>0</td><td><form method="post" action="/panel/servers/api/10.88.0.11%3A80/state"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><input type="hidden" name="state" value="ready"><button type="submit">ready</button></form><form method="post" action="/panel/servers/api/10.88.0.11%3A80/state"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><input type="hidden" name="state" value="drain"><button type="submit">drain</button></form><form method="post" action="/panel/servers/api/10.88.0.11%3A80/state"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><input type="hidden" name="state" value="maintenance"><button type="submit">maintenance</button></form></td></tr>
+</table>
+<h2>Apply a table</h2>
+<p class="muted">The body is the whole table: a write replaces it, so a subtable left out really is removed. `If-Match` is the revision above.</p>
+<form method="post" action="/panel/backends/{name}"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><p class="form-row"><input type="text" name="name" value="" placeholder="backend name" required> <input type="text" name="revision" value="v1" readonly size="6"> <button type="submit">Apply backend</button></p>
+<textarea name="table" placeholder="[backend.NAME]&#10;…"></textarea></form>
+<form method="post" action="/panel/listeners/{name}"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><p class="form-row"><input type="text" name="name" value="" placeholder="listener name" required> <input type="text" name="revision" value="v1" readonly size="6"> <button type="submit">Apply listener</button></p>
+<textarea name="table" placeholder="[listener.NAME]&#10;…"></textarea></form>
+<form method="post" action="/panel/certificates/reload"><input type="hidden" name="csrf" value="3d6c2b834722346b6f94ee40ec067f21c5c8aa57e76350147b41f16ed11ea271"><button type="submit">Reload certificates</button></form>
+</body>
+</html>

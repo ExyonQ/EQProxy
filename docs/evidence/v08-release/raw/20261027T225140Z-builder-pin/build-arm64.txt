@@ -1,0 +1,528 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.12kB 0.1s done
+#1 DONE 0.3s
+
+#2 resolve image config for docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#2 ...
+
+#3 [auth] docker/buildkit-syft-scanner:pull token for registry-1.docker.io
+#3 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#2 DONE 16.1s
+
+#4 [auth] library/rust:pull token for registry-1.docker.io
+#4 DONE 0.0s
+
+#5 [internal] load metadata for cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
+#5 DONE 1.8s
+
+#6 [internal] load metadata for docker.io/library/rust:1.99.1-alpine
+#6 DONE 3.6s
+
+#7 [internal] load .dockerignore
+#7 transferring context: 527B 0.1s done
+#7 DONE 0.3s
+
+#8 [internal] load build context
+#8 DONE 0.0s
+
+#9 [runtime 1/3] FROM cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
+#9 resolve cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
+#9 resolve cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7 0.4s done
+#9 DONE 0.5s
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 resolve docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 ...
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 resolve docker.io/docker/buildkit-syft-scanner:stable-1 0.5s done
+#11 DONE 0.7s
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 resolve docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 0.3s done
+#10 ...
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 DONE 1.6s
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 0B / 46.08MB 0.2s
+#11 ...
+
+#8 [internal] load build context
+#8 transferring context: 390.45kB 0.4s done
+#8 DONE 1.7s
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 ...
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 DONE 2.7s
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 4.19MB / 46.08MB 1.5s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 7.34MB / 46.08MB 2.0s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 12.58MB / 46.08MB 2.6s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 17.83MB / 46.08MB 3.3s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 20.97MB / 46.08MB 4.4s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 24.12MB / 46.08MB 5.3s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 27.26MB / 46.08MB 6.8s
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 30.41MB / 46.08MB 7.5s
+#11 ...
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 extracting sha256:d3531b7a4f217bdc3426c57bcff84c170f086f456a39689d4a615c6d026c4be0 3.8s done
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 8.39MB / 280.36MB 6.9s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 16.78MB / 66.51MB 6.6s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 20.97MB / 66.51MB 7.8s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 25.17MB / 66.51MB 9.7s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 30.41MB / 66.51MB 11.1s
+#10 ...
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 46.08MB / 46.08MB 13.3s done
+#11 DONE 15.5s
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 13.63MB / 280.36MB 12.0s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 35.65MB / 66.51MB 12.5s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 39.85MB / 66.51MB 13.7s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 44.04MB / 66.51MB 15.0s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 18.87MB / 280.36MB 17.7s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 48.23MB / 66.51MB 18.1s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 52.43MB / 66.51MB 19.5s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 56.62MB / 66.51MB 20.2s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 60.82MB / 66.51MB 20.4s
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 65.01MB / 66.51MB 20.7s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 33.55MB / 280.36MB 21.6s
+#10 ...
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 extracting sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9
+#11 ...
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 66.51MB / 66.51MB 22.7s done
+#10 extracting sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 49.28MB / 280.36MB 24.8s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 67.11MB / 280.36MB 26.8s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 81.79MB / 280.36MB 28.8s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 99.61MB / 280.36MB 30.9s
+#10 ...
+
+#11 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#11 extracting sha256:b70fcd7de7337a95713d68bed3f1da55eac2f2c2f374848febeff7af4940fda9 19.2s done
+#11 DONE 34.7s
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 115.34MB / 280.36MB 32.7s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 130.02MB / 280.36MB 34.8s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 145.75MB / 280.36MB 36.8s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 161.48MB / 280.36MB 38.5s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 177.21MB / 280.36MB 40.5s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 192.94MB / 280.36MB 42.4s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 207.62MB / 280.36MB 44.3s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 223.35MB / 280.36MB 46.5s
+#10 extracting sha256:4fd8b575af1aa2241afbe999b9358aa469481c67f73429fd244a62fb6ece58bd 24.7s done
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 239.08MB / 280.36MB 48.5s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 254.80MB / 280.36MB 50.5s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 269.48MB / 280.36MB 52.2s
+#10 sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 280.36MB / 280.36MB 53.9s done
+#10 DONE 57.0s
+
+#10 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#10 extracting sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c
+#10 extracting sha256:babd19b1885a5c45f0b7daf700ee084bffbed940d3ac3a830cbfe1216392318c 54.9s done
+#10 DONE 111.9s
+
+#12 [builder  2/15] WORKDIR /src
+#12 DONE 15.6s
+
+#13 [builder  3/15] RUN apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers     ca-certificates file
+#13 4.447 ( 1/16) Installing acl-libs (2.3.2-r1)
+#13 4.549 ( 2/16) Installing libbz2 (1.0.8-r6)
+#13 4.618 ( 3/16) Installing libexpat (2.9.0-r0)
+#13 4.693 ( 4/16) Installing lz4-libs (1.10.0-r1)
+#13 4.762 ( 5/16) Installing xz-libs (5.8.4-r0)
+#13 4.849 ( 6/16) Installing libarchive (3.8.10-r0)
+#13 5.017 ( 7/16) Installing rhash-libs (1.4.6-r0)
+#13 5.088 ( 8/16) Installing libuv (1.52.1-r0)
+#13 5.200 ( 9/16) Installing cmake (4.2.3-r0)
+#13 8.595 (10/16) Installing libmagic (5.47-r2)
+#13 8.814 (11/16) Installing file (5.47-r2)
+#13 8.881 (12/16) Installing libstdc++-dev (15.2.0-r5)
+#13 9.435 (13/16) Installing g++ (15.2.0-r5)
+#13 11.78 (14/16) Installing linux-headers (7.0.0-r1)
+#13 12.84 (15/16) Installing make (4.4.1-r4)
+#13 12.89 (16/16) Installing perl (5.42.2-r1)
+#13 14.87 Executing busybox-1.37.0-r31.trigger
+#13 14.94 OK: 345.6 MiB in 47 packages
+#13 DONE 16.0s
+
+#14 [builder  4/15] COPY Cargo.toml Cargo.lock ./
+#14 DONE 3.0s
+
+#15 [builder  5/15] COPY eqproxy.schema.json ./
+#15 DONE 0.8s
+
+#16 [builder  6/15] COPY eqproxy-core/Cargo.toml eqproxy-core/Cargo.toml
+#16 DONE 0.7s
+
+#17 [builder  7/15] COPY eqproxy-config/Cargo.toml eqproxy-config/Cargo.toml
+#17 DONE 0.9s
+
+#18 [builder  8/15] COPY eqproxy-net/Cargo.toml eqproxy-net/Cargo.toml
+#18 DONE 0.5s
+
+#19 [builder  9/15] COPY eqproxy-cli/Cargo.toml eqproxy-cli/Cargo.toml
+#19 DONE 0.4s
+
+#20 [builder 10/15] RUN mkdir -p eqproxy-core/src eqproxy-config/src eqproxy-net/src eqproxy-cli/src     && echo "" > eqproxy-core/src/lib.rs     && echo "" > eqproxy-config/src/lib.rs     && echo "" > eqproxy-net/src/lib.rs     && echo "fn main() {}" > eqproxy-cli/src/main.rs     && cargo fetch --locked
+#20 0.785     Updating crates.io index
+#20 3.981  Downloading crates ...
+#20 4.365   Downloaded windows-link v0.2.1
+#20 4.387   Downloaded tokio-macros v2.7.2
+#20 4.532   Downloaded digest v0.10.7
+#20 4.559   Downloaded generic-array v0.14.7
+#20 4.621   Downloaded indexmap v2.14.2
+#20 4.638   Downloaded crypto-common v0.1.7
+#20 4.700   Downloaded fnv v1.0.7
+#20 4.719   Downloaded is_terminal_polyfill v1.70.2
+#20 4.755   Downloaded atomic-waker v1.1.2
+#20 4.766   Downloaded syn v3.0.9
+#20 4.794   Downloaded quote v1.0.47
+#20 4.805   Downloaded socket2 v0.6.5
+#20 4.829   Downloaded heck v0.5.0
+#20 4.829   Downloaded pin-project-lite v0.2.17
+#20 4.849   Downloaded proc-macro2 v1.0.107
+#20 4.857   Downloaded mio v1.2.4
+#20 4.885   Downloaded anstyle v1.0.14
+#20 4.895   Downloaded equivalent v1.0.3
+#20 4.899   Downloaded h2 v0.4.20
+#20 4.929   Downloaded toml v0.8.23
+#20 4.967   Downloaded tokio v1.53.3
+#20 5.089   Downloaded block-buffer v0.10.4
+#20 5.095   Downloaded errno v0.3.14
+#20 5.105   Downloaded unicode-ident v1.0.27
+#20 5.112   Downloaded bytes v1.12.1
+#20 5.129   Downloaded serde_json v1.0.154
+#20 5.279   Downloaded futures v0.3.34
+#20 5.285   Downloaded wasi v0.11.1+wasi-snapshot-preview1
+#20 5.294   Downloaded futures-executor v0.3.34
+#20 5.301   Downloaded base64 v0.22.1
+#20 5.311   Downloaded md-5 v0.10.6
+#20 5.315   Downloaded version_check v0.9.5
+#20 5.321   Downloaded alloc-stdlib v0.3.0
+#20 5.329   Downloaded alloc-no-stdlib v3.0.0
+#20 5.335   Downloaded serde_spanned v0.6.9
+#20 5.338   Downloaded serde_derive_internals v0.30.0
+#20 5.384   Downloaded ref-cast v1.0.27
+#20 5.384   Downloaded once_cell_polyfill v1.70.2
+#20 5.384   Downloaded signal-hook-registry v1.4.8
+#20 5.384   Downloaded tokio-util v0.7.20
+#20 5.449   Downloaded colorchoice v1.0.5
+#20 5.452   Downloaded lru-slab v0.1.3
+#20 5.455   Downloaded dyn-clone v1.0.20
+#20 5.460   Downloaded anstyle-wincon v3.0.11
+#20 5.463   Downloaded toml_datetime v0.6.11
+#20 5.475   Downloaded cpufeatures v0.3.1
+#20 5.481   Downloaded schemars_derive v1.2.3
+#20 5.492   Downloaded toml_write v0.1.2
+#20 5.492   Downloaded anstyle-query v1.1.5
+#20 5.496   Downloaded rand v0.10.3
+#20 5.634   Downloaded typenum v1.20.1
+#20 5.634   Downloaded strsim v0.11.1
+#20 5.634   Downloaded ref-cast-impl v1.0.27
+#20 5.634   Downloaded wasm-bindgen-macro v0.2.129
+#20 5.634   Downloaded utf8parse v0.2.2
+#20 5.634   Downloaded shlex v2.0.1
+#20 5.634   Downloaded jobserver v0.1.35
+#20 5.634   Downloaded wasm-bindgen v0.2.129
+#20 5.634   Downloaded wasm-bindgen-shared v0.2.129
+#20 5.634   Downloaded rand_core v0.10.1
+#20 5.634   Downloaded serde_path_to_error v0.1.20
+#20 5.634   Downloaded clap_lex v1.1.1
+#20 5.634   Downloaded anstyle-parse v1.0.0
+#20 5.634   Downloaded http v1.5.0
+#20 5.634   Downloaded fastrand v2.5.0
+#20 5.634   Downloaded anstream v1.0.0
+#20 5.634   Downloaded serde v1.0.229
+#20 5.634   Downloaded memchr v2.8.3
+#20 5.819   Downloaded clap_derive v4.6.7
+#20 5.828   Downloaded wasm-bindgen-macro-support v0.2.129
+#20 5.841   Downloaded once_cell v1.21.4
+#20 5.852   Downloaded cfg-if v1.0.5
+#20 5.858   Downloaded xattr v1.6.1
+#20 5.870   Downloaded windows-sys v0.61.2
+#20 6.225   Downloaded hashbrown v0.17.1
+#20 6.239   Downloaded regex v1.13.1
+#20 6.249   Downloaded clap v4.6.7
+#20 6.274   Downloaded simd-adler32 v0.3.10
+#20 6.277   Downloaded toml_edit v0.22.27
+#20 6.288   Downloaded schemars v1.2.3
+#20 6.327   Downloaded zmij v1.0.23
+#20 6.336   Downloaded serde_derive v1.0.229
+#20 6.346   Downloaded futures-util v0.3.34
+#20 6.375   Downloaded aho-corasick v1.1.5
+#20 6.398   Downloaded h3 v0.0.8
+#20 6.427   Downloaded subtle v2.6.1
+#20 6.432   Downloaded rlimit v0.10.2
+#20 6.452   Downloaded cc v1.8.0
+#20 6.563   Downloaded slab v0.4.12
+#20 6.578   Downloaded futures-task v0.3.34
+#20 6.578   Downloaded crc32fast v1.5.3
+#20 6.578   Downloaded web-time v1.1.0
+#20 6.578   Downloaded untrusted v0.9.0
+#20 6.578   Downloaded brotli-decompressor v6.0.1
+#20 6.578   Downloaded libc v0.2.190
+#20 6.929   Downloaded mimalloc v0.1.52
+#20 6.933   Downloaded clap_builder v4.6.7
+#20 6.956   Downloaded winnow v0.7.15
+#20 6.983   Downloaded itoa v1.0.18
+#20 6.986   Downloaded futures-sink v0.3.34
+#20 6.987   Downloaded untrusted v0.7.1
+#20 6.989   Downloaded adler2 v2.0.1
+#20 6.994   Downloaded rustversion v1.0.23
+#20 7.004   Downloaded bumpalo v3.20.3
+#20 7.028   Downloaded flate2 v1.1.10
+#20 7.040   Downloaded futures-io v0.3.34
+#20 7.043   Downloaded cfg_aliases v0.2.2
+#20 7.045   Downloaded getrandom v0.4.3
+#20 7.052   Downloaded rustls-pki-types v1.15.1
+#20 7.062   Downloaded r-efi v6.0.0
+#20 7.081   Downloaded futures-core v0.3.34
+#20 7.085   Downloaded regex-syntax v0.8.11
+#20 7.129   Downloaded futures-macro v0.3.34
+#20 7.132   Downloaded rand_pcg v0.10.2
+#20 7.141   Downloaded rustc-hash v2.1.3
+#20 7.145   Downloaded regex-automata v0.4.18
+#20 7.187   Downloaded windows-targets v0.52.6
+#20 7.192   Downloaded fs_extra v1.3.0
+#20 7.202   Downloaded dunce v1.0.5
+#20 7.206   Downloaded thiserror v2.0.21
+#20 7.222   Downloaded brotli v9.0.0
+#20 7.261   Downloaded bitflags v2.13.2
+#20 7.268   Downloaded zeroize v1.9.1
+#20 7.271   Downloaded getrandom v0.2.17
+#20 7.275   Downloaded pkg-config v0.3.34
+#20 7.282   Downloaded thiserror-impl v2.0.21
+#20 7.286   Downloaded serde_core v1.0.229
+#20 7.296   Downloaded futures-channel v0.3.34
+#20 7.299   Downloaded find-msvc-tools v0.1.14
+#20 7.303   Downloaded tokio-rustls v0.26.6
+#20 7.392   Downloaded log v0.4.34
+#20 7.411   Downloaded cmake v0.1.58
+#20 7.411   Downloaded tracing-core v0.1.36
+#20 7.411   Downloaded quinn-udp v0.5.16
+#20 7.412   Downloaded tinyvec v1.13.3
+#20 7.424   Downloaded miniz_oxide v0.9.1
+#20 7.432   Downloaded chacha20 v0.10.2
+#20 7.440   Downloaded rustls-webpki v0.103.16
+#20 7.452   Downloaded js-sys v0.3.106
+#20 7.464   Downloaded quinn v0.11.12
+#20 7.478   Downloaded quinn-proto v0.11.19
+#20 7.494   Downloaded h3-quinn v0.0.10
+#20 7.496   Downloaded webpki-roots v1.0.10
+#20 7.501   Downloaded zlib-rs v0.6.8
+#20 7.535   Downloaded libmimalloc-sys v0.1.49
+#20 7.604   Downloaded aws-lc-rs v1.18.2
+#20 7.715   Downloaded rustls v0.23.46
+#20 7.766   Downloaded windows_aarch64_gnullvm v0.52.6
+#20 7.810   Downloaded rustix v1.1.5
+#20 7.907   Downloaded windows_x86_64_gnullvm v0.52.6
+#20 7.943   Downloaded tracing v0.1.44
+#20 7.979   Downloaded windows_i686_gnullvm v0.52.6
+#20 7.993   Downloaded windows_x86_64_msvc v0.52.6
+#20 8.017   Downloaded windows_x86_64_gnu v0.52.6
+#20 8.065   Downloaded windows_aarch64_msvc v0.52.6
+#20 8.093   Downloaded windows_i686_msvc v0.52.6
+#20 8.155   Downloaded windows_i686_gnu v0.52.6
+#20 8.214   Downloaded ring v0.17.14
+#20 8.306   Downloaded windows-sys v0.52.0
+#20 8.538   Downloaded linux-raw-sys v0.12.1
+#20 9.003   Downloaded aws-lc-sys v0.46.0
+#20 DONE 10.7s
+
+#21 [builder 11/15] COPY eqproxy-core eqproxy-core
+#21 DONE 1.0s
+
+#22 [builder 12/15] COPY eqproxy-config eqproxy-config
+#22 DONE 0.2s
+
+#23 [builder 13/15] COPY eqproxy-net eqproxy-net
+#23 DONE 0.5s
+
+#24 [builder 14/15] COPY eqproxy-cli eqproxy-cli
+#24 DONE 0.3s
+
+#25 [builder 15/15] RUN cargo build --release --locked -p eqproxy-cli     && cp target/release/eqproxy /opt/eqproxy     && file /opt/eqproxy | grep -Eq 'statically linked|static-pie linked'
+#25 2.543    Compiling libc v0.2.190
+#25 2.547    Compiling proc-macro2 v1.0.107
+#25 2.547    Compiling unicode-ident v1.0.27
+#25 2.547    Compiling quote v1.0.47
+#25 2.547    Compiling find-msvc-tools v0.1.14
+#25 2.547    Compiling shlex v2.0.1
+#25 2.547    Compiling pin-project-lite v0.2.17
+#25 2.547    Compiling pkg-config v0.3.34
+#25 2.547    Compiling dunce v1.0.5
+#25 2.547    Compiling memchr v2.8.3
+#25 3.644    Compiling fs_extra v1.3.0
+#25 3.723    Compiling serde_core v1.0.229
+#25 3.770    Compiling bytes v1.12.1
+#25 4.061    Compiling cfg-if v1.0.5
+#25 4.242    Compiling serde v1.0.229
+#25 4.300    Compiling zeroize v1.9.1
+#25 5.259    Compiling once_cell v1.21.4
+#25 5.312    Compiling aws-lc-rs v1.18.2
+#25 5.524    Compiling version_check v0.9.5
+#25 6.674    Compiling futures-core v0.3.34
+#25 6.696    Compiling itoa v1.0.18
+#25 7.252    Compiling futures-sink v0.3.34
+#25 7.355    Compiling generic-array v0.14.7
+#25 7.432    Compiling log v0.4.34
+#25 7.968    Compiling slab v0.4.12
+#25 7.970    Compiling rustls-pki-types v1.15.1
+#25 7.973    Compiling untrusted v0.7.1
+#25 8.423    Compiling cfg_aliases v0.2.2
+#25 8.639    Compiling rand_core v0.10.1
+#25 8.663    Compiling typenum v1.20.1
+#25 8.674    Compiling tracing-core v0.1.36
+#25 8.688    Compiling getrandom v0.4.3
+#25 9.564    Compiling syn v3.0.9
+#25 9.633    Compiling futures-io v0.3.34
+#25 9.772    Compiling untrusted v0.9.0
+#25 10.29    Compiling rustls v0.23.46
+#25 10.36    Compiling futures-channel v0.3.34
+#25 10.77    Compiling futures-task v0.3.34
+#25 11.26    Compiling jobserver v0.1.35
+#25 11.28    Compiling zmij v1.0.23
+#25 11.59    Compiling errno v0.3.14
+#25 11.87    Compiling socket2 v0.6.5
+#25 12.16    Compiling signal-hook-registry v1.4.8
+#25 12.29    Compiling mio v1.2.4
+#25 12.40    Compiling tracing v0.1.44
+#25 13.60    Compiling cc v1.8.0
+#25 14.36    Compiling equivalent v1.0.3
+#25 15.45    Compiling thiserror v2.0.21
+#25 15.54    Compiling hashbrown v0.17.1
+#25 15.73    Compiling subtle v2.6.1
+#25 16.72    Compiling chacha20 v0.10.2
+#25 17.85    Compiling quinn-udp v0.5.16
+#25 18.18    Compiling block-buffer v0.10.4
+#25 18.28    Compiling crypto-common v0.1.7
+#25 18.73    Compiling aho-corasick v1.1.5
+#25 18.78    Compiling serde_json v1.0.154
+#25 19.00    Compiling regex-syntax v0.8.11
+#25 19.26    Compiling digest v0.10.7
+#25 19.35    Compiling rand v0.10.3
+#25 20.14    Compiling rand_pcg v0.10.2
+#25 20.97    Compiling cmake v0.1.58
+#25 20.97    Compiling quinn v0.11.12
+#25 21.00    Compiling http v1.5.0
+#25 21.33    Compiling indexmap v2.14.2
+#25 21.45    Compiling utf8parse v0.2.2
+#25 21.82    Compiling lru-slab v0.1.3
+#25 22.68    Compiling rustix v1.1.5
+#25 22.80    Compiling rustc-hash v2.1.3
+#25 23.11    Compiling crc32fast v1.5.3
+#25 23.76    Compiling tinyvec v1.13.3
+#25 24.53    Compiling alloc-no-stdlib v3.0.0
+#25 24.73    Compiling ref-cast v1.0.27
+#25 25.35    Compiling alloc-stdlib v0.3.0
+#25 26.11    Compiling anstyle-parse v1.0.0
+#25 26.12    Compiling md-5 v0.10.6
+#25 26.67    Compiling serde_derive_internals v0.30.0
+#25 27.29    Compiling toml_write v0.1.2
+#25 27.80    Compiling aws-lc-sys v0.46.0
+#25 28.25    Compiling libmimalloc-sys v0.1.49
+#25 28.73    Compiling anstyle-query v1.1.5
+#25 29.33    Compiling colorchoice v1.0.5
+#25 30.13    Compiling winnow v0.7.15
+#25 30.80    Compiling base64 v0.22.1
+#25 31.16    Compiling fastrand v2.5.0
+#25 33.15    Compiling adler2 v2.0.1
+#25 33.87    Compiling is_terminal_polyfill v1.70.2
+#25 34.33    Compiling bitflags v2.13.2
+#25 34.56    Compiling simd-adler32 v0.3.10
+#25 34.78    Compiling regex-automata v0.4.18
+#25 39.38    Compiling linux-raw-sys v0.12.1
+#25 40.52    Compiling tokio-macros v2.7.2
+#25 41.03    Compiling serde_derive v1.0.229
+#25 41.76    Compiling futures-macro v0.3.34
+#25 42.10    Compiling thiserror-impl v2.0.21
+#25 45.15    Compiling tokio v1.53.3
+#25 47.67    Compiling futures-util v0.3.34
+#25 48.84    Compiling ref-cast-impl v1.0.27
+#25 51.14    Compiling anstyle v1.0.14
+#25 52.78    Compiling schemars_derive v1.2.3
+#25 52.94    Compiling miniz_oxide v0.9.1
+#25 54.16    Compiling anstream v1.0.0
+#25 66.90    Compiling regex v1.13.1
+#25 68.18    Compiling brotli-decompressor v6.0.1
+#25 73.21    Compiling toml_datetime v0.6.11
+#25 75.61    Compiling futures-executor v0.3.34
+#25 75.87    Compiling serde_spanned v0.6.9
+#25 76.83    Compiling toml_edit v0.22.27
+#25 77.37    Compiling futures v0.3.34
+#25 77.82    Compiling strsim v0.11.1
+#25 78.93    Compiling atomic-waker v1.1.2
+#25 79.67    Compiling rlimit v0.10.2
+#25 79.80    Compiling heck v0.5.0
+#25 81.17    Compiling fnv v1.0.7
+#25 81.24    Compiling clap_lex v1.1.1
+#25 81.78    Compiling dyn-clone v1.0.20
+#25 82.80    Compiling schemars v1.2.3
+#25 83.13    Compiling clap_builder v4.6.7
+#25 83.33    Compiling clap_derive v4.6.7
+#25 83.88    Compiling flate2 v1.1.10
+#25 88.31    Compiling brotli v9.0.0
+#25 88.50    Compiling xattr v1.6.1
+#25 97.37    Compiling toml v0.8.23
+#25 104.0    Compiling tokio-util v0.7.20
+#25 110.5    Compiling h3 v0.0.8
+#25 121.6    Compiling eqproxy-core v0.8.0 (/src/eqproxy-core)
+#25 122.4    Compiling h2 v0.4.20
+#25 140.0    Compiling serde_path_to_error v0.1.20
+#25 140.1    Compiling webpki-roots v1.0.10
+#25 140.7    Compiling clap v4.6.7
+#25 141.0    Compiling mimalloc v0.1.52
+#25 145.9    Compiling eqproxy-config v0.8.0 (/src/eqproxy-config)
+#25 274.9    Compiling rustls-webpki v0.103.16
+#25 297.8    Compiling quinn-proto v0.11.19
+#25 297.8    Compiling tokio-rustls v0.26.6
+#25 312.3    Compiling h3-quinn v0.0.10
+#25 313.2    Compiling eqproxy-net v0.8.0 (/src/eqproxy-net)
+#25 499.9    Compiling eqproxy-cli v0.8.0 (/src/eqproxy-cli)
+#25 554.5     Finished `release` profile [optimized] target(s) in 9m 13s
+#25 DONE 556.2s
+
+#26 [runtime 2/3] RUN mkdir -p /var/lib/eqproxy     && chown 65532:65532 /var/lib/eqproxy
+#26 CACHED
+
+#27 [runtime 3/3] COPY --from=builder /opt/eqproxy /opt/eqproxy
+#27 DONE 0.3s
+
+#28 [linux/arm64] generating sbom using docker.io/docker/buildkit-syft-scanner:stable-1
+#28 0.808 time="2026-10-27T22:49:09Z" level=info msg="starting syft scanner for buildkit v1.12.1"
+#28 DONE 3.1s
+
+#29 exporting to image
+#29 exporting layers
+#29 exporting layers 1.7s done
+#29 exporting manifest sha256:086866c872ce99a91a68d77f0248c852022eed2704440725eb2299a3be10c341 0.1s done
+#29 exporting config sha256:017c68e015c420e2c29f7636ecadb9aac80b6d15e8ac7ea99c33b9a689ab205a 0.1s done
+#29 exporting attestation manifest sha256:0e08aaca6bf71352ea6005a1b39f4030548961bca2961e3fcd39840eebfc1101
+#29 exporting attestation manifest sha256:0e08aaca6bf71352ea6005a1b39f4030548961bca2961e3fcd39840eebfc1101 0.1s done
+#29 exporting manifest list sha256:d1f7342cc1462cba9c8882fc7ee84035e90a93fede5dbf319dbf96566ec67c37 0.1s done
+#29 naming to docker.io/library/eqproxy-pin:0.8.0-arm64
+#29 naming to docker.io/library/eqproxy-pin:0.8.0-arm64 0.0s done
+#29 unpacking to docker.io/library/eqproxy-pin:0.8.0-arm64
+#29 unpacking to docker.io/library/eqproxy-pin:0.8.0-arm64 1.3s done
+#29 DONE 5.1s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/nqz42y5ckuilvd8usgxjs6x3i
+ARM64-BUILD-EXIT=0

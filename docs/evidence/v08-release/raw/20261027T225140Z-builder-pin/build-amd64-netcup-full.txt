@@ -1,0 +1,109 @@
+== the same amd64 build, full log (cache warm): the resolved bases and the exported config ==
+started:  2026-10-27T23:00:10Z
+#0 building with "cap010oci" instance using docker-container driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 4.12kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#2 DONE 0.8s
+
+#3 [internal] load metadata for cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
+#3 ...
+
+#4 [internal] load metadata for docker.io/library/rust:1.99.1-alpine
+#4 DONE 0.4s
+
+#3 [internal] load metadata for cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
+#3 DONE 0.7s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [runtime 1/3] FROM cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7
+#6 resolve cgr.dev/chainguard/wolfi-base:latest@sha256:360896efb0753a5701c48f860e17130c205eae5a264797aa3e7ea126ee2923a7 0.0s done
+#6 DONE 0.0s
+
+#7 [builder  1/15] FROM docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87
+#7 resolve docker.io/library/rust:1.99.1-alpine@sha256:b1d5dd5a22a09404d3e798c0cf051b689077360374eb505fa5bb93c479693d87 0.0s done
+#7 DONE 0.0s
+
+#8 [internal] load build context
+#8 transferring context: 4.29kB done
+#8 DONE 0.0s
+
+#9 [builder 12/15] COPY eqproxy-config eqproxy-config
+#9 CACHED
+
+#10 [builder 13/15] COPY eqproxy-net eqproxy-net
+#10 CACHED
+
+#11 [builder  2/15] WORKDIR /src
+#11 CACHED
+
+#12 [builder 14/15] COPY eqproxy-cli eqproxy-cli
+#12 CACHED
+
+#13 [builder 15/15] RUN cargo build --release --locked -p eqproxy-cli     && cp target/release/eqproxy /opt/eqproxy     && file /opt/eqproxy | grep -Eq 'statically linked|static-pie linked'
+#13 CACHED
+
+#14 [builder  5/15] COPY eqproxy.schema.json ./
+#14 CACHED
+
+#15 [builder 11/15] COPY eqproxy-core eqproxy-core
+#15 CACHED
+
+#16 [runtime 2/3] RUN mkdir -p /var/lib/eqproxy     && chown 65532:65532 /var/lib/eqproxy
+#16 CACHED
+
+#17 [builder 10/15] RUN mkdir -p eqproxy-core/src eqproxy-config/src eqproxy-net/src eqproxy-cli/src     && echo "" > eqproxy-core/src/lib.rs     && echo "" > eqproxy-config/src/lib.rs     && echo "" > eqproxy-net/src/lib.rs     && echo "fn main() {}" > eqproxy-cli/src/main.rs     && cargo fetch --locked
+#17 CACHED
+
+#18 [builder  6/15] COPY eqproxy-core/Cargo.toml eqproxy-core/Cargo.toml
+#18 CACHED
+
+#19 [builder  8/15] COPY eqproxy-net/Cargo.toml eqproxy-net/Cargo.toml
+#19 CACHED
+
+#20 [builder  9/15] COPY eqproxy-cli/Cargo.toml eqproxy-cli/Cargo.toml
+#20 CACHED
+
+#21 [builder  3/15] RUN apk add --no-cache musl-dev cmake make gcc g++ perl linux-headers     ca-certificates file
+#21 CACHED
+
+#22 [builder  4/15] COPY Cargo.toml Cargo.lock ./
+#22 CACHED
+
+#23 [builder  7/15] COPY eqproxy-config/Cargo.toml eqproxy-config/Cargo.toml
+#23 CACHED
+
+#24 [runtime 3/3] COPY --from=builder /opt/eqproxy /opt/eqproxy
+#24 CACHED
+
+#25 docker-image://docker.io/docker/buildkit-syft-scanner:stable-1
+#25 resolve docker.io/docker/buildkit-syft-scanner:stable-1 0.2s done
+#25 DONE 0.2s
+
+#26 [linux/amd64] generating sbom using docker.io/docker/buildkit-syft-scanner:stable-1
+#26 CACHED
+
+#27 exporting to oci image format
+#27 exporting layers done
+#27 exporting manifest sha256:93feff308130732253a3801fa9d0cad58f44aeefe41f77b414f3232bd6a797e8 done
+#27 exporting config sha256:dfd37492039b4b288875c2f6f804dde1ba9cf72ad084ac2e0799e1775bfd64cc done
+#27 exporting attestation manifest sha256:3a1d014a6ca9aa7e33fd5e2fe91816f65df4195afbec69828d9f6f79af227056 0.0s done
+#27 exporting manifest list sha256:e76fd23783939459cde0e65a33b602626b8dea917c6bb589e84421ce16a879a7 0.0s done
+#27 sending tarball
+#27 sending tarball 0.5s done
+#27 DONE 0.6s
+
+#28 importing to docker
+#28 DONE 0.0s
+REBUILD-EXIT=0
+finished: 2026-10-27T23:00:12Z
+== the image after the re-run ==
+id=sha256:e76fd23783939459cde0e65a33b602626b8dea917c6bb589e84421ce16a879a7 platform=linux/amd64 size=15379606
+eqproxy 0.8.0
+== done ==

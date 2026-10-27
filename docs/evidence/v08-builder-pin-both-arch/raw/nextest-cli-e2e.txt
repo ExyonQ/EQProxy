@@ -1,0 +1,86 @@
+   Compiling eqproxy-cli v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.63s
+────────────
+ Nextest run ID 589677f0-d218-40b3-a335-162f07645e62 with nextest profile: default
+    Starting 78 tests across 1 binary
+        PASS [   0.029s] ( 1/78) eqproxy-cli::cli_e2e await_log_line_times_out_with_the_log
+        PASS [   4.573s] ( 2/78) eqproxy-cli::cli_e2e diff_reports_no_differences_for_identical_configs
+        PASS [   4.605s] ( 3/78) eqproxy-cli::cli_e2e diff_refuses_when_a_side_is_invalid
+        PASS [   4.607s] ( 4/78) eqproxy-cli::cli_e2e diff_reports_changed_servers_and_added_listener
+        PASS [   4.608s] ( 5/78) eqproxy-cli::cli_e2e apply_reads_piped_stdin_once
+        PASS [   4.609s] ( 6/78) eqproxy-cli::cli_e2e apply_stores_first_configuration_with_inventory
+        PASS [   4.639s] ( 7/78) eqproxy-cli::cli_e2e apply_is_idempotent_for_identical_bytes
+        PASS [   4.640s] ( 8/78) eqproxy-cli::cli_e2e config_validate_rejects_duplicate_and_invalid_sni_names
+        PASS [   4.646s] ( 9/78) eqproxy-cli::cli_e2e apply_reports_diff_and_keeps_backup
+        PASS [   4.653s] (10/78) eqproxy-cli::cli_e2e apply_gate_leaves_state_untouched
+        PASS [   4.672s] (11/78) eqproxy-cli::cli_e2e config_schema_publishes_the_generated_json_schema
+        PASS [   0.069s] (12/78) eqproxy-cli::cli_e2e doctor_fails_on_an_occupied_port
+        PASS [   0.072s] (13/78) eqproxy-cli::cli_e2e doctor_reports_missing_config_actionably
+        PASS [   0.078s] (14/78) eqproxy-cli::cli_e2e doctor_passes_for_a_free_port
+        PASS [   0.080s] (15/78) eqproxy-cli::cli_e2e doctor_without_config_checks_the_environment
+        PASS [   0.136s] (16/78) eqproxy-cli::cli_e2e explain_fails_actionably_on_bad_input
+        PASS [   0.100s] (17/78) eqproxy-cli::cli_e2e plan_inventories_what_run_would_activate
+        PASS [   0.129s] (18/78) eqproxy-cli::cli_e2e explain_simulates_routing_with_no_side_effects
+        PASS [   0.113s] (19/78) eqproxy-cli::cli_e2e reap_on_drop_leaves_no_live_child
+        PASS [   0.211s] (20/78) eqproxy-cli::cli_e2e explain_piped_into_head_does_not_panic
+        PASS [   0.185s] (21/78) eqproxy-cli::cli_e2e plan_loads_real_tls_material
+        PASS [   0.215s] (22/78) eqproxy-cli::cli_e2e plan_fails_actionably_on_bad_input
+        PASS [   0.278s] (23/78) eqproxy-cli::cli_e2e rollback_without_history_fails_explicitly
+        PASS [   0.388s] (24/78) eqproxy-cli::cli_e2e rollback_restores_previous_current
+        PASS [   0.509s] (25/78) eqproxy-cli::cli_e2e rollback_walks_back_one_apply_at_a_time
+        PASS [   0.470s] (26/78) eqproxy-cli::cli_e2e run_admin_plane_enforces_group_mode_and_uid_allowlist
+        PASS [   0.453s] (27/78) eqproxy-cli::cli_e2e run_admin_plane_reloads_unix_socket_policy_on_sighup
+        PASS [   0.545s] (28/78) eqproxy-cli::cli_e2e run_admin_plane_listens_on_a_unix_socket_and_removes_it_on_shutdown
+        PASS [   0.534s] (29/78) eqproxy-cli::cli_e2e run_admin_plane_reports_drain_progress_and_completion
+        PASS [   0.368s] (30/78) eqproxy-cli::cli_e2e run_auth_basic_and_subrequest_gate_requests
+        PASS [   0.788s] (31/78) eqproxy-cli::cli_e2e run_admin_plane_drains_a_server_with_the_write_token
+        PASS [   0.272s] (32/78) eqproxy-cli::cli_e2e run_compresses_brotli_and_prefers_it_over_gzip
+        PASS [   0.277s] (33/78) eqproxy-cli::cli_e2e run_compresses_gzip_and_respects_every_refusal_case
+        PASS [   0.432s] (34/78) eqproxy-cli::cli_e2e run_canary_split_routes_by_weight_with_header_and_cookie_overrides
+        PASS [   0.255s] (35/78) eqproxy-cli::cli_e2e run_hash_policy_and_request_mirror_end_to_end
+        PASS [   0.882s] (36/78) eqproxy-cli::cli_e2e run_admin_plane_serves_status_and_metrics_with_a_bearer_token
+        PASS [   0.115s] (37/78) eqproxy-cli::cli_e2e run_http_mode_proxies_requests_and_rejects_smuggling
+        PASS [   0.627s] (38/78) eqproxy-cli::cli_e2e run_backup_server_covers_a_failed_primary_and_returns_on_recovery
+        PASS [   0.152s] (39/78) eqproxy-cli::cli_e2e run_leastconn_sends_new_requests_to_the_idle_server
+        PASS [   0.045s] (40/78) eqproxy-cli::cli_e2e run_refuses_to_start_when_the_access_log_cannot_be_opened
+        PASS [   0.123s] (41/78) eqproxy-cli::cli_e2e run_proxies_traffic_and_shuts_down_gracefully_on_sigint
+        PASS [   0.584s] (42/78) eqproxy-cli::cli_e2e run_hostname_backend_resolves_with_the_os_resolver
+        PASS [   0.236s] (43/78) eqproxy-cli::cli_e2e run_routes_by_rules_first_match_wins_with_default_fallback
+        PASS [   0.181s] (44/78) eqproxy-cli::cli_e2e run_rule_actions_rewrite_redirect_and_direct_response
+        PASS [   1.527s] (45/78) eqproxy-cli::cli_e2e run_admin_plane_applies_backend_config_under_traffic
+        PASS [   0.186s] (46/78) eqproxy-cli::cli_e2e run_serves_gzip_over_h2c_to_a_real_client
+        PASS [   0.194s] (47/78) eqproxy-cli::cli_e2e run_serves_brotli_over_h2c_to_a_real_client
+        PASS [   1.624s] (48/78) eqproxy-cli::cli_e2e run_all_backups_spreads_traffic_across_the_backup_pool
+        PASS [   1.199s] (49/78) eqproxy-cli::cli_e2e run_document_put_flips_the_backup_pool_live
+        PASS [   0.858s] (50/78) eqproxy-cli::cli_e2e run_panel_applies_a_table_and_drains_a_server
+        PASS [   0.132s] (51/78) eqproxy-cli::cli_e2e run_writes_combined_lines_when_configured
+        PASS [   0.201s] (52/78) eqproxy-cli::cli_e2e run_writes_one_json_access_line_per_request_under_traffic
+        PASS [   1.035s] (53/78) eqproxy-cli::cli_e2e run_priority_ladder_fails_over_between_backups_and_back
+        PASS [   0.044s] (54/78) eqproxy-cli::cli_e2e unimplemented_commands_fail_explicitly_with_exit_2
+        PASS [   0.137s] (55/78) eqproxy-cli::cli_e2e sighup_reloads_the_config_under_traffic
+        PASS [   0.104s] (56/78) eqproxy-cli::cli_e2e validate_accepts_a_good_config
+        PASS [   0.082s] (57/78) eqproxy-cli::cli_e2e validate_accepts_h2_alpn_on_a_backend
+        PASS [   0.135s] (58/78) eqproxy-cli::cli_e2e validate_accepts_a_backup_pool_and_refuses_a_contradiction
+        PASS [   0.092s] (59/78) eqproxy-cli::cli_e2e validate_accepts_phase2b_config_with_tls_servers_and_health_checks
+        PASS [   0.114s] (60/78) eqproxy-cli::cli_e2e validate_accepts_h2_alpn_on_an_http_listener
+        PASS [   1.012s] (61/78) eqproxy-cli::cli_e2e run_serves_http2_to_real_clients_over_tls_and_cleartext
+        PASS [   0.112s] (62/78) eqproxy-cli::cli_e2e validate_names_rule_fields_actionably
+        PASS [   0.229s] (63/78) eqproxy-cli::cli_e2e validate_maps_leastconn_aliases_and_bounds_slow_start
+        PASS [   0.070s] (64/78) eqproxy-cli::cli_e2e validate_rejects_https_auth_url_naming_the_gap
+        PASS [   0.072s] (65/78) eqproxy-cli::cli_e2e validate_rejects_invalid_affinity_mode
+        PASS [   0.432s] (66/78) eqproxy-cli::cli_e2e validate_and_explain_report_the_compression_settings
+        PASS [   0.041s] (67/78) eqproxy-cli::cli_e2e validate_reports_file_line_field_cause_example
+        PASS [   0.081s] (68/78) eqproxy-cli::cli_e2e validate_rejects_server_and_servers_together
+        PASS [   0.108s] (69/78) eqproxy-cli::cli_e2e validate_rejects_misconfigured_splits_maps_and_missing_files
+        PASS [   1.822s] (70/78) eqproxy-cli::cli_e2e run_http_check_interops_with_keep_alive_origin
+        PASS [   0.379s] (71/78) eqproxy-cli::cli_e2e validate_names_rule_action_fields_actionably
+        PASS [   1.211s] (72/78) eqproxy-cli::cli_e2e run_slow_start_ramps_the_recovered_server_up
+        PASS [   0.055s] (73/78) eqproxy-cli::cli_e2e validate_reports_missing_cert_file_with_actionable_error
+        PASS [   0.056s] (74/78) eqproxy-cli::cli_e2e validate_reports_syntax_errors_with_line
+        PASS [   1.276s] (75/78) eqproxy-cli::cli_e2e run_with_tls_termination_proxies_real_traffic
+        PASS [   1.693s] (76/78) eqproxy-cli::cli_e2e run_startup_with_broken_dns_serves_immediately_with_explicit_503
+        PASS [   2.314s] (77/78) eqproxy-cli::cli_e2e run_with_sni_serves_the_certificate_of_the_requested_name
+        PASS [   3.907s] (78/78) eqproxy-cli::cli_e2e run_hot_maps_swap_under_traffic_without_config_reload
+────────────
+     Summary [   9.486s] 78 tests run: 78 passed, 0 skipped
+NEXTEST-EXIT=0

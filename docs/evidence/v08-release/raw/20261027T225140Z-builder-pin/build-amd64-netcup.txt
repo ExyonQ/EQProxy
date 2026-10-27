@@ -1,0 +1,55 @@
+== host ==
+Linux 6.8.0-147-generic x86_64
+8
+29.6.1 linux/amd64
+== pinned builder vs toolchain file ==
+25:ARG RUST_VERSION=1.99.1
+channel = 1.99.1
+
+== docker buildx build --platform linux/amd64 (native, pinned) ==
+started:  2026-10-27T22:37:53Z
+#23 148.0    Compiling eqproxy-cli v0.8.0 (/src/eqproxy-cli)
+#23 165.4     Finished `release` profile [optimized] target(s) in 2m 45s
+#23 DONE 165.5s
+
+#25 [runtime 3/3] COPY --from=builder /opt/eqproxy /opt/eqproxy
+#25 DONE 0.1s
+
+#26 [linux/amd64] generating sbom using docker.io/docker/buildkit-syft-scanner:stable-1
+#26 0.089 time="2026-10-27T22:40:42Z" level=info msg="starting syft scanner for buildkit v1.12.1"
+#26 DONE 1.2s
+
+#27 exporting to oci image format
+#27 exporting layers
+#27 exporting layers 0.7s done
+#27 exporting manifest sha256:93feff308130732253a3801fa9d0cad58f44aeefe41f77b414f3232bd6a797e8 done
+#27 exporting config sha256:dfd37492039b4b288875c2f6f804dde1ba9cf72ad084ac2e0799e1775bfd64cc done
+#27 exporting attestation manifest sha256:c43195b88237edce563bcfa41fa61a67f4a27e4a924380c52a070c145956b666
+#27 exporting attestation manifest sha256:c43195b88237edce563bcfa41fa61a67f4a27e4a924380c52a070c145956b666 0.0s done
+#27 exporting manifest list sha256:3277ef25056e05112ec223a180b989d4fdb3c8717a59551868630120030d0952 done
+#27 sending tarball
+#27 sending tarball 0.6s done
+#27 DONE 1.6s
+
+#28 importing to docker
+#28 DONE 0.0s
+AMD64-BUILD-EXIT=0
+finished: 2026-10-27T22:40:45Z
+
+== the image, natively on amd64 ==
+id=sha256:3277ef25056e05112ec223a180b989d4fdb3c8717a59551868630120030d0952 platform=linux/amd64 size=15379606
+$ docker run --rm eqproxy-pin:0.8.0-amd64 --version
+eqproxy 0.8.0
+$ printf <valid config> | docker run --rm -i eqproxy-pin:0.8.0-amd64 config validate --config /dev/stdin
+config OK: 1 listener(s), 1 backend(s) in /dev/stdin
+$ docker run --rm eqproxy-pin:0.8.0-amd64 run --config <bad> # boundary: a bad document must be refused
+configuration error in /dev/stdin:2 — field `listener.web.backend`: backend "nope" does not exist
+  example: backend = "nope" requires a [backend.nope] section with server = "127.0.0.1:9000"
+invalid config: 1 error(s) in /dev/stdin
+bad-config-exit=1
+
+== image tar for the local Scout and E2E ==
+-rw-r--r-- 1 root root 15314045 Oct 27 23:40 /tmp/eqproxy-pin-amd64.tgz
+9998aa4eab7b4f701dae924335d43f12547d18e2b38dfd7cb8b8d9d4b37708cd  /tmp/eqproxy-pin-amd64.tgz
+eqproxy-pin@sha256:3277ef25056e05112ec223a180b989d4fdb3c8717a59551868630120030d0952
+== done ==

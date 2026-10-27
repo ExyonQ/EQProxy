@@ -1,0 +1,78 @@
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 60904)
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/server.py", line 447, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/server.py", line 435, in handle_one_request
+    method()
+    ~~~~~~^^
+  File "/Volumes/Lexar/Cursor/EQProxy/scripts/evidence/v08-builder-pin/all-backups-probe.py", line 58, in do_GET
+    self.wfile.write(body)
+    ~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+    ~~~~~~~~~~~~~~~~~~^^^
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 60952)
+Traceback (most recent call last):
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 697, in process_request_thread
+    self.finish_request(request, client_address)
+    ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 362, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 766, in __init__
+    self.handle()
+    ~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/server.py", line 447, in handle
+    self.handle_one_request()
+    ~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/http/server.py", line 435, in handle_one_request
+    method()
+    ~~~~~~^^
+  File "/Volumes/Lexar/Cursor/EQProxy/scripts/evidence/v08-builder-pin/all-backups-probe.py", line 58, in do_GET
+    self.wfile.write(body)
+    ~~~~~~~~~~~~~~~~^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/socketserver.py", line 845, in write
+    self._sock.sendall(b)
+    ~~~~~~~~~~~~~~~~~~^^^
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+binary:    target/debug/eqproxy
+proxy:     127.0.0.1:60745  admin: 127.0.0.1:60736
+origins:   a=60733 h=60734 l=60735
+burners:   0
+
+scenario: primary down, `h` down, `l` healthy but its /healthz
+          answers 300ms late (probe timeout is 100ms)
+
+request  1: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  2: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  3: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  4: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  5: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  6: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  7: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  8: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request  9: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request 10: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request 11: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+request 12: 'HTTP/1.1 503 service unavailable' body=''   admin: 127.0.0.1:60733 healthy=False state=ready | 127.0.0.1:60734 healthy=False state=ready | 127.0.0.1:60735 healthy=False state=ready
+no_server counter: (no no_server/health series in /metrics)
+
+proxy log:
+    INFO listener web listening on 127.0.0.1:60745
+    INFO admin listening on 127.0.0.1:60736 (routes: /api/v1/status, /metrics (read-only))
+    METRICS client[accepted=0 active=0 completed=0 rejected_maxconn=0 protocol_errors=0 log_dropped=0] proxy[no_server=0 queue_full=0 queue_timeout=0 retries=0 local_responses=0 redirects=0 direct=0] network[idle_timeouts=0 bytes_c2b=0 bytes_b2c=0] backend[connect_failures=0 tls_failures=0 discarded=0 reused=0 opened=0 proxied=0] phases[header_timeouts=0] proxy_proto[denied=0 invalid=0] cfg[reloads=0 reload_failures=0 last_swap_us=0] auth[denied=0 service_errors=0] dns[ok=0 failures=0 updates=0] maps[reloads=0 failures=0] mirror[sent=0 failures=0 skipped=0] h2[sessions_idle_closed=0 goaway=0 refused_retried=0] grpc[streams=0 errors=0] h3[clean_closes=0 connection_errors=0] ws[tunnels=0 failures=0] compression[gzip=0 brotli=0 bytes_in=0 bytes_out=0]

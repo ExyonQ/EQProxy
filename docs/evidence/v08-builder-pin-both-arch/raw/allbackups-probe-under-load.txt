@@ -1,0 +1,10 @@
+binary:    target/debug/eqproxy
+proxy:     127.0.0.1:63901  admin: 127.0.0.1:63873
+origins:   a=63865 h=63870 l=63872
+burners:   8
+
+phase 1: primary owns the tier (10/10 'a')
+phase 2: high=20 low=10 other=0
+phase 3: 80 requests, every one from the survivor 'l'
+
+no anomaly observed in this pass

@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EQProxy panel</title>
+<link rel="stylesheet" href="/panel/app.css">
+</head>
+<body>
+<h1>EQProxy <span class="muted">panel</span></h1>
+<p>Paste a bearer token to open a session. The read token opens a read-only panel; the write token lets you change server state, apply tables and reload certificates.</p>
+<form method="post" action="/panel/login"><p><input type="password" name="token" autocomplete="off" required> <button type="submit">Log in</button></p></form>
+<p class="muted">The token is exchanged for a session cookie scoped to <code>/panel</code>; it is never stored, echoed or logged.</p>
+</body>
+</html>
