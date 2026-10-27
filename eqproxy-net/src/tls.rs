@@ -6,10 +6,13 @@
 //!   by default (SNI derived from the address or `server_name`); `verify =
 //!   false` is a conscious, dangerous opt-out (THREAT_MODEL), and `ca_file`
 //!   adds private CAs to the Mozilla roots.
+//! - **Renewal (D7)**: the certificates live behind a resolver the acceptor
+//!   consults on every handshake, so a rotation swaps them in place — the
+//!   listener, the QUIC endpoint and its live connections are untouched.
 //! - CryptoProvider: aws-lc-rs (ADR-0004). 100 % safe Rust code.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -65,9 +68,17 @@ pub struct ServerTls {
     sni_names: Vec<Vec<String>>,
     /// Digest of the material this acceptor was built from (certificates,
     /// keys, client CA, ALPN and minimum version). A hot reload compares it
-    /// to decide whether a live QUIC endpoint — whose TLS is fixed at
-    /// creation — still matches the new configuration.
+    /// to decide whether a live QUIC endpoint still matches the new
+    /// configuration.
     fingerprint: u64,
+    /// The certificates this acceptor serves **right now**. Shared with the
+    /// QUIC endpoint built from this acceptor: a renewal swaps the resolver
+    /// instead of rebuilding either (D7).
+    hot: Arc<HotCerts>,
+    /// Digest of everything a live endpoint cannot change (client CA, ALPN
+    /// and minimum version). Two acceptors with the same value differ only in
+    /// certificate material, which a renewal can adopt in place.
+    non_certificate_fingerprint: u64,
 }
 
 impl ServerTls {
@@ -75,6 +86,32 @@ impl ServerTls {
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
         self.fingerprint
+    }
+
+    /// `sha256:<hex>` of the leaf certificate a client is served when it
+    /// sends no SNI (or a name no entry claims). Read from the live resolver,
+    /// so it follows a hot renewal (D7).
+    #[must_use]
+    pub fn leaf_fingerprint(&self) -> String {
+        self.hot.leaf_fingerprint()
+    }
+
+    /// Whether `other`'s certificate material can be installed in this live
+    /// acceptor. A QUIC endpoint freezes its ALPN, client-CA verifier and
+    /// minimum version, so a change to any of those cannot be adopted; every
+    /// certificate, key and SNI-name change can.
+    #[must_use]
+    pub fn can_adopt_certificates(&self, other: &Self) -> bool {
+        self.non_certificate_fingerprint == other.non_certificate_fingerprint
+    }
+
+    /// Installs `other`'s chains, keys and SNI names in the resolver this
+    /// acceptor (and the QUIC endpoint built from it) already consults. The
+    /// swap is one `RwLock` write: a handshake either sees the old set or the
+    /// new one, never a mix. Callers check
+    /// [`can_adopt_certificates`](Self::can_adopt_certificates) first.
+    pub fn adopt_certificates(&self, other: &Self) {
+        self.hot.adopt(&other.hot);
     }
 
     /// QUIC server configuration for HTTP/3 (B-H2), derived from this
@@ -219,6 +256,63 @@ impl SniResolver {
     }
 }
 
+/// The resolver a built acceptor consults. It owns the resolver behind a lock
+/// because a rotation must take effect on an acceptor that already exists —
+/// including a QUIC endpoint, whose TLS settings are frozen once created.
+#[derive(Debug)]
+struct HotCerts {
+    current: RwLock<Arc<SniResolver>>,
+}
+
+impl HotCerts {
+    fn new(resolver: SniResolver) -> Self {
+        Self {
+            current: RwLock::new(Arc::new(resolver)),
+        }
+    }
+
+    fn load(&self) -> Arc<SniResolver> {
+        Arc::clone(
+            &self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    /// Replaces the whole certificate set in one write: a concurrent handshake
+    /// sees the previous set or the new one, never a partial mix.
+    fn adopt(&self, other: &Self) {
+        let next = other.load();
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    }
+
+    fn leaf_fingerprint(&self) -> String {
+        // `certified_key` builds the default through `parse_certs`, which
+        // refuses a chain with no certificates, so a resolver always has a
+        // leaf; the empty string is an unreachable fallback that keeps this
+        // accessor total instead of panicking in `status`.
+        self.load()
+            .default
+            .cert
+            .first()
+            .map(leaf_fingerprint_of)
+            .unwrap_or_default()
+    }
+}
+
+impl rustls::server::ResolvesServerCert for HotCerts {
+    fn resolve(
+        &self,
+        client_hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        Some(self.load().pick(client_hello.server_name()))
+    }
+}
+
 impl rustls::server::ResolvesServerCert for SniResolver {
     fn resolve(
         &self,
@@ -329,10 +423,11 @@ pub fn server_config_with_sni(
             certified_key(&entry.cert_chain_pem, &entry.key_pem)?,
         ));
     }
-    let resolver = Arc::new(SniResolver {
+    let hot = Arc::new(HotCerts::new(SniResolver {
         entries,
         default: Arc::clone(&default),
-    }) as Arc<dyn rustls::server::ResolvesServerCert>;
+    }));
+    let resolver = Arc::clone(&hot) as Arc<dyn rustls::server::ResolvesServerCert>;
     let builder = rustls::ServerConfig::builder_with_protocol_versions(protocol_versions(min));
     let mut config = if let Some(client_ca_pem) = client_ca_pem {
         // mTLS (A15): clients must present a certificate issued by this CA.
@@ -354,13 +449,45 @@ pub fn server_config_with_sni(
     };
     config.alpn_protocols = alpn.iter().map(|proto| proto.as_bytes().to_vec()).collect();
     let fingerprint = material_fingerprint(cert_chain_pem, key_pem, sni, client_ca_pem, alpn, min);
+    let non_certificate_fingerprint = fixed_material_fingerprint(client_ca_pem, alpn, min);
     let config = Arc::new(config);
     Ok(ServerTls {
         acceptor: TlsAcceptor::from(Arc::clone(&config)),
         config,
         sni_names,
         fingerprint,
+        hot,
+        non_certificate_fingerprint,
     })
+}
+
+/// `sha256:<hex>` of one DER certificate. Uses the crypto provider already in
+/// the binary (aws-lc-rs through rustls), so identifying a certificate adds no
+/// crate and no second implementation.
+fn leaf_fingerprint_of(leaf: &CertificateDer<'_>) -> String {
+    let digest = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, leaf.as_ref());
+    let mut out = String::with_capacity(7 + digest.as_ref().len() * 2);
+    out.push_str("sha256:");
+    for byte in digest.as_ref() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Digest of the material a live QUIC endpoint freezes: client CA, ALPN and
+/// minimum version. Equal values mean two acceptors differ only in
+/// certificates, which a renewal can adopt without a restart (D7).
+fn fixed_material_fingerprint(
+    client_ca_pem: Option<&[u8]>,
+    alpn: &[String],
+    min: TlsVersion,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    client_ca_pem.hash(&mut hasher);
+    alpn.hash(&mut hasher);
+    (min == TlsVersion::V1_3).hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Digest of everything that changes what the endpoint asserts: the default
@@ -516,6 +643,7 @@ mod tests {
     const ALPHA_KEY: &[u8] = include_bytes!("../tests/fixtures/alpha.key");
     const BETA: &[u8] = include_bytes!("../tests/fixtures/beta.pem");
     const BETA_KEY: &[u8] = include_bytes!("../tests/fixtures/beta.key");
+    const MTLS_CA: &[u8] = include_bytes!("../tests/fixtures/mtls-ca.pem");
 
     /// Leaf DER of a PEM chain (what the handshake serves).
     fn leaf(pem: &[u8]) -> Vec<u8> {
@@ -666,6 +794,53 @@ mod tests {
         let err = server_config(CERT, KEY, Some(b"no es PEM"), &[], TlsVersion::V1_2)
             .expect_err("must reject garbage client CA");
         assert!(matches!(err, TlsError::Cert(_)), "error: {err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
+    #[test]
+    fn leaf_fingerprint_names_the_certificate_that_is_served() {
+        let server =
+            server_config(CERT, KEY, None, &[], TlsVersion::V1_2).expect("valid test cert/key");
+        let fingerprint = server.leaf_fingerprint();
+        assert!(fingerprint.starts_with("sha256:"), "{fingerprint}");
+        assert_eq!(fingerprint.len(), 7 + 64, "a full SHA-256, not a prefix");
+        // Deterministic for the same material...
+        let same = server_config(CERT, KEY, None, &[], TlsVersion::V1_2).expect("same");
+        assert_eq!(fingerprint, same.leaf_fingerprint());
+        // ...and different for a different leaf (the whole point of D7).
+        let other = server_config(BETA, BETA_KEY, None, &[], TlsVersion::V1_2).expect("other cert");
+        assert_ne!(fingerprint, other.leaf_fingerprint());
+    }
+
+    #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]
+    #[test]
+    fn a_live_acceptor_adopts_new_certificates_but_not_alpn_or_mtls() {
+        let alpn = ["http/1.1".to_owned()];
+        let live = server_config(CERT, KEY, None, &alpn, TlsVersion::V1_2).expect("live");
+        let renewed =
+            server_config(BETA, BETA_KEY, None, &alpn, TlsVersion::V1_2).expect("renewed");
+        assert!(
+            live.can_adopt_certificates(&renewed),
+            "a renewal changes nothing a live endpoint froze"
+        );
+        let before = live.leaf_fingerprint();
+        live.adopt_certificates(&renewed);
+        assert_eq!(
+            live.leaf_fingerprint(),
+            renewed.leaf_fingerprint(),
+            "the live acceptor serves the new leaf"
+        );
+        assert_ne!(before, live.leaf_fingerprint());
+
+        // Everything the endpoint froze refuses an in-place adoption.
+        let other_alpn = server_config(BETA, BETA_KEY, None, &["h2".to_owned()], TlsVersion::V1_2)
+            .expect("other alpn");
+        assert!(!live.can_adopt_certificates(&other_alpn));
+        let tls13 = server_config(BETA, BETA_KEY, None, &alpn, TlsVersion::V1_3).expect("tls13");
+        assert!(!live.can_adopt_certificates(&tls13));
+        let mtls =
+            server_config(BETA, BETA_KEY, Some(MTLS_CA), &alpn, TlsVersion::V1_2).expect("mtls");
+        assert!(!live.can_adopt_certificates(&mtls));
     }
 
     #[cfg_attr(miri, ignore = "uses rustls/aws-lc-rs (FFI not emulatable by miri)")]

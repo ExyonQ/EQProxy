@@ -26,15 +26,19 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-/// Administration state of one backend server (v0.8, ADR-0018).
+/// Administration state of one backend server (v0.8, ADR-0018, ADR-0028).
 ///
 /// `Drain` removes the server from **new** selections immediately while the
-/// exchanges already in flight finish on it; `Ready` puts it back. The health
-/// machine (B11) is a separate axis: a drained server keeps being probed and
-/// keeps its `up`/`down` state, so an operator can see both.
+/// exchanges already in flight finish on it; `Maintenance` does the same and
+/// additionally closes the server's idle pooled sockets at the transition,
+/// so nothing of ours stays parked on a box taken out for a patch window;
+/// `Ready` puts it back. The health machine (B11) is a separate axis: a
+/// removed server keeps being probed and keeps its `up`/`down` state, so an
+/// operator can see both.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ServerMode {
     /// Serving new exchanges.
@@ -42,24 +46,32 @@ pub enum ServerMode {
     Ready,
     /// Administratively removed: no new exchanges, in-flight ones finish.
     Drain,
+    /// Removed for a patch window (ADR-0028): like `Drain`, and the server's
+    /// idle pooled connections are closed at the transition instead of
+    /// ageing out on their own timer.
+    Maintenance,
 }
 
 impl ServerMode {
-    /// Wire/JSON name (the only accepted spellings).
+    /// Wire/JSON name (the only accepted spellings; the reference's `maint`
+    /// is not an alias).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Ready => "ready",
             Self::Drain => "drain",
+            Self::Maintenance => "maintenance",
         }
     }
 
-    /// Parses the wire name exactly (no aliases: a typo must not drain).
+    /// Parses the wire name exactly (no aliases: a typo must not remove a
+    /// server).
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "ready" => Some(Self::Ready),
             "drain" => Some(Self::Drain),
+            "maintenance" => Some(Self::Maintenance),
             _ => None,
         }
     }
@@ -119,12 +131,22 @@ pub struct ServerView {
     /// Address currently in use (`None` while a name is unresolved).
     pub addr: Option<SocketAddr>,
     pub weight: u32,
+    /// Backup class (B8): selected only when no primary is eligible.
+    pub backup: bool,
+    /// Failover order among backups (EQProxy extension): higher first, ties
+    /// by configuration order. Always `0` on a primary.
+    pub priority: u32,
     /// Health machine (B11), independent of [`mode`](Self::mode).
     pub up: bool,
     /// Exchanges in flight on this slot.
     pub active: u32,
     /// Administrative state (ADR-0018).
     pub mode: ServerMode,
+    /// `true` when the slot is administratively removed (`drain` or
+    /// `maintenance`) and nothing is in flight on it any more: the drain has
+    /// finished (H3) or the maintenance window is open (ADR-0028). A removed
+    /// but idle slot reports `true` as well — there was nothing to wait for.
+    pub drained: bool,
 }
 
 /// Balancing algorithm of a backend (B-H5/B-N12/B-E6).
@@ -136,6 +158,18 @@ pub enum Balance {
     /// Weighted least-connections (B-H5/B-N12/B-E6): `active / effective
     /// weight` picks, ties smoothed by SWRR.
     LeastConn,
+}
+
+impl Balance {
+    /// Report name, shared by the status JSON, the metrics detail labels and
+    /// the panel: one spelling for one algorithm.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RoundRobin => "round_robin",
+            Self::LeastConn => "least_conn",
+        }
+    }
 }
 
 /// Effective weights live in milli-units so a slow-start ramp can be
@@ -173,6 +207,11 @@ impl std::fmt::Display for ServerAddr {
 pub struct ResolvedServer {
     pub addr: ServerAddr,
     pub weight: u32,
+    /// Backup class (B8): never selected while any primary is eligible.
+    pub backup: bool,
+    /// Failover order among backups (EQProxy extension, 0..=255): higher
+    /// serves first; only the first operational rung is used at a time.
+    pub priority: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -185,6 +224,10 @@ struct ServerState {
     /// `no_available_server` metric until DNS lands.
     addr: Option<SocketAddr>,
     weight: u32,
+    /// Backup class (B8), copied from [`ResolvedServer`] at construction.
+    backup: bool,
+    /// Failover order among backups (EQProxy extension), copied too.
+    priority: u32,
     up: bool,
     current_weight: i64,
     consecutive_fails: u32,
@@ -204,11 +247,20 @@ pub struct Balancer {
     rise: u32,
     algorithm: Balance,
     slow_start: Duration,
+    /// Balance across the whole backup tier (`option allbackups`, B8): every
+    /// eligible backup is a candidate instead of one rung at a time.
+    all_backups: bool,
     state: Mutex<Vec<ServerState>>,
     targets: Vec<ServerAddr>,
     /// Shared administration state; `None` in unit constructions that do not
     /// use the admin plane (every server is then `ready`).
     modes: Option<Arc<ServerModes>>,
+    /// Drain episodes of this backend whose **last in-flight exchange** ended
+    /// after the drain was declared (H3). Incremented once per episode, when
+    /// the count reaches zero on a drained slot; a drain declared on an idle
+    /// slot has no exchange to wait for and is reported by
+    /// [`ServerView::drained`] instead of an event.
+    drains_completed: AtomicU64,
 }
 
 /// RAII in-flight slot (B-H5 leastconn): one held per exchange, released
@@ -232,13 +284,60 @@ impl ActiveGuard<'_> {
             .get(self.idx)
             .map_or(1, |server| server.active)
     }
+
+    /// Administration state of the guarded slot at this instant (ADR-0028):
+    /// the completion path refuses to park a connection to a `maintenance`
+    /// slot, so the pool holds nothing of a server taken out for a patch
+    /// window — check-in would otherwise re-park it after the transition.
+    #[must_use]
+    pub fn mode(&self) -> ServerMode {
+        let state = self.balancer.state();
+        state
+            .get(self.idx)
+            .map_or(ServerMode::Ready, |server| self.balancer.mode_of(server))
+    }
 }
 
 impl Drop for ActiveGuard<'_> {
     fn drop(&mut self) {
+        // The last exchange of a removed slot ends here: that is the exact
+        // moment the drain finishes (H3) and the maintenance window opens
+        // (ADR-0028), so the event is recorded at the source instead of
+        // being polled later. The lock is released before the log line so
+        // no I/O happens while holding the server table.
         let mut state = self.balancer.state();
-        if let Some(server) = state.get_mut(self.idx) {
-            server.active = server.active.saturating_sub(1);
+        let finished = match state.get_mut(self.idx) {
+            Some(server) => {
+                server.active = server.active.saturating_sub(1);
+                let mode = self.balancer.mode_of(server);
+                (server.active == 0 && mode != ServerMode::Ready)
+                    .then(|| (mode, server.target.clone()))
+            }
+            None => None,
+        };
+        drop(state);
+        match finished {
+            Some((ServerMode::Drain, target)) => {
+                let count = self
+                    .balancer
+                    .drains_completed
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                eprintln!(
+                    "INFO server drained: backend={} target={} active=0 events={count}",
+                    self.balancer.backend, target
+                );
+            }
+            Some((ServerMode::Maintenance, target)) => {
+                // One-shot: the drain counter backs a published metric and is
+                // not extended to maintenance (ADR-0028). The `drained` flag
+                // in status plus this line are the window's signal.
+                eprintln!(
+                    "INFO server ready for maintenance: backend={} target={} active=0",
+                    self.balancer.backend, target
+                );
+            }
+            _ => {}
         }
     }
 }
@@ -275,6 +374,8 @@ impl Balancer {
                     ServerAddr::Name { .. } => None,
                 },
                 weight: s.weight,
+                backup: s.backup,
+                priority: s.priority,
                 up: true,
                 current_weight: 0,
                 consecutive_fails: 0,
@@ -289,10 +390,20 @@ impl Balancer {
             rise: rise.max(1),
             algorithm,
             slow_start,
+            all_backups: false,
             state: Mutex::new(state),
             targets,
             modes: None,
+            drains_completed: AtomicU64::new(0),
         }
+    }
+
+    /// Drain episodes of this backend that finished while it had exchanges in
+    /// flight (H3). Monotonic for the life of the balancer; a SIGHUP rebuild
+    /// starts a fresh balancer, exactly like the rest of its live state.
+    #[must_use]
+    pub fn drains_completed(&self) -> u64 {
+        self.drains_completed.load(Ordering::Relaxed)
     }
 
     /// Binds the balancer to the shared administration state (ADR-0018): the
@@ -311,6 +422,22 @@ impl Balancer {
         self.slow_start
     }
 
+    /// Balances across every eligible backup (`option allbackups`, B8)
+    /// instead of one rung at a time. Set while building, before the
+    /// balancer serves traffic.
+    #[must_use]
+    pub fn with_all_backups(mut self, all_backups: bool) -> Self {
+        self.all_backups = all_backups;
+        self
+    }
+
+    /// Whether the whole backup tier balances at once (`option allbackups`,
+    /// B8); needed when a builder rebuilds the balancer.
+    #[must_use]
+    pub fn all_backups(&self) -> bool {
+        self.all_backups
+    }
+
     /// Administrative state of a slot (ADR-0018).
     fn mode_of(&self, server: &ServerState) -> ServerMode {
         self.modes.as_ref().map_or(ServerMode::Ready, |modes| {
@@ -325,13 +452,19 @@ impl Balancer {
         let state = self.state();
         state
             .iter()
-            .map(|server| ServerView {
-                target: server.target.clone(),
-                addr: server.addr,
-                weight: server.weight,
-                up: server.up,
-                active: server.active,
-                mode: self.mode_of(server),
+            .map(|server| {
+                let mode = self.mode_of(server);
+                ServerView {
+                    target: server.target.clone(),
+                    addr: server.addr,
+                    weight: server.weight,
+                    backup: server.backup,
+                    priority: server.priority,
+                    up: server.up,
+                    active: server.active,
+                    mode,
+                    drained: mode != ServerMode::Ready && server.active == 0,
+                }
             })
             .collect()
     }
@@ -526,6 +659,23 @@ impl Balancer {
 
     /// Core selection: affinity first (B-H8), then the configured
     /// algorithm over the eligible servers (up, not drained, not excluded).
+    ///
+    /// Backup servers (B8) form a second tier: whenever at least one primary
+    /// is eligible, only primaries are considered; backups are selected only
+    /// when the primary tier is empty (down, drained, weight 0, unresolved or
+    /// excluded by a retry). Inside the backup tier there are two declared
+    /// modes:
+    ///
+    /// - the reference default: one **ladder**, rungs ordered by `priority`
+    ///   (higher first), then configuration order, and only the first
+    ///   operational rung serves — "only the first operational backup server
+    ///   is used" (HAProxy 3.4 `backup`);
+    /// - `option allbackups` ([`Self::with_all_backups`]): every eligible
+    ///   backup is a candidate, so the algorithm and the weights spread load
+    ///   across them — the reference states there is no priority order among
+    ///   the backups then.
+    ///
+    /// A backend whose servers are all backups follows the same mode.
     fn select(
         &self,
         state: &mut [ServerState],
@@ -541,6 +691,36 @@ impl Balancer {
                 && self.mode_of(&state[idx]) == ServerMode::Ready
                 && !state[idx].addr.is_some_and(|a| exclude.contains(&a))
         };
+        // B8: one tier at a time. Primaries are the top tier; when none is
+        // eligible the backup tier serves. With `option allbackups` every
+        // eligible backup is a candidate (the algorithm and the weights
+        // spread across them); otherwise the ladder serves its first
+        // operational rung, ordered by `priority` (higher first) and then
+        // configuration order.
+        let has_primary = state
+            .iter()
+            .enumerate()
+            .any(|(idx, server)| !server.backup && eligible(idx, state));
+        let active_backup = if has_primary || self.all_backups {
+            None
+        } else {
+            state
+                .iter()
+                .enumerate()
+                .filter(|(idx, server)| server.backup && eligible(*idx, state))
+                .min_by_key(|(idx, server)| (std::cmp::Reverse(server.priority), *idx))
+                .map(|(idx, _)| idx)
+        };
+        let available = |idx: usize, state: &[ServerState]| {
+            eligible(idx, state)
+                && if has_primary {
+                    !state[idx].backup
+                } else if self.all_backups {
+                    state[idx].backup
+                } else {
+                    Some(idx) == active_backup
+                }
+        };
         // Affinity pin (B-H8/B-N13/B-I8): preferred when eligible, else
         // the next eligible in configuration order after it (ip_hash
         // fallback). Affinity never consults load or weights.
@@ -549,11 +729,11 @@ impl Balancer {
         {
             return (0..state.len()).find_map(|offset| {
                 let idx = (start + offset) % state.len();
-                eligible(idx, state).then_some(idx)
+                available(idx, state).then_some(idx)
             });
         }
         let mut candidates: Vec<usize> = (0..state.len())
-            .filter(|&idx| eligible(idx, state))
+            .filter(|&idx| available(idx, state))
             .collect();
         let first = *candidates.first()?;
         let now = Instant::now();
@@ -687,11 +867,28 @@ mod tests {
         ResolvedServer {
             addr: ServerAddr::Ip(ip(port)),
             weight,
+            backup: false,
+            priority: 0,
+        }
+    }
+
+    fn backup(port: u16, weight: u32) -> ResolvedServer {
+        backup_with(port, weight, 0)
+    }
+
+    fn backup_with(port: u16, weight: u32, priority: u32) -> ResolvedServer {
+        ResolvedServer {
+            addr: ServerAddr::Ip(ip(port)),
+            weight,
+            backup: true,
+            priority,
         }
     }
 
     fn named(host: &str, port: u16, weight: u32) -> ResolvedServer {
         ResolvedServer {
+            backup: false,
+            priority: 0,
             addr: ServerAddr::Name {
                 host: host.to_owned(),
                 port,
@@ -748,10 +945,14 @@ mod tests {
                 ResolvedServer {
                     addr: a.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: b.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             3,
@@ -1109,7 +1310,12 @@ mod tests {
             Some(ServerMode::Drain),
             "wire name"
         );
-        assert_eq!(ServerMode::parse("maintenance"), None, "no aliases");
+        assert_eq!(
+            ServerMode::parse("maintenance"),
+            Some(ServerMode::Maintenance),
+            "wire name"
+        );
+        assert_eq!(ServerMode::parse("maint"), None, "no aliases");
     }
 
     #[test]
@@ -1127,8 +1333,13 @@ mod tests {
         assert!(view[0].up);
         assert_eq!(view[0].mode, ServerMode::Ready);
         assert_eq!(view[0].active, 1, "the held slot is visible");
+        assert!(!view[0].drained, "a ready slot is never drained");
         assert_eq!(view[1].mode, ServerMode::Drain);
         assert_eq!(view[1].active, 0);
+        assert!(
+            view[1].drained,
+            "a drained slot with nothing in flight has finished draining"
+        );
         assert_eq!(view[1].weight, 2);
         drop(guard);
         assert_eq!(
@@ -1136,5 +1347,507 @@ mod tests {
             0,
             "the slot is released on drop"
         );
+    }
+
+    #[test]
+    fn drain_completion_is_counted_when_the_last_exchange_finishes() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer = Balancer::new(vec![server(1, 1), server(2, 1)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        let (_, first) = balancer
+            .pick_pinned_tracked(Some(ip(1)), &[])
+            .expect("first");
+        let (_, second) = balancer
+            .pick_pinned_tracked(Some(ip(1)), &[])
+            .expect("second");
+        // An exchange finishing on a ready slot is not a drain event.
+        drop(first);
+        assert_eq!(balancer.drains_completed(), 0);
+
+        modes.set("api", "127.0.0.1:1", ServerMode::Drain);
+        let view = balancer
+            .servers_view()
+            .into_iter()
+            .find(|server| server.target == "127.0.0.1:1")
+            .expect("slot");
+        assert_eq!(view.active, 1, "the second exchange is still in flight");
+        assert!(
+            !view.drained,
+            "a drain with work in flight has not finished (H3)"
+        );
+
+        drop(second);
+        assert_eq!(
+            balancer.drains_completed(),
+            1,
+            "the exchange that ends the drain is the event, exactly once"
+        );
+        let view = balancer
+            .servers_view()
+            .into_iter()
+            .find(|server| server.target == "127.0.0.1:1")
+            .expect("slot");
+        assert_eq!(view.active, 0);
+        assert!(view.drained);
+        // No drained exchange is left to finish: nothing more is counted.
+        assert_eq!(balancer.drains_completed(), 1);
+    }
+
+    #[test]
+    fn drain_of_an_idle_slot_reports_finished_without_an_event() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer =
+            Balancer::new(vec![server(1, 1)], 1, 1).with_modes("api", Arc::clone(&modes));
+        modes.set("api", "127.0.0.1:1", ServerMode::Drain);
+        let view = balancer.servers_view().remove(0);
+        assert!(view.drained, "there was nothing to wait for");
+        assert_eq!(
+            balancer.drains_completed(),
+            0,
+            "no exchange ended after the drain was declared"
+        );
+    }
+
+    #[test]
+    fn maintenance_removes_the_slot_like_a_drain_does() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer = Balancer::new(vec![server(1, 1), server(2, 1)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        modes.set("api", "127.0.0.1:1", ServerMode::Maintenance);
+        for _ in 0..6 {
+            assert_eq!(
+                balancer.pick().map(|addr| addr.port()),
+                Some(2),
+                "a maintenance slot takes no new exchange"
+            );
+        }
+        let view = balancer.servers_view().remove(0);
+        assert_eq!(view.mode, ServerMode::Maintenance);
+        assert!(
+            view.drained,
+            "a maintenance slot with nothing in flight is already finished"
+        );
+        assert!(view.up, "the health axis is deliberately untouched");
+        // Restoring it puts it back in rotation.
+        modes.set("api", "127.0.0.1:1", ServerMode::Ready);
+        assert!(
+            (0..6).any(|_| balancer.pick().map(|addr| addr.port()) == Some(1)),
+            "ready puts the slot back"
+        );
+    }
+
+    #[test]
+    fn the_guard_reports_the_mode_of_its_own_slot() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer = Balancer::new(vec![server(1, 1), server(2, 1)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        let (_, guard) = balancer
+            .pick_pinned_tracked(Some(ip(1)), &[])
+            .expect("pick");
+        assert_eq!(guard.mode(), ServerMode::Ready, "a fresh slot is ready");
+        modes.set("api", "127.0.0.1:2", ServerMode::Maintenance);
+        assert_eq!(
+            guard.mode(),
+            ServerMode::Ready,
+            "another slot's state is not this guard's"
+        );
+        modes.set("api", "127.0.0.1:1", ServerMode::Maintenance);
+        assert_eq!(
+            guard.mode(),
+            ServerMode::Maintenance,
+            "the declaration is seen by the guard holding the exchange"
+        );
+    }
+
+    #[test]
+    fn maintenance_completion_is_not_a_drain_completion() {
+        let modes = Arc::new(ServerModes::new());
+        let balancer =
+            Balancer::new(vec![server(1, 1)], 1, 1).with_modes("api", Arc::clone(&modes));
+        let (_, guard) = balancer
+            .pick_pinned_tracked(Some(ip(1)), &[])
+            .expect("pick");
+        modes.set("api", "127.0.0.1:1", ServerMode::Maintenance);
+        let view = balancer.servers_view().remove(0);
+        assert_eq!(view.active, 1, "the exchange is still in flight");
+        assert!(!view.drained, "the window is not open yet");
+        drop(guard);
+        let view = balancer.servers_view().remove(0);
+        assert!(view.drained, "the window opens when the last exchange ends");
+        assert_eq!(
+            balancer.drains_completed(),
+            0,
+            "the drain counter is drain-only (ADR-0028)"
+        );
+    }
+
+    #[test]
+    fn backup_is_never_selected_while_a_primary_is_eligible() {
+        let balancer = Balancer::new(vec![server(1, 1), backup(2, 1)], 1, 1);
+        for _ in 0..12 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(1)),
+                "a healthy primary owns every selection"
+            );
+        }
+        let view = balancer
+            .servers_view()
+            .into_iter()
+            .find(|server| server.target == "127.0.0.1:2")
+            .expect("backup slot");
+        assert!(view.backup, "the live view says which slot is a backup");
+        assert!(view.up, "a backup keeps being health-checked");
+    }
+
+    #[test]
+    fn backup_takes_over_when_every_primary_is_down_and_returns_on_recovery() {
+        let balancer = Balancer::new(vec![server(1, 1), server(2, 1), backup(3, 1)], 1, 1);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..6 {
+            seen.insert(balancer.pick().expect("primary eligible").port());
+        }
+        assert_eq!(seen, std::collections::BTreeSet::from([1, 2]));
+
+        balancer.report_fail(ip(1));
+        balancer.report_fail(ip(2));
+        for _ in 0..4 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(3)),
+                "with no primary eligible the backup takes every selection"
+            );
+        }
+
+        balancer.report_ok(ip(2));
+        assert_eq!(
+            balancer.pick(),
+            Some(ip(2)),
+            "the first recovered primary takes the tier back"
+        );
+        assert_eq!(balancer.pick(), Some(ip(2)));
+    }
+
+    #[test]
+    fn weight_zero_and_drained_primaries_leave_the_backup_in_rotation() {
+        let zero_weight = Balancer::new(vec![server(1, 0), backup(2, 1)], 1, 1);
+        assert_eq!(
+            zero_weight.pick(),
+            Some(ip(2)),
+            "weight 0 is not an eligible primary"
+        );
+
+        let modes = Arc::new(ServerModes::new());
+        let drained = Balancer::new(vec![server(1, 1), backup(2, 1)], 1, 1)
+            .with_modes("api", Arc::clone(&modes));
+        assert_eq!(drained.pick(), Some(ip(1)));
+        modes.set("api", "127.0.0.1:1", ServerMode::Drain);
+        assert_eq!(
+            drained.pick(),
+            Some(ip(2)),
+            "a drained primary releases the tier to the backup"
+        );
+        modes.set("api", "127.0.0.1:1", ServerMode::Ready);
+        assert_eq!(
+            drained.pick(),
+            Some(ip(1)),
+            "undrain puts the primary back in front of the backup"
+        );
+    }
+
+    #[test]
+    fn a_retry_that_excludes_the_primary_uses_the_backup() {
+        let balancer = Balancer::new(vec![server(1, 1), backup(2, 1)], 1, 1);
+        assert_eq!(
+            balancer.pick_except(&[ip(1)]),
+            Some(ip(2)),
+            "a retry that already tried the primary may reach the backup"
+        );
+    }
+
+    #[test]
+    fn affinity_never_pins_to_a_backup_while_a_primary_is_up() {
+        let balancer = Balancer::new(vec![server(1, 1), backup(2, 1)], 1, 1);
+        assert_eq!(
+            balancer.pick_pinned(Some(ip(2)), &[]),
+            Some(ip(1)),
+            "a sticky key aimed at a backup is served by the eligible primary"
+        );
+        balancer.report_fail(ip(1));
+        assert_eq!(
+            balancer.pick_pinned(Some(ip(2)), &[]),
+            Some(ip(2)),
+            "with the primary down the pinned backup serves"
+        );
+    }
+
+    #[test]
+    fn a_backend_of_only_backups_serves_the_first_operational_rung() {
+        let balancer = Balancer::new(vec![backup(1, 1), backup(2, 1)], 1, 1);
+        for _ in 0..6 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(1)),
+                "the reference uses only the first operational backup"
+            );
+        }
+        balancer.report_fail(ip(1));
+        assert_eq!(balancer.pick(), Some(ip(2)), "the next rung takes over");
+        balancer.report_ok(ip(1));
+        assert_eq!(
+            balancer.pick(),
+            Some(ip(1)),
+            "the first rung takes the tier back when it recovers"
+        );
+    }
+
+    #[test]
+    fn priority_orders_the_backup_ladder() {
+        let balancer = Balancer::new(
+            vec![
+                server(1, 1),
+                backup_with(2, 1, 5),
+                backup_with(3, 1, 10),
+                backup_with(4, 1, 5),
+            ],
+            1,
+            1,
+        );
+        balancer.report_fail(ip(1));
+        for _ in 0..6 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(3)),
+                "the highest priority rung owns the backup tier"
+            );
+        }
+        balancer.report_fail(ip(3));
+        for _ in 0..4 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(2)),
+                "ties follow configuration order and only the first rung serves"
+            );
+        }
+        balancer.report_ok(ip(3));
+        assert_eq!(
+            balancer.pick(),
+            Some(ip(3)),
+            "a recovered higher rung takes the traffic back"
+        );
+        balancer.report_ok(ip(1));
+        assert_eq!(
+            balancer.pick(),
+            Some(ip(1)),
+            "a primary always outranks the whole backup ladder"
+        );
+    }
+
+    #[test]
+    fn a_retry_that_excludes_the_top_rung_uses_the_next_backup() {
+        let balancer = Balancer::new(
+            vec![server(1, 1), backup_with(2, 1, 5), backup_with(3, 1, 10)],
+            1,
+            1,
+        );
+        balancer.report_fail(ip(1));
+        assert_eq!(
+            balancer.pick_except(&[ip(3)]),
+            Some(ip(2)),
+            "a retry that already tried the top rung serves the next one"
+        );
+        assert_eq!(
+            balancer.pick_except(&[ip(3), ip(2)]),
+            None,
+            "no rung is reused after it was tried"
+        );
+    }
+
+    #[test]
+    fn affinity_lands_on_the_active_backup_rung() {
+        let balancer = Balancer::new(vec![backup_with(1, 1, 5), backup_with(2, 1, 10)], 1, 1);
+        assert_eq!(
+            balancer.pick_pinned(Some(ip(1)), &[]),
+            Some(ip(2)),
+            "a sticky key aimed at a lower rung is served by the active one"
+        );
+        assert_eq!(balancer.pick_pinned(Some(ip(2)), &[]), Some(ip(2)));
+    }
+
+    #[test]
+    fn least_conn_uses_only_the_highest_priority_backup() {
+        let balancer = Balancer::with_options(
+            vec![server(1, 1), backup_with(2, 1, 5), backup_with(3, 1, 10)],
+            1,
+            1,
+            Balance::LeastConn,
+            Duration::ZERO,
+        );
+        balancer.report_fail(ip(1));
+        for _ in 0..6 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(3)),
+                "leastconn never reaches below the active rung"
+            );
+        }
+    }
+
+    #[test]
+    fn least_conn_never_uses_the_backup_while_a_primary_is_eligible() {
+        let balancer = Balancer::with_options(
+            vec![server(1, 1), backup(2, 1)],
+            1,
+            1,
+            Balance::LeastConn,
+            Duration::ZERO,
+        );
+        let (addr, guard) = balancer.pick_tracked(&[]).expect("primary");
+        assert_eq!(addr, ip(1));
+        assert_eq!(
+            balancer.pick(),
+            Some(ip(1)),
+            "the backup stays out even when the primary carries load"
+        );
+        drop(guard);
+    }
+
+    #[test]
+    fn all_backups_balances_the_whole_tier_by_weight() {
+        let balancer = Balancer::new(vec![server(1, 1), backup(2, 2), backup(3, 1)], 1, 1)
+            .with_all_backups(true);
+        for _ in 0..4 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(1)),
+                "a primary still outranks the whole backup pool"
+            );
+        }
+        balancer.report_fail(ip(1));
+        let picks: Vec<u16> = (0..9)
+            .filter_map(|_| balancer.pick())
+            .map(|a| a.port())
+            .collect();
+        let high = picks.iter().filter(|port| **port == 2).count();
+        let low = picks.iter().filter(|port| **port == 3).count();
+        assert_eq!(
+            (high, low),
+            (6, 3),
+            "2:1 weights spread load inside the backup pool: {picks:?}"
+        );
+    }
+
+    #[test]
+    fn all_backups_drops_the_priority_ladder() {
+        let balancer = Balancer::with_options(
+            vec![backup_with(1, 1, 10), backup_with(2, 1, 5)],
+            1,
+            1,
+            Balance::RoundRobin,
+            Duration::ZERO,
+        )
+        .with_all_backups(true);
+        let picks: Vec<u16> = (0..6)
+            .filter_map(|_| balancer.pick())
+            .map(|a| a.port())
+            .collect();
+        assert_eq!(
+            picks,
+            vec![1, 2, 1, 2, 1, 2],
+            "the reference says there is no priority order between the backups anymore"
+        );
+    }
+
+    #[test]
+    fn all_backups_keeps_a_dead_member_out_and_a_retry_skips_the_one_it_tried() {
+        let balancer = Balancer::new(vec![server(1, 1), backup(2, 1), backup(3, 1)], 1, 1)
+            .with_all_backups(true);
+        balancer.report_fail(ip(1));
+        balancer.report_fail(ip(2));
+        for _ in 0..4 {
+            assert_eq!(
+                balancer.pick(),
+                Some(ip(3)),
+                "a dead pool member leaves rotation, the rest still serves"
+            );
+        }
+        balancer.report_ok(ip(2));
+        assert_eq!(
+            balancer.pick_except(&[ip(2)]),
+            Some(ip(3)),
+            "a retry that already tried a pool member reaches the other one"
+        );
+        let picks: Vec<u16> = (0..4)
+            .filter_map(|_| balancer.pick())
+            .map(|a| a.port())
+            .collect();
+        assert!(
+            picks.contains(&2) && picks.contains(&3),
+            "a recovered pool member takes its share back: {picks:?}"
+        );
+    }
+
+    #[test]
+    fn all_backups_with_every_member_unusable_is_still_none() {
+        let zero_weight = Balancer::new(vec![server(1, 1), backup(2, 0), backup(3, 0)], 1, 1)
+            .with_all_backups(true);
+        zero_weight.report_fail(ip(1));
+        assert_eq!(
+            zero_weight.pick(),
+            None,
+            "weight 0 leaves the pool with no candidate"
+        );
+        let down = Balancer::new(vec![server(1, 1), backup(2, 1), backup(3, 1)], 1, 1)
+            .with_all_backups(true);
+        down.report_fail(ip(1));
+        down.report_fail(ip(2));
+        down.report_fail(ip(3));
+        assert_eq!(down.pick(), None, "an all-down pool answers 503 upstream");
+    }
+
+    #[test]
+    fn least_conn_spreads_inside_the_backup_pool() {
+        let balancer = Balancer::with_options(
+            vec![server(1, 1), backup(2, 1), backup(3, 1)],
+            1,
+            1,
+            Balance::LeastConn,
+            Duration::ZERO,
+        )
+        .with_all_backups(true);
+        balancer.report_fail(ip(1));
+        let (first, guard_a) = balancer.pick_tracked(&[]).expect("pool member");
+        let (second, guard_b) = balancer.pick_tracked(&[]).expect("pool member");
+        assert_ne!(
+            first, second,
+            "leastconn takes the pool member with the fewest in-flight exchanges"
+        );
+        drop(guard_a);
+        drop(guard_b);
+    }
+
+    #[test]
+    fn affinity_pins_inside_the_backup_pool() {
+        let balancer = Balancer::new(vec![backup(1, 1), backup(2, 1)], 1, 1).with_all_backups(true);
+        assert_eq!(
+            balancer.pick_pinned(Some(ip(1)), &[]),
+            Some(ip(1)),
+            "a sticky key keeps its pool member while that member is eligible"
+        );
+        assert_eq!(balancer.pick_pinned(Some(ip(2)), &[]), Some(ip(2)));
+        balancer.report_fail(ip(1));
+        assert_eq!(
+            balancer.pick_pinned(Some(ip(1)), &[]),
+            Some(ip(2)),
+            "a sticky key aimed at a dead member falls to the next one in configuration order"
+        );
+    }
+
+    #[test]
+    fn all_servers_down_is_still_none() {
+        let balancer = Balancer::new(vec![server(1, 1), backup(2, 1)], 1, 1);
+        balancer.report_fail(ip(1));
+        balancer.report_fail(ip(2));
+        assert_eq!(balancer.pick(), None);
     }
 }

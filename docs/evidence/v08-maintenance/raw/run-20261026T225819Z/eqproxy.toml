@@ -1,0 +1,22 @@
+schema_version = 1
+shutdown_grace = "1s"
+[admin]
+listen = "127.0.0.1:0"
+token = "e2e-admin-token-0123456789"
+write_token = "e2e-admin-write-token-9876543210"
+[listener.web]
+listen = "127.0.0.1:0"
+mode = "http"
+backend = "api"
+connect_timeout = "2s"
+[backend.api]
+balance = "roundrobin"
+servers = [{ addr = "127.0.0.1:51014" }, { addr = "127.0.0.1:51015" }]
+[backend.api.health_check]
+type = "http"
+http_path = "/healthz"
+interval = "150ms"
+timeout = "300ms"
+fall = 1
+rise = 1
+expect_status = "200"

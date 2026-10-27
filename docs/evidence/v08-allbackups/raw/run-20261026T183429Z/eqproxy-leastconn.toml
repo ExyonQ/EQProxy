@@ -1,0 +1,20 @@
+schema_version = 1
+shutdown_grace = "1s"
+[admin]
+listen = "127.0.0.1:0"
+token = "e2e-admin-token-0123456789"
+[listener.web]
+listen = "127.0.0.1:0"
+mode = "http"
+backend = "api"
+[backend.api]
+balance = "leastconn"
+all_backups = true
+servers = [{ addr = "127.0.0.1:54897" }, { addr = "127.0.0.1:54898", weight = 2, backup = true }, { addr = "127.0.0.1:54899", weight = 1, backup = true }]
+[backend.api.health_check]
+type = "http"
+http_path = "/healthz"
+interval = "200ms"
+timeout = "300ms"
+fall = 2
+rise = 2

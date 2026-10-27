@@ -121,6 +121,10 @@ struct State {
     /// The peer actually sent GOAWAY (not just a closed connection): only
     /// this proves that a refused stream was never processed.
     goaway: bool,
+    /// The session was closed administratively (ADR-0028, maintenance): the
+    /// socket must end as soon as its last in-flight stream finishes, not
+    /// when the idle window expires.
+    close_when_idle: bool,
 }
 
 impl Session {
@@ -219,6 +223,23 @@ impl Session {
         gone
     }
 
+    /// Starts an administrative close (ADR-0028, maintenance): no new
+    /// exchange is admitted (`send` is dropped and the session unregistered),
+    /// and the socket is closed at once when nothing is in flight on it.
+    /// When an exchange is still running, the one that ends the last stream
+    /// closes the socket instead ([`ExchangeSlot`]). Returns whether the
+    /// session was idle, so the caller can close the connection now.
+    fn begin_close_when_idle(&self) -> bool {
+        let mut state = self.lock();
+        state.going_away = true;
+        state.send = None;
+        state.close_when_idle = true;
+        let idle = state.active == 0;
+        drop(state);
+        self.unregister();
+        idle
+    }
+
     /// Ends the connection once no exchange is in flight. The h2 client API
     /// offers no client-side GOAWAY, so the socket is closed instead of being
     /// announced; nothing is in flight, so no stream is lost.
@@ -262,6 +283,14 @@ impl Drop for ExchangeSlot {
         let mut state = self.session.lock();
         state.active = state.active.saturating_sub(1);
         state.last_idle = Instant::now();
+        // A session closed administratively (ADR-0028) ends here when this
+        // was its last in-flight stream: the patch window opens at once
+        // instead of waiting for the idle monitor.
+        let close_now = state.active == 0 && state.close_when_idle;
+        drop(state);
+        if close_now {
+            self.session.abort_connection();
+        }
     }
 }
 
@@ -377,6 +406,21 @@ impl Hub {
         Arc::clone(gates.entry(addr).or_default())
     }
 
+    /// Closes the session registered for `addr` (ADR-0028, maintenance): it
+    /// stops being handed out immediately, and its socket is closed at once
+    /// when nothing is in flight on it — or the moment its last stream ends.
+    /// `true` when there was a session to close.
+    pub fn close_idle(&self, addr: SocketAddr) -> bool {
+        let session = self.lock().remove(&addr);
+        let Some(session) = session else {
+            return false;
+        };
+        if session.begin_close_when_idle() {
+            session.abort_connection();
+        }
+        true
+    }
+
     fn install(&self, addr: SocketAddr, session: &Arc<Session>) {
         self.lock().insert(addr, Arc::clone(session));
     }
@@ -437,6 +481,7 @@ where
             last_idle: Instant::now(),
             going_away: false,
             goaway: false,
+            close_when_idle: false,
         }),
         alive: AtomicBool::new(true),
         connection: Mutex::new(None),

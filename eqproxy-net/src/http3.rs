@@ -339,6 +339,7 @@ async fn exchange(
             local,
             &engine_cfg,
             engine_metrics,
+            crate::access::ClientProtocol::Http3,
         )
         .await;
     });

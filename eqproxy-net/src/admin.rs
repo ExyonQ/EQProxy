@@ -3,16 +3,18 @@
 //!
 //! Scope: `GET /api/v1/status`, `GET /metrics`, the per-server state write
 //! (`PUT /api/v1/backends/{backend}/servers/{target}/state` with
-//! `{"state":"ready"|"drain"}`, ADR-0018) and the configuration writes
-//! (`PUT /api/v1/backends/{name}` and `PUT /api/v1/listeners/{name}`, ADR-0019).
+//! `{"state":"ready"|"drain"}`, ADR-0018), the configuration writes
+//! (`PUT /api/v1/backends/{name}` and `PUT /api/v1/listeners/{name}`, ADR-0019)
+//! and the certificate renewal action
+//! (`POST /api/v1/certificates/reload`, ADR-0025).
 //! The read token opens the two `GET`s; the write token is required for every
-//! `PUT` (and may also read). Without a write token the whole plane stays
-//! read-only and every `PUT` is `403 write_disabled` — absent means off,
-//! never an implicit grant.
+//! `PUT` and the renewal (and may also read). Without a write token the whole
+//! plane stays read-only and every write is `403 write_disabled` — absent
+//! means off, never an implicit grant.
 //!
-//! Authorization is per route (RBAC with two roles), and every `PUT` leaves
-//! one `AUDIT` JSON line on stderr with its outcome, the peer and the
-//! transition. The token never appears in a response or a log line.
+//! Authorization is per route (RBAC with two roles), and every write leaves
+//! one `AUDIT` JSON line on stderr with its method, outcome, peer and the
+//! transition it caused. The token never appears in a response or a log line.
 //!
 //! CSRF does not apply to a bearer-token JSON API (there is no cookie the
 //! browser would attach), but a browser page can still reach a loopback
@@ -29,17 +31,32 @@
 //! is untouched; `AdminHandle` only exists so the CLI can stop it on shutdown.
 //!
 //! Secrets: both tokens are compared in constant time and never appear in a
-//! response, a log line or an error body. Loopback is the default bind and a
-//! non-loopback one is rejected by validation unless `allow_remote` is set,
-//! because this slice has no TLS on the plane.
+//! response, a log line or an error body. Loopback is the default TCP bind and
+//! a non-loopback one is rejected by validation unless `allow_remote` is set,
+//! because this slice has no TLS on the plane. The alternative endpoint is a
+//! Unix domain socket with mode `0600` (ADR-0021): the filesystem gates who
+//! can connect, the same bearer token still gates every route, a live socket
+//! is never stolen, a stale one from a crash is replaced, and a clean
+//! shutdown removes only the file this process created. The socket's mode,
+//! owning group and peer-uid allowlist are **hot**: a SIGHUP applies them to
+//! the socket already bound (ADR-0022), with the previous policy restored
+//! when the new one cannot be written.
 
+use std::fmt;
 use std::net::SocketAddr;
+#[cfg(unix)]
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, RwLock, RwLockReadGuard};
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -69,13 +86,162 @@ pub const ADMIN_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// closed immediately: the plane is bounded like every other resource.
 pub const MAX_ADMIN_CONNECTIONS: usize = 64;
 
+/// Where the admin plane listens (ADR-0021).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdminEndpoint {
+    /// TCP address, loopback unless validation allowed otherwise.
+    Tcp(SocketAddr),
+    /// Unix domain socket created with mode `0600`.
+    Unix(PathBuf),
+}
+
+impl fmt::Display for AdminEndpoint {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp(addr) => write!(formatter, "{addr}"),
+            Self::Unix(path) => write!(formatter, "unix:{}", path.display()),
+        }
+    }
+}
+
+/// Unix socket policy (ADR-0021/0022/0023). `mode` is `0o600` by default;
+/// `0o660` requires `gid`, the group that will own the file. A non-empty
+/// `allow_uids` is checked against the kernel's peer credentials before any
+/// HTTP byte is read; an unknown uid is refused, never allowed by default.
+/// `acl_uids` are **named users in the file's POSIX ACL** (Linux): the kernel
+/// admits them at `connect`, in addition to the owning group, without
+/// widening that group.
+#[derive(Clone, Debug)]
+pub struct UnixSocketOptions {
+    pub mode: u32,
+    pub gid: Option<u32>,
+    pub allow_uids: Arc<[u32]>,
+    pub acl_uids: Arc<[u32]>,
+}
+
+impl Default for UnixSocketOptions {
+    fn default() -> Self {
+        Self {
+            mode: 0o600,
+            gid: None,
+            allow_uids: Arc::from([]),
+            acl_uids: Arc::from([]),
+        }
+    }
+}
+
+/// Live Unix socket policy (ADR-0022, v0.8): the mode, owning group and
+/// peer-uid allowlist of the socket a running plane already bound.
+///
+/// [`AdminHandle`] hands one out for a Unix endpoint, and that is all the
+/// configuration task needs to change the policy on SIGHUP: the listener, the
+/// accept loop and the dataplane are untouched, because only the file's bits
+/// and the list the accept loop consults move. A TCP plane has no policy at
+/// all, so the two cannot be confused.
+#[derive(Clone, Debug)]
+pub struct UnixSocketPolicy {
+    path: PathBuf,
+    /// Read once per accepted connection (a cheap `Arc` clone), written only
+    /// by [`Self::apply`]. No lock is held across an await.
+    state: Arc<RwLock<UnixSocketOptions>>,
+}
+
+impl UnixSocketPolicy {
+    fn new(path: PathBuf, options: UnixSocketOptions) -> Self {
+        Self {
+            path,
+            state: Arc::new(RwLock::new(options)),
+        }
+    }
+
+    /// Policy in force for the next accepted peer and the next write.
+    #[must_use]
+    pub fn options(&self) -> UnixSocketOptions {
+        self.state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    fn allow_uids(&self) -> Arc<[u32]> {
+        Arc::clone(
+            &self
+                .state
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .allow_uids,
+        )
+    }
+
+    /// Applies `next` to the live socket and to the allowlist the accept loop
+    /// reads. All-or-nothing: `chown` runs first (it can clear mode bits),
+    /// then `chmod`; a failure restores the previous ownership and mode and
+    /// leaves the allowlist untouched, so a rejected reload never leaves a
+    /// socket half-widened.
+    ///
+    /// A few syscalls on a path this process created, called from the
+    /// configuration task between swaps, never from the accept loop.
+    pub fn apply(&self, next: &UnixSocketOptions) -> std::io::Result<()> {
+        let current = self.options();
+        if (current.gid != next.gid
+            || current.mode != next.mode
+            || current.acl_uids != next.acl_uids)
+            && let Err(error) = write_file_policy(&self.path, next)
+        {
+            if let Err(restore) = write_file_policy(&self.path, &current) {
+                eprintln!(
+                    "WARN admin socket {} could not be restored to mode {:04o}: {restore}",
+                    self.path.display(),
+                    current.mode
+                );
+            }
+            return Err(error);
+        }
+        *self
+            .state
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = next.clone();
+        Ok(())
+    }
+}
+
+/// Writes the file half of a policy: group first (a `chown` may clear mode
+/// bits), then the exact mode, then the access ACL. `None` leaves the group as
+/// it is: mode `0600` already gates access to the owner, so reverting to it
+/// needs no group lookup. One implementation for the first bind and every
+/// reload, so the two cannot drift.
+#[cfg(unix)]
+fn write_file_policy(path: &Path, options: &UnixSocketOptions) -> std::io::Result<()> {
+    if let Some(gid) = options.gid {
+        std::os::unix::fs::chown(path, None, Some(gid))?;
+    }
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(options.mode))?;
+    // Last, because `chmod` rewrites the ACL mask; an empty list removes the
+    // attribute so a reload cannot leave a named user behind.
+    crate::unix_acl::set_access(path, &options.acl_uids)
+}
+
+/// A Unix policy cannot exist where the endpoint itself cannot be bound; the
+/// stub keeps [`UnixSocketPolicy::apply`] compiling on those targets.
+#[cfg(not(unix))]
+fn write_file_policy(_path: &Path, _options: &UnixSocketOptions) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Unix domain sockets are not supported on this platform",
+    ))
+}
+
 /// Resolved admin plane: where it listens and the secrets it demands.
 #[derive(Clone)]
 pub struct ResolvedAdmin {
-    pub listen: SocketAddr,
+    pub endpoint: AdminEndpoint,
+    /// Only consulted for [`AdminEndpoint::Unix`].
+    pub unix: UnixSocketOptions,
     pub token: Arc<str>,
     /// `None` = writes disabled (the plane is read-only).
     pub write_token: Option<Arc<str>>,
+    /// `[admin] panel` (ADR-0029): serve the web panel on this plane.
+    pub panel: bool,
 }
 
 /// One listener as the API reports it (from the validated config).
@@ -86,6 +252,23 @@ pub struct ListenerInfo {
     pub mode: String,
     pub backend: String,
     pub maxconn: u32,
+    /// `sha256:<hex>` of the certificate this listener is serving (D7);
+    /// `null` for a plain-TCP listener. Read from the live acceptor, so it is
+    /// the certificate on the wire, not the file the config names.
+    pub tls_fingerprint: Option<String>,
+}
+
+/// One listener's certificate in the answer of a renewal (D7).
+#[derive(Debug, Clone, Serialize)]
+pub struct CertificateInfo {
+    pub listener: String,
+    pub listen: String,
+    /// `sha256:<hex>` of the leaf served after the reload.
+    pub fingerprint: String,
+    /// `true` when this reload changed what the listener serves.
+    pub changed: bool,
+    /// `true` when the same address also serves HTTP/3.
+    pub quic: bool,
 }
 
 /// The applied topology the plane reports, replaced only after a swap has
@@ -115,16 +298,16 @@ pub struct AdminState {
     /// survives a reload.
     pub modes: Arc<ServerModes>,
     pub metrics: Arc<Metrics>,
-    /// `metrics.detailed`: per-server counters are opt-in (CE4); the flag is
-    /// reported so a scraper knows whether that detail exists.
-    pub metrics_detailed: bool,
     /// Configuration write pipeline (ADR-0019). `None` = no applier attached:
     /// configuration `PUT`s answer `503 config_unavailable`.
     pub apply: Option<mpsc::Sender<ApplyMessage>>,
+    /// Web panel (ADR-0029). `None` = `[admin] panel` is off and every
+    /// `/panel` path is a `404` like any other unknown route.
+    pub panel: Option<Arc<crate::panel::Panel>>,
 }
 
 impl AdminState {
-    fn read_topology(&self) -> RwLockReadGuard<'_, AdminTopology> {
+    pub(crate) fn read_topology(&self) -> RwLockReadGuard<'_, AdminTopology> {
         self.topology
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -144,8 +327,8 @@ pub enum ConfigChange {
         name: String,
         table: String,
     },
-    /// Re-read the configuration file (SIGHUP). Internal to the process; it
-    /// carries no HTTP route and is never sent by a client.
+    /// Re-read the configuration and its certificate files: SIGHUP and
+    /// `POST /api/v1/certificates/reload` (D7).
     Reload,
 }
 
@@ -177,6 +360,8 @@ pub enum ApplyReply {
         summary: String,
         elapsed_ms: u64,
         listeners: Vec<(String, String)>,
+        /// Certificate identity per TLS listener after the swap (D7).
+        certificates: Vec<CertificateInfo>,
     },
     /// The candidate is valid but its base revision is stale.
     Precondition { revision: String },
@@ -195,7 +380,9 @@ struct Status<'a> {
     revision: &'a str,
     listeners: &'a [ListenerInfo],
     backends: Vec<BackendStatus<'a>>,
-    metrics_detailed: bool,
+    /// Opt-in per-server/per-route series plus the budget that bounds them
+    /// (CE4): `enabled`, `budget`, `series`, `dropped` and the rows.
+    metrics_detail: eqproxy_core::metrics::DetailSnapshot,
     counters: eqproxy_core::MetricsSnapshot,
 }
 
@@ -203,6 +390,10 @@ struct Status<'a> {
 struct BackendStatus<'a> {
     name: &'a str,
     balance: &'static str,
+    /// `option allbackups` (B8): the whole backup tier balances at once
+    /// instead of serving one rung at a time. The read plane says which
+    /// policy is live, so an operator can tell the two modes apart.
+    all_backups: bool,
     health_check: bool,
     servers: Vec<ServerStatus>,
 }
@@ -216,39 +407,97 @@ struct ServerStatus {
     /// Address currently in use (`null` while a name is unresolved).
     resolved: Option<String>,
     weight: u32,
+    /// Backup class (B8): selected only when no primary is eligible.
+    backup: bool,
+    /// Failover order among backups (EQProxy extension): higher first, ties
+    /// by configuration order; `0` on primaries.
+    priority: u32,
     /// `ready` or `drain` (ADR-0018).
     state: &'static str,
     /// Health machine (B11), independent of `state`.
     healthy: bool,
     /// Exchanges in flight on this slot.
     active: u32,
+    /// `true` when the slot is drained and nothing is in flight on it any
+    /// more: the drain finished (H3). Always `false` for a `ready` slot.
+    drained: bool,
 }
 
 /// Running admin plane: stop it on shutdown, or abort it to prove the
 /// dataplane does not depend on it.
 pub struct AdminHandle {
-    local: SocketAddr,
+    endpoint: AdminEndpoint,
     stop: eqproxy_core::ShutdownHandle,
-    task: JoinHandle<()>,
+    task: Option<JoinHandle<()>>,
+    /// The socket file this process created, removed on a clean drop when it
+    /// is still the same inode (never somebody else's file).
+    #[cfg(unix)]
+    socket_file: Option<SocketFile>,
+    /// Mode, group and peer-uid allowlist of a Unix socket; `None` for TCP,
+    /// which has no such policy to reload.
+    unix_policy: Option<UnixSocketPolicy>,
 }
 
 impl AdminHandle {
-    /// Real address (port 0 resolves an ephemeral one).
+    /// Endpoint actually bound (port 0 resolves an ephemeral one).
     #[must_use]
-    pub fn local_addr(&self) -> SocketAddr {
-        self.local
+    pub fn endpoint(&self) -> &AdminEndpoint {
+        &self.endpoint
     }
 
-    /// Stops the accept loop and waits for it.
-    pub async fn shutdown(self) {
+    /// Bound TCP address, `None` when the plane is on a Unix socket.
+    #[must_use]
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        match self.endpoint {
+            AdminEndpoint::Tcp(addr) => Some(addr),
+            AdminEndpoint::Unix(_) => None,
+        }
+    }
+
+    /// Bound Unix socket path, `None` when the plane is on TCP.
+    #[must_use]
+    pub fn socket_path(&self) -> Option<&Path> {
+        match &self.endpoint {
+            AdminEndpoint::Tcp(_) => None,
+            AdminEndpoint::Unix(path) => Some(path),
+        }
+    }
+
+    /// Hot policy of a Unix plane, `None` for TCP. Cloning the returned handle
+    /// keeps the same cell, so [`UnixSocketPolicy::apply`] reaches the accept
+    /// loop that is already running.
+    #[must_use]
+    pub fn unix_policy(&self) -> Option<&UnixSocketPolicy> {
+        self.unix_policy.as_ref()
+    }
+
+    /// Stops the accept loop and waits for it. Dropping `self` then removes
+    /// the Unix socket file when this process still owns it.
+    pub async fn shutdown(mut self) {
         self.stop.trigger();
-        let _ = self.task.await;
+        if let Some(task) = self.task.take() {
+            let _ = task.await;
+        }
     }
 
     /// Simulates the plane dying (test seam): the dataplane must keep
-    /// serving, which is what SPEC §9 requires of the panel.
+    /// serving, which is what SPEC §9 requires of the panel. Aborting the
+    /// task leaves a Unix socket file behind, exactly like a crash; the next
+    /// bind recognises it as stale and replaces it (a later drop of the
+    /// handle still removes the file).
     pub fn abort(&self) {
-        self.task.abort();
+        if let Some(task) = &self.task {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for AdminHandle {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        if let Some(file) = &self.socket_file {
+            file.remove_if_ours();
+        }
     }
 }
 
@@ -256,28 +505,187 @@ impl AdminHandle {
 /// fatal for the process: a configured plane that cannot open is a
 /// configuration error, not a silent downgrade (the CLI exits with 1).
 pub async fn bind(cfg: ResolvedAdmin, state: Arc<AdminState>) -> std::io::Result<AdminHandle> {
-    let listener = TcpListener::bind(cfg.listen).await?;
-    let local = listener.local_addr()?;
-    let (stop, shutdown) = shutdown::channel();
     let tokens = Tokens {
         read: cfg.token,
         write: cfg.write_token,
     };
-    let task = tokio::spawn(serve(listener, tokens, state, shutdown));
-    Ok(AdminHandle { local, stop, task })
+    match cfg.endpoint {
+        AdminEndpoint::Tcp(addr) => {
+            let listener = TcpListener::bind(addr).await?;
+            let local = listener.local_addr()?;
+            let (stop, shutdown) = shutdown::channel();
+            let task = tokio::spawn(serve(
+                AdminListener::Tcp(listener),
+                tokens,
+                state,
+                None,
+                shutdown,
+            ));
+            Ok(AdminHandle {
+                endpoint: AdminEndpoint::Tcp(local),
+                stop,
+                task: Some(task),
+                #[cfg(unix)]
+                socket_file: None,
+                unix_policy: None,
+            })
+        }
+        AdminEndpoint::Unix(path) => bind_unix(path, cfg.unix, tokens, state).await,
+    }
+}
+
+/// Binds the Unix socket (ADR-0021/0022): refuses to steal a live one,
+/// replaces a stale socket left by a crash, never deletes a file that is not
+/// a socket, and applies the configured owner/group mode (`0600` by default,
+/// `0660` with a group).
+#[cfg(unix)]
+async fn bind_unix(
+    path: PathBuf,
+    unix: UnixSocketOptions,
+    tokens: Tokens,
+    state: Arc<AdminState>,
+) -> std::io::Result<AdminHandle> {
+    prepare_socket_path(&path)?;
+    let listener = UnixListener::bind(&path)?;
+    let file = match SocketFile::capture(&path) {
+        Ok(file) => file,
+        Err(error) => {
+            // The bind already failed; report the cleanup failure without
+            // replacing the error that explains why startup is aborting.
+            if let Err(cleanup) = std::fs::remove_file(&path) {
+                eprintln!(
+                    "WARN admin cannot remove {} after a failed bind: {cleanup}",
+                    path.display()
+                );
+            }
+            return Err(error);
+        }
+    };
+    // Group, mode and ACL in one place, shared with the reload path. An
+    // unprivileged process may only select a group it belongs to and only
+    // write an ACL its filesystem supports; a failure here aborts startup
+    // instead of serving a wider (or differently gated) socket.
+    if let Err(error) = write_file_policy(&path, &unix) {
+        drop(listener);
+        file.remove_if_ours();
+        return Err(error);
+    }
+    let (stop, shutdown) = shutdown::channel();
+    let policy = UnixSocketPolicy::new(path.clone(), unix);
+    let task = tokio::spawn(serve(
+        AdminListener::Unix(listener),
+        tokens,
+        state,
+        Some(policy.clone()),
+        shutdown,
+    ));
+    Ok(AdminHandle {
+        endpoint: AdminEndpoint::Unix(path),
+        stop,
+        task: Some(task),
+        socket_file: Some(file),
+        unix_policy: Some(policy),
+    })
+}
+
+#[cfg(not(unix))]
+async fn bind_unix(
+    _path: PathBuf,
+    _unix: UnixSocketOptions,
+    _tokens: Tokens,
+    _state: Arc<AdminState>,
+) -> std::io::Result<AdminHandle> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "Unix domain sockets are not supported on this platform",
+    ))
+}
+
+/// Clears the path for a new socket: absent is fine, a live socket is a
+/// conflict, a stale socket is replaced, and any other file is preserved.
+#[cfg(unix)]
+fn prepare_socket_path(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.file_type().is_socket() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{} exists and is not a socket; refusing to remove it",
+                path.display()
+            ),
+        ));
+    }
+    // A socket with a listener answers; one left by a crash refuses. Only
+    // the second is ours to replace.
+    match std::os::unix::net::UnixStream::connect(path) {
+        Ok(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            format!("{} is already served by another process", path.display()),
+        )),
+        Err(_) => std::fs::remove_file(path),
+    }
+}
+
+/// Identity of the socket file this process created, so cleanup can prove it
+/// is still the same inode before unlinking.
+#[cfg(unix)]
+struct SocketFile {
+    path: PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+#[cfg(unix)]
+impl SocketFile {
+    fn capture(path: &Path) -> std::io::Result<Self> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            dev: metadata.dev(),
+            ino: metadata.ino(),
+        })
+    }
+
+    fn remove_if_ours(&self) {
+        let Ok(metadata) = std::fs::symlink_metadata(&self.path) else {
+            return;
+        };
+        if metadata.dev() == self.dev
+            && metadata.ino() == self.ino
+            && let Err(error) = std::fs::remove_file(&self.path)
+        {
+            // Best effort during drop, but not silent: a socket file that
+            // survives shutdown makes the next start recover it as stale.
+            eprintln!(
+                "WARN admin cannot remove socket {}: {error}",
+                self.path.display()
+            );
+        }
+    }
 }
 
 /// The configured secrets. `write = None` disables every write.
 #[derive(Clone)]
-struct Tokens {
+pub(crate) struct Tokens {
     read: Arc<str>,
     write: Option<Arc<str>>,
 }
 
 impl Tokens {
+    /// Whether a write secret is configured at all: the panel answers
+    /// `write_disabled` (the plane is read-only) or `read_only_session` (this
+    /// session holds the read token) on that distinction.
+    pub(crate) fn write_configured(&self) -> bool {
+        self.write.is_some()
+    }
+
     /// `(role, authenticated)`: both secrets are compared even after a match,
     /// so a timing observer cannot learn which one was tried.
-    fn role(&self, present: Option<&str>) -> Role {
+    pub(crate) fn role(&self, present: Option<&str>) -> Role {
         let Some(secret) = present else {
             return Role::None;
         };
@@ -297,14 +705,14 @@ impl Tokens {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
+pub(crate) enum Role {
     None,
     Read,
     Write,
 }
 
 impl Role {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Read => "read",
@@ -313,10 +721,123 @@ impl Role {
     }
 }
 
+/// One bound listener: the accept path and the peer identity are the only
+/// differences between TCP and a Unix socket; the HTTP handling below is
+/// shared.
+enum AdminListener {
+    Tcp(TcpListener),
+    #[cfg(unix)]
+    Unix(UnixListener),
+}
+
+impl AdminListener {
+    async fn accept(&self) -> std::io::Result<(AdminStream, Peer)> {
+        match self {
+            Self::Tcp(listener) => {
+                let (stream, peer) = listener.accept().await?;
+                Ok((AdminStream::Tcp(stream), Peer::Tcp(peer)))
+            }
+            #[cfg(unix)]
+            Self::Unix(listener) => {
+                let (stream, _) = listener.accept().await?;
+                let uid = stream.peer_cred().ok().map(|credentials| credentials.uid());
+                Ok((AdminStream::Unix(stream), Peer::Unix { uid }))
+            }
+        }
+    }
+}
+
+/// Accepted admin connection. Both variants are byte streams; the HTTP
+/// parser does not care which one carried the request.
+enum AdminStream {
+    Tcp(TcpStream),
+    #[cfg(unix)]
+    Unix(UnixStream),
+}
+
+impl AsyncRead for AdminStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_read(context, buffer),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_read(context, buffer),
+        }
+    }
+}
+
+impl AsyncWrite for AdminStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_write(context, buffer),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_write(context, buffer),
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_flush(context),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_flush(context),
+        }
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Self::Tcp(stream) => Pin::new(stream).poll_shutdown(context),
+            #[cfg(unix)]
+            Self::Unix(stream) => Pin::new(stream).poll_shutdown(context),
+        }
+    }
+}
+
+/// Who is calling: the TCP peer address, or the Unix socket peer's uid when
+/// the kernel reports it. The bearer token remains the authorization; this is
+/// what the audit line can attest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Peer {
+    Tcp(SocketAddr),
+    Unix { uid: Option<u32> },
+}
+
+impl fmt::Display for Peer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp(addr) => write!(formatter, "{addr}"),
+            Self::Unix { uid: Some(uid) } => write!(formatter, "unix-socket:uid={uid}"),
+            Self::Unix { uid: None } => write!(formatter, "unix-socket"),
+        }
+    }
+}
+
+/// Peer-uid policy (ADR-0022). An empty list keeps the filesystem as the only
+/// boundary; a non-empty list is fail-closed: a peer whose uid the kernel did
+/// not report is refused, never treated as allowed.
+fn peer_allowed(peer: Peer, allow_uids: &[u32]) -> bool {
+    if allow_uids.is_empty() {
+        return true;
+    }
+    match peer {
+        Peer::Unix { uid: Some(uid) } => allow_uids.contains(&uid),
+        Peer::Unix { uid: None } | Peer::Tcp(_) => false,
+    }
+}
+
 async fn serve(
-    listener: TcpListener,
+    listener: AdminListener,
     tokens: Tokens,
     state: Arc<AdminState>,
+    // `Some` only for a Unix listener: the allowlist is read per connection,
+    // so a reload applies to the next peer without a rebind.
+    policy: Option<UnixSocketPolicy>,
     mut shutdown: Shutdown,
 ) {
     let mut connections: JoinSet<()> = JoinSet::new();
@@ -327,6 +848,18 @@ async fn serve(
                 Ok((stream, peer)) => {
                     if connections.len() >= MAX_ADMIN_CONNECTIONS {
                         // Explicit refusal, never an unbounded accept queue.
+                        drop(stream);
+                        continue;
+                    }
+                    // SO_PEERCRED/getpeereid decision before any HTTP byte:
+                    // an unauthorized uid gets EOF, not a route to probe. The
+                    // list is snapshotted here, never held across the spawn.
+                    if let Some(policy) = &policy
+                        && !peer_allowed(peer, &policy.allow_uids())
+                    {
+                        eprintln!(
+                            "WARN admin connection refused: {peer} is not in unix_socket_allow_uids"
+                        );
                         drop(stream);
                         continue;
                     }
@@ -351,10 +884,10 @@ async fn serve(
 }
 
 async fn handle_connection(
-    mut stream: TcpStream,
+    mut stream: AdminStream,
     tokens: Tokens,
     state: Arc<AdminState>,
-    peer: SocketAddr,
+    peer: Peer,
 ) {
     let mut buffer = Vec::with_capacity(1024);
     let read = tokio::time::timeout(ADMIN_IO_TIMEOUT, async {
@@ -369,10 +902,11 @@ async fn handle_connection(
             .map_err(|_| HeadError::Io)?
             .to_owned();
         let mut body = None;
-        // Only a `PUT` carries a body, and only the declared, bounded length
-        // is read. A missing or oversized length is answered by `respond`
-        // (411/413) without touching the socket again.
-        if head.split(' ').next() == Some("PUT")
+        // Only a `PUT` (JSON table or state) or a panel `POST` (form) carries
+        // a body, and only the declared, bounded length is read. A missing or
+        // oversized length is answered by the router (411/413) without
+        // touching the socket again.
+        if matches!(head.split(' ').next(), Some("PUT") | Some("POST"))
             && let Some(length) = content_length(&head)
             && length <= MAX_CONFIG_BODY_BYTES
         {
@@ -404,7 +938,15 @@ async fn handle_connection(
             return;
         }
     };
-    match respond(&head, body.as_deref(), &tokens, &state, peer) {
+    // `/panel` is served by the panel module when the config turned it on
+    // (ADR-0029); every other path keeps the JSON API router untouched.
+    let outcome = match state.panel.as_ref() {
+        Some(panel) if crate::panel::wants(&head) => {
+            panel.respond(&head, body.as_deref(), &tokens, &state, peer)
+        }
+        _ => respond(&head, body.as_deref(), &tokens, &state, peer),
+    };
+    match outcome {
         Outcome::Done(response, audit) => {
             log_audit(audit);
             answer(&mut stream, response).await;
@@ -413,18 +955,47 @@ async fn handle_connection(
             change,
             if_match,
             role,
+            method,
             path,
+            back_to_panel,
         } => {
             let (response, status) = apply_config(&state, change, if_match).await;
             log_audit(Some(audit(
                 peer,
                 role,
+                method,
                 path,
                 status,
                 AuditFields::default(),
             )));
+            let response = if back_to_panel {
+                panel_result_redirect(status, &response)
+            } else {
+                response
+            };
             answer(&mut stream, response).await;
         }
+    }
+}
+
+/// Turns the applier's answer into the page the browser comes back to: the
+/// panel never shows a JSON body, and a `303` makes a reload re-read the
+/// status instead of re-sending the write (ADR-0029). The error code is the
+/// applier's own (`invalid_config`, `swap_rejected`, `precondition_failed`,
+/// …), so the panel cannot invent a different diagnosis.
+fn panel_result_redirect(status: u16, response: &Response) -> Response {
+    let code = serde_json::from_slice::<serde_json::Value>(&response.body)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("error")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        });
+    match (status, code) {
+        (200, _) => Response::redirect("/panel?applied=1"),
+        (_, Some(code)) => Response::redirect(&format!("/panel?error={code}")),
+        (_, None) => Response::redirect(&format!("/panel?error=http_{status}")),
     }
 }
 
@@ -469,6 +1040,7 @@ async fn apply_config(
             summary,
             elapsed_ms,
             listeners,
+            certificates,
         })) => {
             let bound: Vec<serde_json::Value> = listeners
                 .into_iter()
@@ -479,6 +1051,7 @@ async fn apply_config(
                 "summary": summary,
                 "elapsed_ms": elapsed_ms,
                 "listeners": bound,
+                "certificates": certificates,
             });
             let response = Response::json(200, body.to_string().into_bytes())
                 .with_header("etag", format!("\"{revision}\""));
@@ -512,7 +1085,10 @@ async fn apply_config(
 /// oversized head is refused before it ends); closing with unread input
 /// turns the answer into a TCP reset, so drain briefly so the client can
 /// read the status it was given.
-async fn answer(stream: &mut TcpStream, response: Response) {
+async fn answer<S>(stream: &mut S, response: Response)
+where
+    S: AsyncRead + AsyncWrite + Unpin + ?Sized,
+{
     let _ = tokio::time::timeout(ADMIN_IO_TIMEOUT, response.write(stream)).await;
     let mut sink = [0u8; 1024];
     let _ = tokio::time::timeout(Duration::from_millis(50), async {
@@ -535,7 +1111,10 @@ enum HeadError {
 
 /// Reads until the blank line that ends an HTTP/1.x head, bounded by
 /// [`MAX_ADMIN_HEAD_BYTES`].
-async fn read_head(stream: &mut TcpStream, head: &mut Vec<u8>) -> Result<(), HeadError> {
+async fn read_head<S>(stream: &mut S, head: &mut Vec<u8>) -> Result<(), HeadError>
+where
+    S: AsyncRead + Unpin + ?Sized,
+{
     let mut chunk = [0u8; 1024];
     loop {
         let read = stream.read(&mut chunk).await.map_err(|_| HeadError::Io)?;
@@ -564,11 +1143,10 @@ fn head_end(buffer: &[u8]) -> Option<usize> {
 /// length comes from the head (`content-length`); chunked framing is not
 /// accepted on the plane (a write body is a small JSON document, so a missing
 /// length is a client error, not something to stream).
-async fn read_body(
-    stream: &mut TcpStream,
-    length: usize,
-    initial: &[u8],
-) -> Result<Vec<u8>, HeadError> {
+async fn read_body<S>(stream: &mut S, length: usize, initial: &[u8]) -> Result<Vec<u8>, HeadError>
+where
+    S: AsyncRead + Unpin + ?Sized,
+{
     let mut body = Vec::with_capacity(length);
     body.extend_from_slice(initial);
     while body.len() < length {
@@ -594,7 +1172,7 @@ fn content_length(head: &str) -> Option<usize> {
 }
 
 /// All values of one header, case-insensitively (head only, no folding).
-fn header_values<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
+pub(crate) fn header_values<'a>(head: &'a str, name: &str) -> Vec<&'a str> {
     head.split("\r\n")
         .skip(1)
         .filter_map(|line| {
@@ -616,15 +1194,15 @@ fn bearer(head: &str) -> Option<&str> {
 
 /// One answer, built without touching the socket so it can be unit-tested.
 #[derive(Debug)]
-struct Response {
-    status: u16,
-    content_type: &'static str,
-    extra: Vec<(&'static str, String)>,
-    body: Vec<u8>,
+pub(crate) struct Response {
+    pub(crate) status: u16,
+    pub(crate) content_type: &'static str,
+    pub(crate) extra: Vec<(&'static str, String)>,
+    pub(crate) body: Vec<u8>,
 }
 
 impl Response {
-    fn text(status: u16, body: &str) -> Self {
+    pub(crate) fn text(status: u16, body: &str) -> Self {
         Self {
             status,
             content_type: "text/plain; charset=utf-8",
@@ -633,7 +1211,7 @@ impl Response {
         }
     }
 
-    fn json(status: u16, body: Vec<u8>) -> Self {
+    pub(crate) fn json(status: u16, body: Vec<u8>) -> Self {
         Self {
             status,
             content_type: "application/json; charset=utf-8",
@@ -642,19 +1220,27 @@ impl Response {
         }
     }
 
-    fn error(status: u16, code: &str) -> Self {
+    pub(crate) fn error(status: u16, code: &str) -> Self {
         // Machine-readable, and deliberately empty of detail: an unauthorized
         // caller learns nothing about the plane.
         let body = format!("{{\"error\":\"{code}\"}}\n");
         Self::json(status, body.into_bytes())
     }
 
-    fn with_header(mut self, name: &'static str, value: String) -> Self {
+    /// A page or form action that sends the browser back to a `GET`.
+    pub(crate) fn redirect(location: &str) -> Self {
+        Self::text(303, "").with_header("location", location.to_owned())
+    }
+
+    pub(crate) fn with_header(mut self, name: &'static str, value: String) -> Self {
         self.extra.push((name, value));
         self
     }
 
-    async fn write(self, stream: &mut TcpStream) -> std::io::Result<()> {
+    async fn write<S>(self, stream: &mut S) -> std::io::Result<()>
+    where
+        S: AsyncWrite + Unpin + ?Sized,
+    {
         let reason = reason(self.status);
         let mut out = format!(
             "HTTP/1.1 {} {reason}\r\ncontent-type: {}\r\ncontent-length: {}\r\ncache-control: no-store\r\nconnection: close\r\n",
@@ -699,7 +1285,7 @@ fn reason(status: u16) -> &'static str {
 /// One audit record per write attempt (ADR-0018). No token, no secret: the
 /// role and the peer are the identity this slice can attest.
 #[derive(Debug, Serialize)]
-struct Audit<'a> {
+pub(crate) struct Audit<'a> {
     event: &'static str,
     ts_unix: u64,
     remote: String,
@@ -716,16 +1302,17 @@ struct Audit<'a> {
 /// What one audited write touched. Default = nothing known yet (a refused
 /// request may not have reached the target lookup).
 #[derive(Default)]
-struct AuditFields<'a> {
+pub(crate) struct AuditFields<'a> {
     backend: Option<&'a str>,
     server: Option<&'a str>,
     from: Option<ServerMode>,
     to: Option<ServerMode>,
 }
 
-fn audit<'a>(
-    peer: SocketAddr,
+pub(crate) fn audit<'a>(
+    peer: Peer,
     role: Role,
+    method: &'a str,
     path: &'a str,
     status: u16,
     fields: AuditFields<'a>,
@@ -737,8 +1324,7 @@ fn audit<'a>(
             .map_or(0, |elapsed| elapsed.as_secs()),
         remote: peer.to_string(),
         role: role.as_str(),
-        // The only write route in this slice is a `PUT`.
-        method: "PUT",
+        method,
         path,
         status,
         backend: fields.backend,
@@ -750,22 +1336,27 @@ fn audit<'a>(
 
 /// What a fully parsed request asks for: an immediate answer, or a
 /// configuration mutation whose answer depends on the dataplane.
-enum Outcome<'a> {
+pub(crate) enum Outcome<'a> {
     Done(Response, Option<Audit<'a>>),
     Apply {
         change: ConfigChange,
         if_match: Option<String>,
         role: Role,
+        method: &'a str,
         path: &'a str,
+        /// `false` answers the JSON API (the reply of the applier); `true`
+        /// answers a browser form with a `303` back to the panel, so a
+        /// reload never re-submits a write (ADR-0029).
+        back_to_panel: bool,
     },
 }
 
 impl<'a> Outcome<'a> {
-    fn done(response: Response) -> Self {
+    pub(crate) fn done(response: Response) -> Self {
         Self::Done(response, None)
     }
 
-    fn done_with(response: Response, audit: Option<Audit<'a>>) -> Self {
+    pub(crate) fn done_with(response: Response, audit: Option<Audit<'a>>) -> Self {
         Self::Done(response, audit)
     }
 }
@@ -777,7 +1368,7 @@ fn respond<'a>(
     body: Option<&[u8]>,
     tokens: &Tokens,
     state: &AdminState,
-    peer: SocketAddr,
+    peer: Peer,
 ) -> Outcome<'a> {
     let mut lines = head.split("\r\n");
     let Some(request_line) = lines.next() else {
@@ -793,10 +1384,10 @@ fn respond<'a>(
         return Outcome::done(Response::text(505, "unsupported HTTP version"));
     }
     let path = target.split('?').next().unwrap_or(target);
-    let is_write = method == "PUT";
+    let is_write = method == "PUT" || method == "POST";
     let role = tokens.role(bearer(head));
     if role == Role::None {
-        let audit = is_write.then(|| audit(peer, role, path, 401, AuditFields::default()));
+        let audit = is_write.then(|| audit(peer, role, method, path, 401, AuditFields::default()));
         return Outcome::done_with(
             Response::error(401, "unauthorized").with_header(
                 "www-authenticate",
@@ -821,7 +1412,7 @@ fn respond<'a>(
                             .iter()
                             .map(|b| backend_status(b))
                             .collect(),
-                        metrics_detailed: state.metrics_detailed,
+                        metrics_detail: state.metrics.detail.snapshot(),
                         counters: state.metrics.snapshot(),
                     };
                     match serde_json::to_vec(&status) {
@@ -837,7 +1428,12 @@ fn respond<'a>(
                     status: 200,
                     content_type: "text/plain; version=0.0.4; charset=utf-8",
                     extra: Vec::new(),
-                    body: state.metrics.snapshot().prometheus().into_bytes(),
+                    body: prometheus_body(
+                        &state.metrics.snapshot(),
+                        &state.metrics.detail.snapshot(),
+                        &topology,
+                    )
+                    .into_bytes(),
                 },
                 _ => Response::error(404, "not_found"),
             };
@@ -845,24 +1441,33 @@ fn respond<'a>(
         }
         "PUT" => {
             if is_config_path(path) {
-                put_config(head, body, tokens, role, peer, path)
+                put_config(head, body, tokens, role, peer, method, path)
             } else {
                 let (response, audit) =
                     put_server_state(head, body, tokens, role, state, peer, path);
                 Outcome::done_with(response, audit)
             }
         }
-        _ => {
-            let allow = if tokens.write.is_some() {
-                "GET, PUT"
+        "POST" => {
+            if path == CERTIFICATE_RELOAD_PATH {
+                post_certificates(head, tokens, role, peer, path)
             } else {
-                "GET"
-            };
-            Outcome::done(
-                Response::error(405, "method_not_allowed").with_header("allow", allow.to_owned()),
-            )
+                method_not_allowed(tokens)
+            }
         }
+        _ => method_not_allowed(tokens),
     }
+}
+
+/// `405` plus the methods this plane serves (a `POST` exists only for the
+/// certificate action, so the list is still short and honest).
+fn method_not_allowed(tokens: &Tokens) -> Outcome<'static> {
+    let allow = if tokens.write.is_some() {
+        "GET, PUT, POST"
+    } else {
+        "GET"
+    };
+    Outcome::done(Response::error(405, "method_not_allowed").with_header("allow", allow.to_owned()))
 }
 
 /// `/api/v1/backends/{name}` or `/api/v1/listeners/{name}`.
@@ -900,11 +1505,19 @@ fn put_config<'a>(
     body: Option<&[u8]>,
     tokens: &Tokens,
     role: Role,
-    peer: SocketAddr,
+    peer: Peer,
+    method: &'a str,
     path: &'a str,
 ) -> Outcome<'a> {
     let adjudicate = |status: u16| -> Option<Audit<'a>> {
-        Some(audit(peer, role, path, status, AuditFields::default()))
+        Some(audit(
+            peer,
+            role,
+            method,
+            path,
+            status,
+            AuditFields::default(),
+        ))
     };
     let Some((kind, name)) = config_route(path) else {
         return Outcome::done(Response::error(404, "not_found"));
@@ -970,17 +1583,120 @@ fn put_config<'a>(
         change,
         if_match: Some(if_match),
         role,
+        method,
         path,
+        back_to_panel: false,
     }
+}
+
+/// The one action route: re-read the configuration and its certificate files
+/// and apply them (D7).
+const CERTIFICATE_RELOAD_PATH: &str = "/api/v1/certificates/reload";
+
+/// `POST /api/v1/certificates/reload`.
+///
+/// The renewal HAProxy does with `set ssl cert`: the operator writes the new
+/// files where the configuration already points and asks the plane to load
+/// them. It is an **action**, not a document edit — it declares no state and
+/// carries no body — so it needs no `If-Match` (ADR-0025), but it does need
+/// the write role, no browser `Origin`, and it is audited like any write.
+///
+/// The answer reports the certificate each TLS listener serves **after** the
+/// dataplane committed the swap; a reload whose candidate fails validation
+/// answers `400` and leaves the previous certificate serving.
+fn post_certificates<'a>(
+    head: &str,
+    tokens: &Tokens,
+    role: Role,
+    peer: Peer,
+    path: &'a str,
+) -> Outcome<'a> {
+    let adjudicate = |status: u16| -> Option<Audit<'a>> {
+        Some(audit(
+            peer,
+            role,
+            "POST",
+            path,
+            status,
+            AuditFields::default(),
+        ))
+    };
+    if role != Role::Write {
+        let code = if tokens.write.is_none() {
+            "write_disabled"
+        } else {
+            "forbidden"
+        };
+        return Outcome::done_with(Response::error(403, code), adjudicate(403));
+    }
+    if !header_values(head, "origin").is_empty() {
+        return Outcome::done_with(Response::error(403, "origin_forbidden"), adjudicate(403));
+    }
+    // The action carries no payload: a body would be a client inventing a
+    // request shape this route does not define.
+    if content_length(head).unwrap_or(0) != 0
+        || !header_values(head, "transfer-encoding").is_empty()
+    {
+        return Outcome::done_with(Response::error(400, "body_not_allowed"), adjudicate(400));
+    }
+    Outcome::Apply {
+        change: ConfigChange::Reload,
+        if_match: None,
+        role,
+        method: "POST",
+        path,
+        back_to_panel: false,
+    }
+}
+
+/// Prometheus exposition of the dataplane counters, the removal series this
+/// plane derives from the live topology (H3, ADR-0028), and the opt-in detail
+/// registry (CE4). The removal series are label-free: one line each, so a
+/// scrape cannot grow the index. The labelled families exist only while
+/// `[metrics] detailed` is on, and only for the series that fit the
+/// configured budget.
+fn prometheus_body(
+    snapshot: &eqproxy_core::MetricsSnapshot,
+    detail: &eqproxy_core::metrics::DetailSnapshot,
+    topology: &AdminTopology,
+) -> String {
+    let mut body = snapshot.prometheus();
+    body.push_str(&detail.prometheus());
+    let mut draining = 0u64;
+    let mut maintenance = 0u64;
+    let mut completed = 0u64;
+    for backend in &topology.backends {
+        completed = completed.saturating_add(backend.balancer.drains_completed());
+        for server in backend.balancer.servers_view() {
+            match server.mode {
+                ServerMode::Drain => draining = draining.saturating_add(1),
+                ServerMode::Maintenance => maintenance = maintenance.saturating_add(1),
+                ServerMode::Ready => {}
+            }
+        }
+    }
+    // `draining`/`maintenance` count slots declared in each removal state
+    // (with or without work left); the per-slot `active`/`drained` pair that
+    // says *how far* the removal is lives in the status JSON, where the
+    // budget is the configured topology. `drains_completed_total` counts
+    // drain completions only: maintenance has no counter (ADR-0028), its
+    // window opening is the `INFO server ready for maintenance` line.
+    body.push_str(&format!(
+        "# TYPE eqproxy_backend_servers_draining gauge\n\
+         eqproxy_backend_servers_draining {draining}\n\
+         # TYPE eqproxy_backend_servers_maintenance gauge\n\
+         eqproxy_backend_servers_maintenance {maintenance}\n\
+         # TYPE eqproxy_backend_drains_completed_total counter\n\
+         eqproxy_backend_drains_completed_total {completed}\n"
+    ));
+    body
 }
 
 fn backend_status(backend: &ResolvedBackend) -> BackendStatus<'_> {
     BackendStatus {
         name: &backend.name,
-        balance: match backend.balancer.algorithm() {
-            crate::balancer::Balance::RoundRobin => "round_robin",
-            crate::balancer::Balance::LeastConn => "least_conn",
-        },
+        balance: backend.balancer.algorithm().as_str(),
+        all_backups: backend.balancer.all_backups(),
         health_check: backend.health_check.is_some(),
         servers: backend
             .balancer
@@ -990,9 +1706,12 @@ fn backend_status(backend: &ResolvedBackend) -> BackendStatus<'_> {
                 addr: server.target,
                 resolved: server.addr.map(|addr| addr.to_string()),
                 weight: server.weight,
+                backup: server.backup,
+                priority: server.priority,
                 state: server.mode.as_str(),
                 healthy: server.up,
                 active: server.active,
+                drained: server.drained,
             })
             .collect(),
     }
@@ -1002,14 +1721,16 @@ fn backend_status(backend: &ResolvedBackend) -> BackendStatus<'_> {
 ///
 /// Order of checks: role, browser origin, media type, length, body shape,
 /// state value, existence. A refused request never changes a slot; an
-/// accepted one is idempotent and reports the previous state.
+/// accepted one is idempotent and reports the previous state. An accepted
+/// `maintenance` additionally closes the slot's idle pooled connections
+/// (h1 pool and backend h2 session) at the transition (ADR-0028).
 fn put_server_state<'a>(
     head: &str,
     body: Option<&[u8]>,
     tokens: &Tokens,
     role: Role,
     state: &AdminState,
-    peer: SocketAddr,
+    peer: Peer,
     path: &'a str,
 ) -> (Response, Option<Audit<'a>>) {
     let record = |status: u16,
@@ -1020,6 +1741,7 @@ fn put_server_state<'a>(
         audit(
             peer,
             role,
+            "PUT",
             path,
             status,
             AuditFields {
@@ -1111,12 +1833,49 @@ fn put_server_state<'a>(
             Some(record(404, None, None, None, None)),
         );
     };
+    match apply_server_state(state, backend_name, target, mode) {
+        Ok((answer, previous)) => match serde_json::to_vec(&answer) {
+            Ok(body) => (
+                Response::json(200, body),
+                Some(record(
+                    200,
+                    Some(backend_name),
+                    Some(target),
+                    Some(previous),
+                    Some(mode),
+                )),
+            ),
+            Err(_) => (
+                Response::error(500, "internal_error"),
+                Some(record(
+                    500,
+                    Some(backend_name),
+                    Some(target),
+                    Some(previous),
+                    Some(mode),
+                )),
+            ),
+        },
+        Err((status, code)) => (
+            Response::error(status, code),
+            Some(record(status, Some(backend_name), Some(target), None, None)),
+        ),
+    }
+}
+
+/// Applies one administrative state to one slot: the single implementation
+/// the JSON route and the panel both call (ADR-0029), so "what `maintenance`
+/// does" cannot drift between the two clients. Returns the applied document
+/// and the previous state, or the HTTP status and error code to answer with.
+pub(crate) fn apply_server_state(
+    state: &AdminState,
+    backend_name: &str,
+    target: &str,
+    mode: ServerMode,
+) -> Result<(serde_json::Value, ServerMode), (u16, &'static str)> {
     let topology = state.read_topology();
     let Some(backend) = topology.backends.iter().find(|b| b.name == backend_name) else {
-        return (
-            Response::error(404, "not_found"),
-            Some(record(404, Some(backend_name), None, None, None)),
-        );
+        return Err((404, "not_found"));
     };
     let Some(server) = backend
         .balancer
@@ -1124,13 +1883,24 @@ fn put_server_state<'a>(
         .into_iter()
         .find(|server| server.target == target)
     else {
-        return (
-            Response::error(404, "not_found"),
-            Some(record(404, Some(backend_name), Some(target), None, None)),
-        );
+        return Err((404, "not_found"));
     };
     let previous = server.mode;
     let applied = state.modes.set(backend_name, target, mode);
+    if mode == ServerMode::Maintenance {
+        // The patch window's contract (ADR-0028): nothing of ours stays on
+        // the server. The pool closes what is parked right now; a connection
+        // of an exchange that ends later is never parked either, the
+        // completion path refuses to pool a maintenance slot
+        // (`ActiveGuard::mode`). The mode is set first on purpose: a
+        // connection parked in between is closed by the sweep below.
+        if let Some(addr) = server.addr {
+            backend.pool.close_idle(&addr);
+            if let Some(hub) = backend.h2.as_ref() {
+                hub.close_idle(addr);
+            }
+        }
+    }
     let answer = serde_json::json!({
         "backend": backend_name,
         "server": target,
@@ -1138,30 +1908,10 @@ fn put_server_state<'a>(
         "previous": applied.as_str(),
         "active": server.active,
         "healthy": server.up,
+        "drained": mode != ServerMode::Ready && server.active == 0,
         "changed": previous != mode,
     });
-    match serde_json::to_vec(&answer) {
-        Ok(body) => (
-            Response::json(200, body),
-            Some(record(
-                200,
-                Some(backend_name),
-                Some(target),
-                Some(previous),
-                Some(mode),
-            )),
-        ),
-        Err(_) => (
-            Response::error(500, "internal_error"),
-            Some(record(
-                500,
-                Some(backend_name),
-                Some(target),
-                Some(previous),
-                Some(mode),
-            )),
-        ),
-    }
+    Ok((answer, previous))
 }
 
 #[derive(serde::Deserialize)]
@@ -1172,7 +1922,7 @@ struct StateRequest {
 
 /// Constant-time token comparison: an attacker who can time the answers must
 /// not learn how many leading bytes of the token are right.
-fn token_matches(expected: &str, given: &str) -> bool {
+pub(crate) fn token_matches(expected: &str, given: &str) -> bool {
     let expected = expected.as_bytes();
     let given = given.as_bytes();
     let mut diff = u8::from(expected.len() != given.len());
@@ -1194,8 +1944,8 @@ mod tests {
     const TOKEN: &str = "correct-horse-battery-staple";
     const WRITE: &str = "write-secret-0123456789";
 
-    fn peer() -> SocketAddr {
-        "127.0.0.1:50000".parse().expect("peer")
+    fn peer() -> Peer {
+        Peer::Tcp("127.0.0.1:50000".parse().expect("peer"))
     }
 
     fn backend(modes: &Arc<ServerModes>) -> Arc<ResolvedBackend> {
@@ -1206,10 +1956,14 @@ mod tests {
                     ResolvedServer {
                         addr: crate::ServerAddr::Ip("127.0.0.1:9000".parse().expect("addr")),
                         weight: 1,
+                        backup: false,
+                        priority: 0,
                     },
                     ResolvedServer {
                         addr: crate::ServerAddr::Ip("127.0.0.1:9001".parse().expect("addr")),
                         weight: 2,
+                        backup: false,
+                        priority: 0,
                     },
                 ],
                 3,
@@ -1239,13 +1993,14 @@ mod tests {
                     mode: "http".to_owned(),
                     backend: "api".to_owned(),
                     maxconn: 1024,
+                    tls_fingerprint: None,
                 }],
                 backends: vec![backend(&modes)],
             })),
             modes,
             metrics: Arc::new(Metrics::default()),
-            metrics_detailed: false,
             apply,
+            panel: None,
         }
     }
 
@@ -1257,7 +2012,7 @@ mod tests {
         body: Option<&[u8]>,
         tokens: &Tokens,
         state: &AdminState,
-        peer: SocketAddr,
+        peer: Peer,
     ) -> (Response, Option<Audit<'a>>) {
         match super::respond(head, body, tokens, state, peer) {
             Outcome::Done(response, audit) => (response, audit),
@@ -1358,6 +2113,10 @@ mod tests {
         assert_eq!(parsed["backends"][0]["servers"][1]["state"], "drain");
         assert_eq!(parsed["backends"][0]["servers"][1]["weight"], 2);
         assert_eq!(parsed["backends"][0]["servers"][1]["active"], 0);
+        // H3: an idle drained slot reports the drain as finished, and a
+        // ready slot never does.
+        assert_eq!(parsed["backends"][0]["servers"][1]["drained"], true);
+        assert_eq!(parsed["backends"][0]["servers"][0]["drained"], false);
         assert_eq!(
             parsed["backends"][0]["servers"][0]["resolved"],
             "127.0.0.1:9000"
@@ -1366,6 +2125,74 @@ mod tests {
         assert!(parsed["uptime_seconds"].is_u64());
         let body = String::from_utf8(response.body).expect("json");
         assert!(!body.contains(TOKEN), "the status never echoes the token");
+    }
+
+    #[test]
+    fn status_marks_backup_servers() {
+        let backend = Arc::new(ResolvedBackend::new(
+            "api",
+            vec![
+                ResolvedServer {
+                    addr: crate::ServerAddr::Ip("127.0.0.1:9000".parse().expect("addr")),
+                    weight: 1,
+                    backup: false,
+                    priority: 0,
+                },
+                ResolvedServer {
+                    addr: crate::ServerAddr::Ip("127.0.0.1:9001".parse().expect("addr")),
+                    weight: 1,
+                    backup: true,
+                    priority: 10,
+                },
+            ],
+            3,
+            2,
+        ));
+        let status = serde_json::to_value(backend_status(&backend)).expect("status json");
+        assert_eq!(status["servers"][0]["backup"], false);
+        assert_eq!(
+            status["servers"][1]["backup"], true,
+            "the read plane says which slot is a backup (B8)"
+        );
+        assert_eq!(status["servers"][0]["priority"], 0);
+        assert_eq!(
+            status["servers"][1]["priority"], 10,
+            "the read plane publishes the failover rung"
+        );
+        assert_eq!(
+            status["all_backups"], false,
+            "the default is one backup rung at a time (B8)"
+        );
+
+        // `option allbackups` on the same slots: the policy is part of the
+        // read plane, so an operator can tell the two modes apart.
+        let pooled = Arc::new(
+            ResolvedBackend::new(
+                "api",
+                vec![
+                    ResolvedServer {
+                        addr: crate::ServerAddr::Ip("127.0.0.1:9000".parse().expect("addr")),
+                        weight: 1,
+                        backup: true,
+                        priority: 0,
+                    },
+                    ResolvedServer {
+                        addr: crate::ServerAddr::Ip("127.0.0.1:9001".parse().expect("addr")),
+                        weight: 1,
+                        backup: true,
+                        priority: 0,
+                    },
+                ],
+                3,
+                2,
+            )
+            .with_all_backups(true),
+        );
+        let status = serde_json::to_value(backend_status(&pooled)).expect("status json");
+        assert_eq!(
+            status["all_backups"], true,
+            "the read plane says the backup tier balances as one pool"
+        );
     }
 
     #[test]
@@ -1392,6 +2219,21 @@ mod tests {
         assert!(body.contains("eqproxy_connections_accepted_total 3"));
         assert!(body.contains("eqproxy_connections_active 0"));
         assert!(body.contains("eqproxy_build_info{version="));
+        // H3: the drain series exist before any drain happens, at zero, so a
+        // dashboard can be built against a running process.
+        assert!(body.contains("# TYPE eqproxy_backend_servers_draining gauge"));
+        assert!(body.contains("eqproxy_backend_servers_draining 0"));
+        assert!(body.contains("# TYPE eqproxy_backend_drains_completed_total counter"));
+        assert!(body.contains("eqproxy_backend_drains_completed_total 0"));
+        // CE4: detail is off by default, and the four accounting series say so
+        // without a single label — a scraper can tell "no traffic" from
+        // "detail disabled" without asking the process.
+        assert!(body.contains("eqproxy_metrics_detail_enabled 0"));
+        assert!(body.contains("eqproxy_metrics_detail_series 0"));
+        assert!(body.contains("eqproxy_metrics_detail_budget 128"));
+        assert!(body.contains("eqproxy_metrics_detail_dropped_total 0"));
+        assert!(!body.contains("eqproxy_server_requests_total{"));
+        assert!(!body.contains("eqproxy_route_requests_total{"));
         // Every value line is `metric_name {value}` with no labels; only the
         // build-info gauge carries one, so cardinality cannot grow per scrape.
         for line in body
@@ -1407,9 +2249,69 @@ mod tests {
     }
 
     #[test]
-    fn only_get_and_the_state_put_are_served() {
+    fn detail_series_and_their_budget_are_exported_when_enabled() {
         let state = state();
-        for method in ["POST", "DELETE", "HEAD", "PATCH"] {
+        state.metrics.detail.set_enabled(true);
+        state
+            .metrics
+            .detail
+            .record_server("api", "127.0.0.1:9000", false);
+        state
+            .metrics
+            .detail
+            .record_server("api", "127.0.0.1:9000", true);
+        state.metrics.detail.record_route("web", "alpha", false);
+        let (response, _) = respond(
+            &request("GET", "/metrics", Some(&format!("Bearer {TOKEN}"))),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(response.status, 200);
+        let body = String::from_utf8(response.body).expect("prometheus text");
+        assert!(body.contains("eqproxy_metrics_detail_enabled 1"), "{body}");
+        assert!(body.contains("eqproxy_metrics_detail_series 2"), "{body}");
+        assert!(
+            body.contains(
+                "eqproxy_server_requests_total{backend=\"api\",server=\"127.0.0.1:9000\"} 2"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "eqproxy_server_errors_total{backend=\"api\",server=\"127.0.0.1:9000\"} 1"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("eqproxy_route_requests_total{listener=\"web\",route=\"alpha\"} 1"),
+            "{body}"
+        );
+        // The same rows are in the JSON API, under the same budget.
+        let (status, _) = respond(
+            &request("GET", "/api/v1/status", Some(&format!("Bearer {TOKEN}"))),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        );
+        let parsed = body_json(&status);
+        assert_eq!(parsed["metrics_detail"]["enabled"], true);
+        assert_eq!(parsed["metrics_detail"]["budget"], 128);
+        assert_eq!(parsed["metrics_detail"]["series"], 2);
+        assert_eq!(parsed["metrics_detail"]["rows"][0]["kind"], "server");
+        assert_eq!(parsed["metrics_detail"]["rows"][0]["key"], "127.0.0.1:9000");
+        assert_eq!(parsed["metrics_detail"]["rows"][1]["kind"], "route");
+        assert_eq!(parsed["metrics_detail"]["rows"][1]["key"], "alpha");
+    }
+
+    #[test]
+    fn only_the_documented_methods_are_served() {
+        let state = state();
+        // `POST` exists only for the certificate action; every other method
+        // on every path is refused with the list that plane really serves.
+        for method in ["DELETE", "HEAD", "PATCH", "TRACE"] {
             let (response, _) = respond(
                 &request(method, "/api/v1/status", Some(&format!("Bearer {TOKEN}"))),
                 None,
@@ -1422,9 +2324,19 @@ mod tests {
                 response
                     .extra
                     .iter()
-                    .any(|(name, value)| *name == "allow" && value == "GET, PUT")
+                    .any(|(name, value)| *name == "allow" && value == "GET, PUT, POST"),
+                "{method}: {:?}",
+                response.extra
             );
         }
+        let (response, _) = respond(
+            &request("POST", "/api/v1/status", Some(&format!("Bearer {TOKEN}"))),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(response.status, 405, "POST exists on one path only");
     }
 
     #[test]
@@ -1539,6 +2451,97 @@ mod tests {
     }
 
     #[test]
+    fn a_maintenance_write_closes_the_idle_connections_of_the_slot() {
+        use crate::proxy::{BoxRead, BoxWrite};
+        use tokio::io::{BufReader, duplex, split};
+
+        let modes = Arc::new(ServerModes::new());
+        let state = state_with(Arc::clone(&modes), None);
+        let backend = state.read_topology().backends[0].clone();
+        let addr: SocketAddr = "127.0.0.1:9000".parse().expect("addr");
+        // Park one clean idle connection for the slot, exactly as the
+        // completion path would after a keep-alive exchange.
+        let (near, _far) = duplex(1024);
+        let (read, write) = split(near);
+        backend.pool.note_in_flight(addr, 1);
+        backend.pool.checkin(
+            addr,
+            BufReader::new(Box::new(read) as BoxRead),
+            Box::new(write) as BoxWrite,
+            Instant::now(),
+        );
+        assert_eq!(
+            backend.pool.idle_count(&addr),
+            1,
+            "test setup parks a connection"
+        );
+
+        // `drain` is graceful: the parked connection stays (it ages out on
+        // its own timer, ADR-0018).
+        let path = "/api/v1/backends/api/servers/127.0.0.1:9000/state";
+        let head = put(path, WRITE, "application/json", "{\"state\":\"drain\"}");
+        let (drained, _) = respond(
+            &head,
+            Some(b"{\"state\":\"drain\"}"),
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(drained.status, 200);
+        assert_eq!(body_json(&drained)["drained"], true);
+        assert_eq!(
+            backend.pool.idle_count(&addr),
+            1,
+            "a drain keeps pooled connections: they age out on their own"
+        );
+
+        // `maintenance` closes them at the transition (ADR-0028).
+        let head = put(
+            path,
+            WRITE,
+            "application/json",
+            "{\"state\":\"maintenance\"}",
+        );
+        let (maintained, _) = respond(
+            &head,
+            Some(b"{\"state\":\"maintenance\"}"),
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(maintained.status, 200);
+        let parsed = body_json(&maintained);
+        assert_eq!(parsed["state"], "maintenance");
+        assert_eq!(parsed["previous"], "drain");
+        assert_eq!(parsed["changed"], true);
+        assert_eq!(
+            parsed["drained"], true,
+            "an idle maintenance slot is already finished"
+        );
+        assert_eq!(
+            state.modes.get("api", "127.0.0.1:9000"),
+            ServerMode::Maintenance
+        );
+        assert_eq!(
+            backend.pool.idle_count(&addr),
+            0,
+            "the patch window's contract: nothing of ours stays parked"
+        );
+
+        // Back to rotation and the slot serves again.
+        let head = put(path, WRITE, "application/json", "{\"state\":\"ready\"}");
+        let (ready, _) = respond(
+            &head,
+            Some(b"{\"state\":\"ready\"}"),
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(ready.status, 200);
+        assert_eq!(state.modes.get("api", "127.0.0.1:9000"), ServerMode::Ready);
+    }
+
+    #[test]
     fn without_a_write_token_every_write_is_disabled() {
         let state = state();
         let tokens = Tokens {
@@ -1581,7 +2584,7 @@ mod tests {
             ),
             (
                 "application/json",
-                "{\"state\":\"maintenance\"}",
+                "{\"state\":\"pause\"}",
                 400,
                 "invalid_state",
             ),
@@ -1750,6 +2753,136 @@ mod tests {
             }
             Outcome::Done(response, _) => panic!("must be applied: {}", response.status),
         }
+    }
+
+    // ------------------------- ADR-0025: certificate renewal (D7) -------
+
+    fn certificate_reload(secret: Option<&str>, extra_headers: &str) -> String {
+        let mut head = format!("POST {CERTIFICATE_RELOAD_PATH} HTTP/1.1\r\nhost: admin\r\n");
+        if let Some(secret) = secret {
+            head.push_str(&format!("authorization: Bearer {secret}\r\n"));
+        }
+        head.push_str(extra_headers);
+        head.push_str("\r\n");
+        head
+    }
+
+    #[test]
+    fn certificate_reload_needs_the_write_role_and_no_browser_origin() {
+        let state = state();
+
+        // Anonymous: nothing about the plane, and the attempt is audited as a
+        // POST (the log must show what was tried, not only what was applied).
+        let head = certificate_reload(None, "");
+        let (response, audit) = respond(&head, None, &tokens(), &state, peer());
+        assert_eq!(response.status, 401);
+        let audit = audit.expect("an unauthenticated renewal is audited");
+        assert_eq!(audit.method, "POST");
+        assert_eq!(audit.status, 401);
+
+        // The read token cannot renew certificates.
+        let read_attempt = certificate_reload(Some(TOKEN), "");
+        let (response, audit) = respond(&read_attempt, None, &tokens(), &state, peer());
+        assert_eq!(response.status, 403);
+        assert_eq!(body_json(&response)["error"], "forbidden");
+        assert_eq!(audit.expect("audited").status, 403);
+
+        // A plane with no write secret at all says so instead of pretending.
+        let read_only = Tokens {
+            read: Arc::from(TOKEN),
+            write: None,
+        };
+        let (response, _) = respond(
+            &certificate_reload(Some(TOKEN), ""),
+            None,
+            &read_only,
+            &state,
+            peer(),
+        );
+        assert_eq!(response.status, 403);
+        assert_eq!(body_json(&response)["error"], "write_disabled");
+
+        // A browser-originated request never renews a certificate.
+        let (response, _) = respond(
+            &certificate_reload(Some(WRITE), "origin: https://evil.example\r\n"),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(response.status, 403);
+        assert_eq!(body_json(&response)["error"], "origin_forbidden");
+    }
+
+    #[test]
+    fn certificate_reload_rejects_a_body_and_reaches_the_applier_as_an_action() {
+        let state = state();
+
+        for extra in ["content-length: 4\r\n", "transfer-encoding: chunked\r\n"] {
+            let attempt = certificate_reload(Some(WRITE), extra);
+            let (response, audit) = respond(&attempt, None, &tokens(), &state, peer());
+            assert_eq!(response.status, 400, "{extra}");
+            assert_eq!(body_json(&response)["error"], "body_not_allowed");
+            assert_eq!(audit.expect("audited").status, 400);
+        }
+
+        // A clean request is a reload action: no revision precondition, no
+        // body, and the method travels with it so the audit line is honest.
+        let path = CERTIFICATE_RELOAD_PATH;
+        match super::respond(
+            &certificate_reload(Some(WRITE), ""),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        ) {
+            Outcome::Apply {
+                change,
+                if_match,
+                method,
+                path: seen,
+                ..
+            } => {
+                assert_eq!(method, "POST");
+                assert_eq!(seen, path);
+                assert!(if_match.is_none(), "an action is not a conditional edit");
+                assert!(
+                    matches!(change, ConfigChange::Reload),
+                    "unexpected change: {change:?}"
+                );
+            }
+            Outcome::Done(response, _) => panic!("must be applied: {}", response.status),
+        }
+
+        // Only the documented path exists, and the method list advertises it.
+        let (response, _) = respond(
+            &request(
+                "POST",
+                "/api/v1/certificates",
+                Some(&format!("Bearer {WRITE}")),
+            ),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(response.status, 405, "POST exists on one path only");
+        let (response, _) = respond(
+            &request("DELETE", path, Some(&format!("Bearer {WRITE}"))),
+            None,
+            &tokens(),
+            &state,
+            peer(),
+        );
+        assert_eq!(response.status, 405);
+        assert!(
+            response
+                .extra
+                .iter()
+                .any(|(name, value)| *name == "allow" && value.contains("POST")),
+            "a write-capable plane advertises POST: {:?}",
+            response.extra
+        );
     }
 
     #[test]

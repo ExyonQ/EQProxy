@@ -1,0 +1,46 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+version: eqproxy 0.7.0
+sha256: 47fff1c8cef6193640d3cecbba166b7dbd1f84bf5c5acf392d42b9adb0279c9c  /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+raw run: /Volumes/Lexar/Cursor/EQProxy/docs/evidence/v08-panel/raw/run-20261027T003501Z
+dataplane 127.0.0.1:64729 · admin 127.0.0.1:64730 · origins a=64727 b=64728
+PASS an anonymous GET /panel answers the login page: 200
+PASS the login form is the page's action: 
+PASS the page carries the no-script policy and is not cached: {'csp': "default-src 'none'; style-src 'self'; fo", 'cc': 'no-store'}
+PASS the dashboard is not served anonymously: 
+PASS no secret appears on the login page: 
+PASS an unknown /panel path is 404: 404
+PASS a wrong token is refused with 401: 401
+PASS the page names the refusal: 
+PASS a foreign Origin on login is 403: 403
+PASS the read token opens a session: 303
+PASS the session cookie is HttpOnly, SameSite=Strict and scoped to /panel: eqproxy_session=6f673d8f9a4c57aec411350de5e27cfee963d3333e76aa66938bf8
+PASS login never echoes the token: 
+PASS the read session reads the dashboard: 200
+PASS the page marks the session read-only: 
+PASS the read session is offered no write surface: 
+PASS a write from the read session is refused: 403
+PASS the write token opens a session: 303
+PASS the write session renders the dashboard: 200
+PASS the page offers the three states, the editors and the certificate reload: 
+PASS the page carries a CSRF token and the live revision: v1
+PASS no secret appears on the dashboard: 
+PASS a form with a wrong CSRF token is 403 csrf_required: 403
+PASS a cross-site form POST is 403: 403
+PASS a form without a session is sent back to the login page: 303
+PASS before the write the origin is the only server: a
+PASS the panel applies the table with a 303: 303
+PASS the browser is sent back to the page with the outcome: /panel?applied=1
+PASS the running revision moved and lists both servers: {'revision': 'v2', 'slots': ['127.0.0.1:64727', '127.0.0.1:64728']}
+PASS the dataplane really serves the new server: a
+PASS the original server still serves: {'a': 5, 'b': 2}
+PASS the panel drains the server with a 303: 303
+PASS the redirect names the applied state: /panel?applied=drain
+PASS status publishes the drain: [('127.0.0.1:64727', 'ready'), ('127.0.0.1:64728', 'drain')]
+PASS the drained server takes no new request: {'answers': ['a'], 'served_b': 2, 'before': 2}
+PASS the panel returns the server with a 303: 303
+PASS the server rejoins rotation: a
+PASS the panel writes leave their AUDIT lines: 10
+PASS no secret reaches the process log: 
+FAIL without `panel = true` the panel is a 404: 401
+
+FAILED: without `panel = true` the panel is a 404

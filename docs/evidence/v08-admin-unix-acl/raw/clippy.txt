@@ -1,0 +1,3 @@
+    Checking eqproxy-net v0.7.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-net)
+    Checking eqproxy-cli v0.7.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.92s

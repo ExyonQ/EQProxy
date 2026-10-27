@@ -453,6 +453,8 @@ mod tests {
             vec![crate::balancer::ResolvedServer {
                 addr: addr.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             }],
             1,
             1,

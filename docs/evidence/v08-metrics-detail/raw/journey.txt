@@ -1,0 +1,68 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+version: eqproxy 0.7.0
+phase A: dataplane 127.0.0.1:65080 · admin 127.0.0.1:65081
+
+$ phase 0: default configuration (no [metrics]): detail off
+PASS proxied before enabling: 3.0
+PASS detail enabled (default): 0.0
+PASS detail series (default): 0.0
+PASS detail budget (default): 128.0
+PASS detail dropped (default): 0.0
+PASS no server family while off: False
+PASS no route family while off: False
+PASS status says off: False
+PASS status has no rows: 0
+
+$ SIGHUP with [metrics] detailed = true
+PASS reload committed: v2
+PASS status says on: True
+PASS status budget: 128
+
+$ phase 1: three /alpha and two /boom after enabling
+PASS /alpha status: True
+PASS /alpha status: True
+PASS /alpha status: True
+PASS /boom status: True
+PASS /boom status: True
+PASS alpha server requests: 3.0
+PASS alpha server errors: 0.0
+PASS boom server requests: 2.0
+PASS boom server errors (5xx split): 2.0
+PASS route alpha requests: 3.0
+PASS route boom requests: 2.0
+PASS detail series (4 expected): 4.0
+PASS detail dropped with room: 0.0
+PASS global counter saw every exchange: 8.0
+PASS no route label invented for default traffic: False
+PASS status rows: 4
+PASS status rows name the servers and the rules: [('route', 'alpha'), ('route', 'boom'), ('server', '127.0.0.1:65078'), ('server', '127.0.0.1:65079')]
+PASS status row errors: 2
+
+$ SIGHUP with detailed = false (hot disable drops the window)
+PASS status says off after disable: False
+PASS series dropped on disable: 0
+PASS enabled series after disable: 0.0
+PASS no labelled family after disable: False
+PASS the global counter keeps counting: 8.0
+PASS clean shutdown exit code: 0
+PASS the enable/disable pair is logged: True
+PASS no secret in the log: True
+
+phase B: budget 2 · dataplane 127.0.0.1:65113 · admin 127.0.0.1:65114
+$ phase 3: three /alpha across two servers = three series, budget 2
+PASS /alpha status: True
+PASS /alpha status: True
+PASS /alpha status: True
+PASS budget is the configured one: 2.0
+PASS series capped at the budget: 2.0
+PASS one observation refused: 1.0
+PASS exactly one server series fits: 1
+PASS the fitting series kept counting: 2.0
+PASS route series fits and sees every exchange: 3.0
+PASS global counter is not bounded by the budget: 3.0
+PASS status reports the refusal: 1
+PASS status reports the live budget: 2
+PASS clean shutdown exit code: 0
+PASS no secret in the log: True
+
+RESULT: all assertions passed

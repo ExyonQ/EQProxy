@@ -2791,6 +2791,109 @@ fn start_static_backend(body: &'static str) -> std::net::SocketAddr {
     addr
 }
 
+/// Gate an origin holds an exchange on until the test opens it, so one proxy
+/// exchange can stay in flight on purpose (H3: drain observability).
+struct Gate {
+    /// `(request_reached, opened)`.
+    state: std::sync::Mutex<(bool, bool)>,
+    cv: std::sync::Condvar,
+}
+
+impl Gate {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new((false, false)),
+            cv: std::sync::Condvar::new(),
+        }
+    }
+
+    fn reached(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.0 = true;
+            self.cv.notify_all();
+        }
+    }
+
+    fn open(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.1 = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Waits until the origin holds a request; `false` on timeout.
+    fn wait_until_reached(&self, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        while !state.0 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            let Ok((next, _)) = self.cv.wait_timeout(state, left) else {
+                return false;
+            };
+            state = next;
+        }
+        true
+    }
+
+    fn wait_until_opened(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        while !state.1 {
+            let Ok(next) = self.cv.wait(state) else {
+                return;
+            };
+            state = next;
+        }
+    }
+}
+
+/// An origin that reads the request head and then waits for the gate: the
+/// exchange is real and stays open until the test releases it.
+fn start_gated_backend(body: &'static str) -> (std::net::SocketAddr, std::sync::Arc<Gate>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind gated");
+    let addr = listener.local_addr().expect("addr gated");
+    let gate = std::sync::Arc::new(Gate::new());
+    let backend_gate = std::sync::Arc::clone(&gate);
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { break };
+            let gate = std::sync::Arc::clone(&backend_gate);
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let mut total = 0usize;
+                loop {
+                    match stream.read(&mut buf[total..]) {
+                        Ok(0) => return,
+                        Ok(n) => {
+                            total += n;
+                            if buf[..total].windows(4).any(|w| w == b"\r\n\r\n")
+                                || total == buf.len()
+                            {
+                                break;
+                            }
+                        }
+                        Err(_) => return,
+                    }
+                }
+                gate.reached();
+                gate.wait_until_opened();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+    (addr, gate)
+}
+
 /// GET through the proxy and return the response body.
 fn http_body(addr: &str) -> String {
     let mut client = TcpStream::connect(addr).expect("connect proxy");
@@ -3244,6 +3347,1197 @@ fn run_slow_start_ramps_the_recovered_server_up() {
     }
 
     wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// Backup servers (B8) through the **real** binary: the backup never sees
+/// traffic while the primary is healthy, takes over when the health check
+/// drops the primary, and hands the tier back when the primary recovers.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_backup_server_covers_a_failed_primary_and_returns_on_recovery() {
+    use std::sync::atomic::Ordering;
+    let served_a = std::sync::Arc::new(AtomicUsize::new(0));
+    let served_b = std::sync::Arc::new(AtomicUsize::new(0));
+    let healthy_a = std::sync::Arc::new(AtomicBool::new(true));
+    let healthy_b = std::sync::Arc::new(AtomicBool::new(true));
+    let a = start_balancer_origin(
+        "a",
+        std::sync::Arc::clone(&healthy_a),
+        std::sync::Arc::clone(&served_a),
+        None,
+    );
+    let b = start_balancer_origin(
+        "b",
+        std::sync::Arc::clone(&healthy_b),
+        std::sync::Arc::clone(&served_b),
+        None,
+    );
+    let config = temp_config(
+        "backup",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             balance = \"roundrobin\"\n\
+             servers = [{{ addr = \"{a}\" }}, {{ addr = \"{b}\", backup = true }}]\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"150ms\"\n\
+             timeout = \"100ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (backup)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // Phase 1: the primary is healthy, so the backup must stay idle even
+    // though it answers health checks and would be ready to serve.
+    for _ in 0..10 {
+        assert_eq!(marker_body(&proxy_addr), "a");
+    }
+    assert_eq!(
+        served_b.load(Ordering::SeqCst),
+        0,
+        "the backup must not see traffic while a primary is eligible"
+    );
+    eprintln!(
+        "backup journey phase 1 (primary healthy): primary={} backup={}",
+        served_a.load(Ordering::SeqCst),
+        served_b.load(Ordering::SeqCst)
+    );
+
+    // Phase 2: the primary fails its HTTP check (fall = 1) and the backup
+    // takes over. Observable through traffic, not internal state.
+    healthy_a.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 5 {
+        assert!(
+            Instant::now() < deadline,
+            "the backup never took over after the primary failed"
+        );
+        if marker_body(&proxy_addr) == "b" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    eprintln!(
+        "backup journey phase 2 (primary down): primary={} backup={}",
+        served_a.load(Ordering::SeqCst),
+        served_b.load(Ordering::SeqCst)
+    );
+
+    // Phase 3: the primary recovers (rise = 1) and owns the tier again; the
+    // backup leaves rotation immediately (a backup is never selected while a
+    // primary is eligible).
+    healthy_a.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 5 {
+        assert!(
+            Instant::now() < deadline,
+            "the recovered primary never took the tier back"
+        );
+        if marker_body(&proxy_addr) == "a" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let backup_served = served_b.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        assert_eq!(
+            marker_body(&proxy_addr),
+            "a",
+            "after recovery every new exchange goes to the primary"
+        );
+    }
+    assert_eq!(
+        served_b.load(Ordering::SeqCst),
+        backup_served,
+        "the backup stops serving once a primary is back"
+    );
+    eprintln!(
+        "backup journey: primary={} backup={} failover=ok recovery=ok",
+        served_a.load(Ordering::SeqCst),
+        served_b.load(Ordering::SeqCst)
+    );
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// Priority ladder (B7) through the **real** binary: one primary and two
+/// backups at different priorities. The backup tier serves its highest rung
+/// only; when that rung fails the next one takes over, and a recovered rung
+/// (or the primary) takes the traffic back on the next request.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_priority_ladder_fails_over_between_backups_and_back() {
+    use std::sync::atomic::Ordering;
+    let served = || std::sync::Arc::new(AtomicUsize::new(0));
+    let healthy = || std::sync::Arc::new(AtomicBool::new(true));
+    let (served_a, served_h, served_l) = (served(), served(), served());
+    let (healthy_a, healthy_h) = (healthy(), healthy());
+    let a = start_balancer_origin(
+        "a",
+        std::sync::Arc::clone(&healthy_a),
+        std::sync::Arc::clone(&served_a),
+        None,
+    );
+    let h = start_balancer_origin(
+        "h",
+        std::sync::Arc::clone(&healthy_h),
+        std::sync::Arc::clone(&served_h),
+        None,
+    );
+    let l = start_balancer_origin(
+        "l",
+        std::sync::Arc::new(AtomicBool::new(true)),
+        std::sync::Arc::clone(&served_l),
+        None,
+    );
+    let config = temp_config(
+        "priority-ladder",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             balance = \"roundrobin\"\n\
+             servers = [{{ addr = \"{a}\" }}, {{ addr = \"{h}\", backup = true, priority = 10 }}, {{ addr = \"{l}\", backup = true, priority = 5 }}]\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"150ms\"\n\
+             timeout = \"100ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (priority ladder)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    let wait_for_marker = |expected: &str, what: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut streak = 0;
+        while streak < 5 {
+            assert!(Instant::now() < deadline, "{what}");
+            if marker_body(&proxy_addr) == expected {
+                streak += 1;
+            } else {
+                streak = 0;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+
+    // Phase 1: the primary owns the tier; both backups answer health checks
+    // and stay idle.
+    for _ in 0..10 {
+        assert_eq!(marker_body(&proxy_addr), "a");
+    }
+    assert_eq!(served_h.load(Ordering::SeqCst), 0, "high rung idle");
+    assert_eq!(served_l.load(Ordering::SeqCst), 0, "low rung idle");
+
+    // Phase 2: the primary fails; the highest priority rung takes over.
+    healthy_a.store(false, Ordering::SeqCst);
+    wait_for_marker("h", "the high-priority backup never took over");
+    assert_eq!(
+        served_l.load(Ordering::SeqCst),
+        0,
+        "the lower rung stays idle while the high one is up"
+    );
+
+    // Phase 3: the high rung fails; the next rung serves.
+    healthy_h.store(false, Ordering::SeqCst);
+    wait_for_marker("l", "the lower-priority backup never took over");
+
+    // Phase 4: the high rung recovers and takes the traffic back.
+    healthy_h.store(true, Ordering::SeqCst);
+    wait_for_marker("h", "the recovered high rung never took the tier back");
+    let low_served = served_l.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        assert_eq!(marker_body(&proxy_addr), "h");
+    }
+    assert_eq!(
+        served_l.load(Ordering::SeqCst),
+        low_served,
+        "the lower rung stops serving when a higher one is operational"
+    );
+
+    // Phase 5: the primary recovers and outranks the whole ladder.
+    healthy_a.store(true, Ordering::SeqCst);
+    wait_for_marker("a", "the recovered primary never took the tier back");
+    eprintln!(
+        "priority journey: primary={} high={} low={} ladder=ok",
+        served_a.load(Ordering::SeqCst),
+        served_h.load(Ordering::SeqCst),
+        served_l.load(Ordering::SeqCst)
+    );
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// Backup pooling (`option allbackups`, B8) through the **real** binary:
+/// with `all_backups = true` the whole backup tier balances by weight while
+/// no primary is eligible, a dead pool member leaves rotation, a recovered
+/// one takes its share back, and the primary outranks the pool on its first
+/// successful check.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_all_backups_spreads_traffic_across_the_backup_pool() {
+    use std::sync::atomic::Ordering;
+    let served = || std::sync::Arc::new(AtomicUsize::new(0));
+    let healthy = || std::sync::Arc::new(AtomicBool::new(true));
+    let (served_a, served_h, served_l) = (served(), served(), served());
+    let (healthy_a, healthy_h) = (healthy(), healthy());
+    let a = start_balancer_origin(
+        "a",
+        std::sync::Arc::clone(&healthy_a),
+        std::sync::Arc::clone(&served_a),
+        None,
+    );
+    let h = start_balancer_origin(
+        "h",
+        std::sync::Arc::clone(&healthy_h),
+        std::sync::Arc::clone(&served_h),
+        None,
+    );
+    let l = start_balancer_origin(
+        "l",
+        std::sync::Arc::new(AtomicBool::new(true)),
+        std::sync::Arc::clone(&served_l),
+        None,
+    );
+    let config = temp_config(
+        "all-backups",
+        &format!(
+            "schema_version = 1\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             backend = \"api\"\n\
+             mode = \"http\"\n\
+             [backend.api]\n\
+             balance = \"roundrobin\"\n\
+             all_backups = true\n\
+             servers = [{{ addr = \"{a}\" }}, {{ addr = \"{h}\", weight = 2, backup = true }}, {{ addr = \"{l}\", weight = 1, backup = true }}]\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"150ms\"\n\
+             timeout = \"100ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n"
+        ),
+    );
+
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run (all_backups)");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let announce = wait_for_stderr(&mut stderr, "listening on ");
+    let proxy_addr = announce
+        .split("listening on ")
+        .nth(1)
+        .expect("bind line")
+        .trim()
+        .to_owned();
+
+    // A request round whose every answer must come from the pool. The pool
+    // weights are 2:1, so a count that is a multiple of the 3-request cycle
+    // splits exactly 2:1 whatever the cycle phase is.
+    let pool_round = |n: usize| -> (usize, usize) {
+        let (mut high, mut low) = (0, 0);
+        for _ in 0..n {
+            match marker_body(&proxy_addr).as_str() {
+                "h" => high += 1,
+                "l" => low += 1,
+                other => panic!("expected a pool member, got {other:?}"),
+            }
+        }
+        (high, low)
+    };
+
+    // Phase 1: the primary owns the tier; both pool members answer health
+    // checks and stay idle even though `all_backups` is on.
+    for _ in 0..10 {
+        assert_eq!(marker_body(&proxy_addr), "a");
+    }
+    assert_eq!(served_h.load(Ordering::SeqCst), 0, "pool member idle");
+    assert_eq!(served_l.load(Ordering::SeqCst), 0, "pool member idle");
+
+    // Phase 2: the primary fails; the whole pool serves, split by weight.
+    healthy_a.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the backup pool never took over after the primary failed"
+        );
+        if marker_body(&proxy_addr) != "a" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let primary_before = served_a.load(Ordering::SeqCst);
+    let (high, low) = pool_round(30);
+    assert_eq!(
+        (high, low),
+        (20, 10),
+        "the pool balances the whole backup tier by weight (2:1)"
+    );
+    assert_eq!(
+        served_a.load(Ordering::SeqCst),
+        primary_before,
+        "the down primary sees no traffic while the pool serves"
+    );
+    eprintln!("all_backups phase 2 (pool): high={high} low={low} primary={primary_before}");
+
+    // Phase 3: a pool member fails (fall = 1); the other takes the whole
+    // tier, and the dead one leaves rotation.
+    healthy_h.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the surviving pool member never took the tier"
+        );
+        if marker_body(&proxy_addr) == "l" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let high_before = served_h.load(Ordering::SeqCst);
+    let (survivors, others) = pool_round(20);
+    assert_eq!(
+        (survivors, others),
+        (0, 20),
+        "the dead pool member leaves rotation for good"
+    );
+    assert_eq!(
+        served_h.load(Ordering::SeqCst),
+        high_before,
+        "the failed member sees no traffic after it was marked down"
+    );
+
+    // Phase 4: the member recovers (rise = 1) and takes its weighted share
+    // back: the pool is balanced again, not handed to one rung.
+    healthy_h.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    // A single `h` answer already proves the member is back in rotation:
+    // only that origin answers `h`, and with weights 2:1 its turn comes at
+    // least once every three requests. (Waiting for a longer streak would
+    // be wrong: the weighted cycle is `h,h,l`, so three in a row never come.)
+    while marker_body(&proxy_addr) != "h" {
+        assert!(
+            Instant::now() < deadline,
+            "the recovered member never rejoined the pool"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (high, low) = pool_round(21);
+    assert_eq!(
+        (high, low),
+        (14, 7),
+        "a recovered member gets its weighted share of the pool back"
+    );
+
+    // Phase 5: the primary recovers and outranks the whole pool again.
+    healthy_a.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the recovered primary never took the tier back"
+        );
+        if marker_body(&proxy_addr) == "a" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pool_served = served_h.load(Ordering::SeqCst) + served_l.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        assert_eq!(
+            marker_body(&proxy_addr),
+            "a",
+            "the pool is idle while a primary is eligible"
+        );
+    }
+    assert_eq!(
+        served_h.load(Ordering::SeqCst) + served_l.load(Ordering::SeqCst),
+        pool_served,
+        "the pool stops serving once a primary is back"
+    );
+    eprintln!(
+        "all_backups journey: primary={} high={} low={} pool=ok failover=ok recovery=ok",
+        served_a.load(Ordering::SeqCst),
+        served_h.load(Ordering::SeqCst),
+        served_l.load(Ordering::SeqCst)
+    );
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// `option allbackups` switched on **while serving** (Q1): the document `PUT`
+/// turns a single-primary backend into a weighted pool, the pool takes over
+/// on the next failure, a contradicting candidate is refused without touching
+/// the running revision, and the flip back retires the pool — all of it
+/// invisible to clients that never stop asking.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_document_put_flips_the_backup_pool_live() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let served = || std::sync::Arc::new(AtomicUsize::new(0));
+    let healthy = || std::sync::Arc::new(AtomicBool::new(true));
+    let (served_a, served_h, served_l) = (served(), served(), served());
+    let (healthy_a, healthy_h) = (healthy(), healthy());
+    let a = start_balancer_origin(
+        "a",
+        std::sync::Arc::clone(&healthy_a),
+        std::sync::Arc::clone(&served_a),
+        None,
+    );
+    let h = start_balancer_origin(
+        "h",
+        std::sync::Arc::clone(&healthy_h),
+        std::sync::Arc::clone(&served_h),
+        None,
+    );
+    let l = start_balancer_origin(
+        "l",
+        std::sync::Arc::new(AtomicBool::new(true)),
+        std::sync::Arc::clone(&served_l),
+        None,
+    );
+    let read_token = "d4c1b7a09e3f26851b7c0a4d9e6f3a82";
+    let write_token = "7e2f9b3c6d1a84052f3e7b9c1d4a6083";
+    let tag = format!("eqproxy-cli-e2e-{}-flip-live", std::process::id());
+    let read_path = std::env::temp_dir().join(format!("{tag}.read"));
+    let write_path = std::env::temp_dir().join(format!("{tag}.write"));
+    std::fs::write(&read_path, format!("{read_token}\n")).expect("write read token");
+    std::fs::write(&write_path, format!("{write_token}\n")).expect("write write token");
+    let config = temp_config(
+        "flip-live",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [backend.api]\n\
+             balance = \"roundrobin\"\n\
+             server = \"{a}\"\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"150ms\"\n\
+             timeout = \"100ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             token_file = \"{}\"\n\
+             write_token_file = \"{}\"\n",
+            read_path.display(),
+            write_path.display()
+        ),
+    );
+
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (flip live)"),
+    );
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut proxy_addr = String::new();
+    let mut admin_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (proxy_addr.is_empty() || admin_addr.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing both binds"
+        );
+        if let Ok(mut log) = log.lock() {
+            log.push_str(&line);
+        }
+        if proxy_addr.is_empty()
+            && let Some(addr) = line.split("listening on ").nth(1)
+        {
+            proxy_addr = addr.trim().to_owned();
+        }
+        if let Some(rest) = line.split("admin listening on ").nth(1) {
+            admin_addr = rest
+                .split_whitespace()
+                .next()
+                .expect("admin address")
+                .to_owned();
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "dataplane address not announced");
+    assert!(!admin_addr.is_empty(), "admin address not announced");
+
+    // The bodies are the complete section an operator copies out of the
+    // file: a document `PUT` replaces the whole table, so a body that leaves
+    // a subtable out really does remove it (ADR-0019). The health check has
+    // to travel with every write, or the servers stop being probed.
+    let health = "[backend.api.health_check]\n\
+                  type = \"http\"\n\
+                  http_path = \"/healthz\"\n\
+                  interval = \"150ms\"\n\
+                  timeout = \"100ms\"\n\
+                  fall = 1\n\
+                  rise = 1\n\
+                  expect_status = \"200\"\n";
+    let pool_body = format!(
+        "[backend.api]\n\
+         balance = \"roundrobin\"\n\
+         all_backups = true\n\
+         servers = [{{ addr = \"{a}\" }}, {{ addr = \"{h}\", weight = 2, backup = true }}, {{ addr = \"{l}\", weight = 1, backup = true }}]\n\
+         {health}"
+    );
+    let ladder_body = format!(
+        "[backend.api]\n\
+         all_backups = true\n\
+         servers = [{{ addr = \"{a}\" }}, {{ addr = \"{h}\", backup = true, priority = 10 }}, {{ addr = \"{l}\", backup = true, priority = 5 }}]\n\
+         {health}"
+    );
+    let single_body = format!(
+        "[backend.api]\n\
+         all_backups = false\n\
+         servers = [{{ addr = \"{a}\" }}]\n\
+         {health}"
+    );
+
+    // Phase 1: the document still describes one primary, so the backup pool
+    // that does not exist yet must not be reached.
+    for _ in 0..6 {
+        assert_eq!(marker_body(&proxy_addr), "a");
+    }
+    assert_eq!(served_h.load(Ordering::SeqCst), 0, "pool member idle");
+    assert_eq!(served_l.load(Ordering::SeqCst), 0, "pool member idle");
+    let (status, head) = admin_status(&admin_addr, read_token);
+    let revision1 = status["revision"].as_str().expect("revision").to_owned();
+    assert!(head.to_ascii_lowercase().contains("etag"), "{head}");
+    assert_eq!(
+        status["backends"][0]["servers"].as_array().map(Vec::len),
+        Some(1),
+        "the live document has one server: {status}"
+    );
+
+    // Two clients keep hammering the proxy across every flip. Their counts
+    // are the proof that a replaced document never breaks a call in flight;
+    // they pause only while a weighted cycle is counted, because concurrent
+    // requests advance the same round-robin pointer.
+    let counts = std::sync::Arc::new((AtomicU64::new(0), AtomicU64::new(0)));
+    let stop = std::sync::Arc::new(AtomicBool::new(false));
+    let paused = std::sync::Arc::new(AtomicBool::new(false));
+    let mut loaders = Vec::new();
+    for _ in 0..2 {
+        let proxy = proxy_addr.clone();
+        let counts = std::sync::Arc::clone(&counts);
+        let stop = std::sync::Arc::clone(&stop);
+        let paused = std::sync::Arc::clone(&paused);
+        loaders.push(std::thread::spawn(move || {
+            while !stop.load(Ordering::Relaxed) {
+                if paused.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                    continue;
+                }
+                let mut client = match TcpStream::connect(&proxy) {
+                    Ok(client) => client,
+                    Err(error) => {
+                        counts.1.fetch_add(1, Ordering::Relaxed);
+                        eprintln!("live load: connect failed: {error}");
+                        continue;
+                    }
+                };
+                let _ = client.set_read_timeout(Some(Duration::from_secs(5)));
+                if client
+                    .write_all(b"GET /flip-live HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n")
+                    .is_err()
+                {
+                    counts.1.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let mut raw = Vec::new();
+                if client.read_to_end(&mut raw).is_err() {
+                    counts.1.fetch_add(1, Ordering::Relaxed);
+                    continue;
+                }
+                let response = String::from_utf8_lossy(&raw);
+                if response.starts_with("HTTP/1.1 200")
+                    && matches!(body_of(&response), "a" | "h" | "l")
+                {
+                    counts.0.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    counts.1.fetch_add(1, Ordering::Relaxed);
+                    eprintln!("live load: unexpected answer {response:?}");
+                }
+            }
+        }));
+    }
+
+    // Phase 2: the operator writes the pool into the running document.
+    let (code, head, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        Some(&revision1),
+        &pool_body,
+    );
+    assert_eq!(code, 200, "live pool flip: {head}\n{body}");
+    let applied: serde_json::Value = serde_json::from_str(&body).expect("apply json");
+    assert_eq!(applied["revision"], "v2", "the flip is one commit: {body}");
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(
+        counts.1.load(Ordering::Relaxed),
+        0,
+        "a client saw a bad answer while the document was replaced"
+    );
+    assert!(
+        counts.0.load(Ordering::Relaxed) > 0,
+        "the live load never completed a request"
+    );
+
+    // Phase 3: the primary fails and the freshly written pool takes over.
+    healthy_a.store(false, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the pool written by PUT never took over after the primary failed"
+        );
+        if marker_body(&proxy_addr) != "a" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    paused.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(50));
+    let (mut high, mut low) = (0, 0);
+    for _ in 0..30 {
+        match marker_body(&proxy_addr).as_str() {
+            "h" => high += 1,
+            "l" => low += 1,
+            other => panic!("expected a pool member, got {other:?}"),
+        }
+    }
+    assert_eq!(
+        (high, low),
+        (20, 10),
+        "the pool written live balances by weight (2:1)"
+    );
+    paused.store(false, Ordering::SeqCst);
+
+    // Phase 4: a candidate that contradicts itself is refused and the
+    // running revision is untouched — the pool keeps serving.
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        Some("v2"),
+        &ladder_body,
+    );
+    assert_eq!(code, 400, "ladder + pool must be refused: {body}");
+    assert!(body.contains("invalid_config"), "{body}");
+    assert_eq!(
+        admin_status(&admin_addr, read_token).0["revision"],
+        "v2",
+        "a refused candidate must not advance the revision"
+    );
+    assert!(
+        marker_body(&proxy_addr) != "a",
+        "the refused candidate left the running pool untouched"
+    );
+
+    // Phase 5: the operator retires the pool and the primary owns the tier
+    // again; the pool members see no more traffic.
+    let (code, _, body) = admin_put_toml(
+        &admin_addr,
+        "/api/v1/backends/api",
+        write_token,
+        Some("v2"),
+        &single_body,
+    );
+    assert_eq!(code, 200, "live pool retirement: {body}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&body).expect("apply json")["revision"],
+        "v3"
+    );
+    healthy_a.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut streak = 0;
+    while streak < 3 {
+        assert!(
+            Instant::now() < deadline,
+            "the recovered primary never took the tier back after the flip"
+        );
+        if marker_body(&proxy_addr) == "a" {
+            streak += 1;
+        } else {
+            streak = 0;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pool_served = served_h.load(Ordering::SeqCst) + served_l.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        assert_eq!(
+            marker_body(&proxy_addr),
+            "a",
+            "the retired pool is idle while a primary is eligible"
+        );
+    }
+    assert_eq!(
+        served_h.load(Ordering::SeqCst) + served_l.load(Ordering::SeqCst),
+        pool_served,
+        "the retired pool stops serving"
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    for loader in loaders {
+        loader.join().expect("join live loader");
+    }
+    assert_eq!(
+        counts.1.load(Ordering::Relaxed),
+        0,
+        "no client request failed across the flips"
+    );
+    eprintln!(
+        "flip-live journey: requests={} primary={} high={} low={} applies=v1..v3 refused=ok",
+        counts.0.load(Ordering::Relaxed),
+        served_a.load(Ordering::SeqCst),
+        served_h.load(Ordering::SeqCst),
+        served_l.load(Ordering::SeqCst)
+    );
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// The web panel (v0.8 / D6, ADR-0029) over the **real** binary: a session is
+/// opened with the write token, a whole backend table is applied through the
+/// form and one of its servers is drained through the form while traffic
+/// flows. The panel is a client of the same applier, so what changes is the
+/// running document and what the dataplane does — not a page that only looks
+/// changed.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_panel_applies_a_table_and_drains_a_server() {
+    use std::sync::atomic::Ordering;
+    let served = || std::sync::Arc::new(AtomicUsize::new(0));
+    let (served_a, served_b) = (served(), served());
+    let (healthy_a, healthy_b) = (
+        std::sync::Arc::new(AtomicBool::new(true)),
+        std::sync::Arc::new(AtomicBool::new(true)),
+    );
+    let a = start_balancer_origin(
+        "a",
+        std::sync::Arc::clone(&healthy_a),
+        std::sync::Arc::clone(&served_a),
+        None,
+    );
+    let b = start_balancer_origin(
+        "b",
+        std::sync::Arc::clone(&healthy_b),
+        std::sync::Arc::clone(&served_b),
+        None,
+    );
+    let read_token = "b7e1a4c25d9f30816a2c7e4b1d9f3058";
+    let write_token = "1e9c7b3a5d2f80461c9e3b7a4d2f6085";
+    let tag = format!("eqproxy-cli-e2e-{}-panel", std::process::id());
+    let read_path = std::env::temp_dir().join(format!("{tag}.read"));
+    let write_path = std::env::temp_dir().join(format!("{tag}.write"));
+    std::fs::write(&read_path, format!("{read_token}\n")).expect("write read token");
+    std::fs::write(&write_path, format!("{write_token}\n")).expect("write write token");
+    let config = temp_config(
+        "panel",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"2s\"\n\
+             [backend.api]\n\
+             balance = \"roundrobin\"\n\
+             server = \"{a}\"\n\
+             [backend.api.health_check]\n\
+             type = \"http\"\n\
+             http_path = \"/healthz\"\n\
+             interval = \"150ms\"\n\
+             timeout = \"100ms\"\n\
+             fall = 1\n\
+             rise = 1\n\
+             expect_status = \"200\"\n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             panel = true\n\
+             token_file = \"{}\"\n\
+             write_token_file = \"{}\"\n",
+            read_path.display(),
+            write_path.display()
+        ),
+    );
+
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (panel)"),
+    );
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let mut proxy_addr = String::new();
+    let mut admin_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (proxy_addr.is_empty() || admin_addr.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing both binds"
+        );
+        if proxy_addr.is_empty()
+            && let Some(addr) = line.split("listening on ").nth(1)
+        {
+            proxy_addr = addr.trim().to_owned();
+        }
+        if let Some(rest) = line.split("admin listening on ").nth(1) {
+            admin_addr = rest
+                .split_whitespace()
+                .next()
+                .expect("admin address")
+                .to_owned();
+        }
+        if line.contains("panel /panel") {
+            // The plane announces the panel it serves; nothing else proves
+            // the route exists until it answers.
+            assert!(!admin_addr.is_empty(), "panel announced before the bind");
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "dataplane address not announced");
+    assert!(!admin_addr.is_empty(), "admin address not announced");
+
+    // Phase 1: with the panel off there is no page; it is on, so the login
+    // form is what an anonymous browser gets.
+    let (code, head, body) = admin_get(&admin_addr, "/panel", None);
+    assert_eq!(code, 200, "login page: {head}");
+    assert!(body.contains("action=\"/panel/login\""), "{body}");
+    assert!(
+        head.contains("content-security-policy: default-src 'none'"),
+        "the page carries a policy: {head}"
+    );
+    assert!(head.contains("cache-control: no-store"), "{head}");
+
+    // The write token opens a session.
+    let form = format!("token={write_token}");
+    let login = format!(
+        "POST /panel/login HTTP/1.1\r\nhost: admin\r\n\
+         content-type: application/x-www-form-urlencoded\r\ncontent-length: {}\r\n\r\n{form}",
+        form.len()
+    );
+    let (code, head, _) = admin_exchange(&admin_addr, &login);
+    assert_eq!(code, 303, "login: {head}");
+    let cookie = head
+        .lines()
+        .find_map(|line| line.strip_prefix("set-cookie: "))
+        .and_then(|value| value.split(';').next())
+        .expect("session cookie")
+        .to_owned();
+    assert!(cookie.starts_with("eqproxy_session="), "{cookie}");
+    assert!(
+        !head.contains(write_token),
+        "the secret never comes back: {head}"
+    );
+
+    // The dashboard is rendered from the live topology and carries one CSRF
+    // token per form; the panel's own page is what proves the flow.
+    let (code, _, page) = admin_get_with(&admin_addr, "/panel", Some(&format!("cookie: {cookie}")));
+    assert_eq!(code, 200, "dashboard");
+    assert!(page.contains("Backend api"), "{page}");
+    assert!(page.contains(&a.to_string()), "{page}");
+    assert!(!page.contains(&b.to_string()), "b is not configured yet");
+    let csrf = page
+        .split_once("name=\"csrf\" value=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| value.to_owned())
+        .expect("csrf field");
+    let revision = page
+        .split_once("name=\"revision\" value=\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(value, _)| value.to_owned())
+        .expect("revision field");
+
+    // Phase 2: the whole table goes through the form. It replaces the
+    // backend, so the health check travels with it (ADR-0019/ADR-0029).
+    let table = format!(
+        "[backend.api]\nbalance = \"roundrobin\"\n\
+         servers = [{{ addr = \"{a}\" }}, {{ addr = \"{b}\" }}]\n\
+         [backend.api.health_check]\n\
+         type = \"http\"\n\
+         http_path = \"/healthz\"\n\
+         interval = \"150ms\"\n\
+         timeout = \"100ms\"\n\
+         fall = 1\n\
+         rise = 1\n\
+         expect_status = \"200\"\n"
+    );
+    let form = format!(
+        "csrf={csrf}&revision={revision}&name=api&table={}",
+        form_encode(&table)
+    );
+    let request = format!(
+        "POST /panel/backends/api HTTP/1.1\r\nhost: admin\r\ncookie: {cookie}\r\n\
+         content-type: application/x-www-form-urlencoded\r\ncontent-length: {}\r\n\r\n{form}",
+        form.len()
+    );
+    let (code, head, _) = admin_exchange(&admin_addr, &request);
+    assert_eq!(code, 303, "panel apply: {head}");
+    assert!(
+        head.contains("location: /panel?applied=1"),
+        "the browser is sent back to the page: {head}"
+    );
+
+    // The dataplane serves both servers now: the table really was applied.
+    let (code, _, status) = admin_get(
+        &admin_addr,
+        "/api/v1/status",
+        Some(&format!("Bearer {read_token}")),
+    );
+    assert_eq!(code, 200, "status");
+    assert!(status.contains("\"revision\":\"v2\""), "{status}");
+    let mut seen_b = false;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !seen_b && Instant::now() < deadline {
+        if marker_body(&proxy_addr) == "b" {
+            seen_b = true;
+        }
+    }
+    assert!(seen_b, "the panel-applied table serves the new server");
+    assert!(served_a.load(Ordering::SeqCst) > 0, "a still serves");
+
+    // Phase 3: draining `b` from the page takes it out of rotation.
+    let form = format!("csrf={csrf}&state=drain");
+    let action = format!("/panel/servers/api/{}/state", form_encode(&b.to_string()));
+    let request = format!(
+        "POST {action} HTTP/1.1\r\nhost: admin\r\ncookie: {cookie}\r\n\
+         content-type: application/x-www-form-urlencoded\r\ncontent-length: {}\r\n\r\n{form}",
+        form.len()
+    );
+    let (code, head, _) = admin_exchange(&admin_addr, &request);
+    assert_eq!(code, 303, "panel drain: {head}");
+    assert!(head.contains("location: /panel?applied=drain"), "{head}");
+    let (code, _, status) = admin_get(
+        &admin_addr,
+        "/api/v1/status",
+        Some(&format!("Bearer {read_token}")),
+    );
+    assert_eq!(code, 200, "status after drain");
+    assert!(status.contains("\"state\":\"drain\""), "{status}");
+    let after_drain = served_b.load(Ordering::SeqCst);
+    for _ in 0..10 {
+        assert_eq!(
+            marker_body(&proxy_addr),
+            "a",
+            "the drained server takes no new request"
+        );
+    }
+    assert_eq!(
+        served_b.load(Ordering::SeqCst),
+        after_drain,
+        "the drained server is really out of rotation"
+    );
+
+    wait_for_sigint_shutdown(&mut child, &config);
+}
+
+/// `option allbackups` boundary cases through the **real** binary (Q1): a
+/// pool that balances, a pool paired with a `priority` ladder (refused), and
+/// the option with no backup slot to balance (refused). Never a silent
+/// no-op that looks applied.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and the filesystem: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn validate_accepts_a_backup_pool_and_refuses_a_contradiction() {
+    let ok = temp_config(
+        "all-backups-ok",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         all_backups = true\n\
+         servers = [{ addr = \"127.0.0.1:9000\", weight = 2, backup = true }, { addr = \"127.0.0.1:9001\", backup = true }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&ok)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&ok);
+    assert!(
+        output.status.success(),
+        "a weighted backup pool must validate; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let ladder = temp_config(
+        "all-backups-ladder",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         all_backups = true\n\
+         servers = [{ addr = \"127.0.0.1:9000\", backup = true, priority = 10 }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&ladder)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&ladder);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "a pool with a failover ladder must fail; stderr: {stderr}"
+    );
+    for expected in [
+        "servers[0].priority",
+        "all_backups",
+        "drop `priority`",
+        "example:",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in:\n{stderr}"
+        );
+    }
+
+    let empty = temp_config(
+        "all-backups-empty",
+        "schema_version = 1\n\
+         [listener.web]\n\
+         listen = \"127.0.0.1:8080\"\n\
+         backend = \"api\"\n\
+         [backend.api]\n\
+         all_backups = true\n\
+         servers = [{ addr = \"127.0.0.1:9000\" }]\n",
+    );
+    let output = bin()
+        .args(["config", "validate", "--config"])
+        .arg(&empty)
+        .output()
+        .expect("run eqproxy config validate");
+    remove_temp(&empty);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an option with no pool must fail; stderr: {stderr}"
+    );
+    for expected in [
+        "backend.api.all_backups",
+        "no `backup = true` server to balance",
+        "example:",
+    ] {
+        assert!(
+            stderr.contains(expected),
+            "missing {expected:?} in:\n{stderr}"
+        );
+    }
 }
 
 /// Keep-alive origin on a thread that **never** closes a connection —
@@ -4498,6 +5792,7 @@ fn config_schema_publishes_the_generated_json_schema() {
         "RuleConfig",
         "HashPolicyConfig",
         "RequestMirrorConfig",
+        "AccessLogConfig",
     ] {
         assert!(
             parsed["$defs"][definition].is_object(),
@@ -5520,6 +6815,31 @@ fn admin_exchange(addr: &str, request: &str) -> (u16, String, String) {
     (status, head.to_owned(), body.to_owned())
 }
 
+/// `application/x-www-form-urlencoded` value: everything outside the
+/// unreserved set becomes `%XX`, so a TOML table survives the body intact.
+fn form_encode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(*byte as char);
+            }
+            byte => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+/// One `GET` with an explicit header line (`authorization: …` or `cookie: …`).
+fn admin_get_with(addr: &str, path: &str, header_line: Option<&str>) -> (u16, String, String) {
+    let mut head = format!("GET {path} HTTP/1.1\r\nhost: admin\r\n");
+    if let Some(line) = header_line {
+        head.push_str(&format!("{line}\r\n"));
+    }
+    head.push_str("\r\n");
+    admin_exchange(addr, &head)
+}
+
 fn admin_get(addr: &str, path: &str, authorization: Option<&str>) -> (u16, String, String) {
     let mut head = format!("GET {path} HTTP/1.1\r\nhost: admin\r\n");
     if let Some(value) = authorization {
@@ -6016,6 +7336,257 @@ fn run_admin_plane_drains_a_server_with_the_write_token() {
     assert!(
         !log.contains(read_token) && !log.contains(write_token),
         "an audit line never carries a secret"
+    );
+}
+
+/// Drain observability through the **real** binary (v0.8, H3): a gated origin
+/// keeps one exchange in flight on purpose, so the status reports how many
+/// exchanges are left on the draining slot and whether the drain has
+/// finished, `/metrics` carries the two label-free drain series, and the
+/// process writes the event at the exact moment the last exchange ends.
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_reports_drain_progress_and_completion() {
+    let (backend, gate) = start_gated_backend("held-exchange");
+    let read_token = "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d";
+    let write_token = "6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a";
+    let tag = format!("eqproxy-cli-e2e-{}-drain-observe", std::process::id());
+    let read_path = std::env::temp_dir().join(format!("{tag}.read"));
+    let write_path = std::env::temp_dir().join(format!("{tag}.write"));
+    std::fs::write(&read_path, format!("{read_token}\n")).expect("write read token");
+    std::fs::write(&write_path, format!("{write_token}\n")).expect("write write token");
+    let config = temp_config(
+        "drain-observe",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\n\
+             listen = \"127.0.0.1:0\"\n\
+             mode = \"http\"\n\
+             backend = \"api\"\n\
+             connect_timeout = \"5s\"\n\
+             [backend.api]\n\
+             server = \"{backend}\"\n\
+             [admin]\n\
+             listen = \"127.0.0.1:0\"\n\
+             token_file = \"{}\"\n\
+             write_token_file = \"{}\"\n",
+            read_path.display(),
+            write_path.display()
+        ),
+    );
+
+    let mut child = ReapOnDrop(
+        bin()
+            .args(["run", "--config"])
+            .arg(&config)
+            .args(["--metrics-interval", "1h"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn eqproxy run (drain observe)"),
+    );
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let mut proxy_addr = String::new();
+    let mut admin_addr = String::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    while Instant::now() < deadline && (proxy_addr.is_empty() || admin_addr.is_empty()) {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing both binds"
+        );
+        if let Ok(mut log) = log.lock() {
+            log.push_str(&line);
+        }
+        if proxy_addr.is_empty()
+            && let Some(addr) = line.split("listening on ").nth(1)
+        {
+            proxy_addr = addr.trim().to_owned();
+        }
+        if let Some(rest) = line.split("admin listening on ").nth(1) {
+            admin_addr = rest
+                .split_whitespace()
+                .next()
+                .expect("admin address")
+                .to_owned();
+        }
+    }
+    assert!(!proxy_addr.is_empty(), "dataplane address not announced");
+    assert!(!admin_addr.is_empty(), "admin address not announced");
+    let reader = {
+        let log = std::sync::Arc::clone(&log);
+        std::thread::spawn(move || {
+            for line in stderr.lines() {
+                let Ok(line) = line else { break };
+                if let Ok(mut log) = log.lock() {
+                    log.push_str(&line);
+                    log.push('\n');
+                }
+            }
+        })
+    };
+
+    let auth = format!("Bearer {read_token}");
+    let target = backend.to_string();
+    let path = format!("/api/v1/backends/api/servers/{target}/state");
+
+    // Hold one real exchange through the proxy.
+    let exchange = {
+        let proxy_addr = proxy_addr.clone();
+        std::thread::spawn(move || {
+            proxied(
+                &proxy_addr,
+                b"GET /held HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+            )
+        })
+    };
+    assert!(
+        gate.wait_until_reached(Duration::from_secs(10)),
+        "the origin never saw the proxied request"
+    );
+
+    // Declared while the exchange is in flight: one left, not finished.
+    let (status, _, body) = admin_put(&admin_addr, &path, write_token, "{\"state\":\"drain\"}");
+    assert_eq!(status, 200, "{body}");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("drain json");
+    assert_eq!(parsed["state"], "drain");
+    assert_eq!(
+        parsed["active"], 1,
+        "the in-flight exchange is reported: {body}"
+    );
+    assert_eq!(
+        parsed["drained"], false,
+        "a drain with work left has not finished: {body}"
+    );
+
+    let (status, _, body) = admin_get(&admin_addr, "/api/v1/status", Some(&auth));
+    assert_eq!(status, 200);
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("status json");
+    assert_eq!(parsed["backends"][0]["servers"][0]["state"], "drain");
+    assert_eq!(
+        parsed["backends"][0]["servers"][0]["active"], 1,
+        "the status reports how many exchanges are left: {body}"
+    );
+    assert_eq!(
+        parsed["backends"][0]["servers"][0]["drained"], false,
+        "the drain is not finished while the exchange runs: {body}"
+    );
+
+    let (status, _, metrics) = admin_get(&admin_addr, "/metrics", Some(&auth));
+    assert_eq!(status, 200);
+    assert_eq!(
+        prometheus_value(&metrics, "eqproxy_backend_servers_draining"),
+        1,
+        "one slot is draining: {metrics}"
+    );
+    assert_eq!(
+        prometheus_value(&metrics, "eqproxy_backend_drains_completed_total"),
+        0,
+        "nothing finished yet: {metrics}"
+    );
+
+    // Release the exchange: it finishes on the draining slot.
+    gate.open();
+    let response = exchange.join().expect("exchange thread");
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "the held exchange must complete: {response}"
+    );
+    assert_eq!(body_of(&response), "held-exchange");
+
+    // The status turns to finished exactly when the last exchange ends.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (mut active, mut drained) = (u64::MAX, false);
+    while Instant::now() < deadline {
+        let (status, _, body) = admin_get(&admin_addr, "/api/v1/status", Some(&auth));
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("status json");
+        active = parsed["backends"][0]["servers"][0]["active"]
+            .as_u64()
+            .expect("active");
+        drained = parsed["backends"][0]["servers"][0]["drained"] == true;
+        if active == 0 && drained {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(active, 0, "the released exchange no longer counts");
+    assert!(drained, "the status must report the finished drain");
+
+    let (_, _, metrics) = admin_get(&admin_addr, "/metrics", Some(&auth));
+    assert_eq!(
+        prometheus_value(&metrics, "eqproxy_backend_servers_draining"),
+        1,
+        "the slot is still administratively drained: {metrics}"
+    );
+    assert_eq!(
+        prometheus_value(&metrics, "eqproxy_backend_drains_completed_total"),
+        1,
+        "exactly one drain finished on that exchange: {metrics}"
+    );
+
+    // New exchanges find the slot out of rotation.
+    let response = proxied(
+        &proxy_addr,
+        b"GET /after-drain HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        response.starts_with("HTTP/1.1 503"),
+        "a finished drain still keeps the slot out of rotation: {response}"
+    );
+
+    // One event line, naming the slot, written when it happened.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline
+        && !log
+            .lock()
+            .is_ok_and(|log| log.contains("INFO server drained:"))
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = child.id();
+    assert!(
+        Command::new("kill")
+            .args(["-INT", &pid.to_string()])
+            .status()
+            .expect("run kill")
+            .success()
+    );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("eqproxy did not finish after SIGINT");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let _ = reader.join();
+    remove_temp(&config);
+    let _ = std::fs::remove_file(&read_path);
+    let _ = std::fs::remove_file(&write_path);
+    let log = log.lock().map(|l| l.clone()).unwrap_or_default();
+    assert_eq!(status.code(), Some(0), "clean shutdown; log:\n{log}");
+    assert_eq!(
+        log.matches("INFO server drained:").count(),
+        1,
+        "one event per finished drain: {log}"
+    );
+    assert!(
+        log.contains(&format!("backend=api target={target} active=0")),
+        "the event names the slot and the count: {log}"
+    );
+    assert!(
+        !log.contains(read_token) && !log.contains(write_token),
+        "the event never carries a secret"
     );
 }
 
@@ -6552,5 +8123,668 @@ fn run_admin_plane_applies_backend_config_under_traffic() {
     assert!(
         !log.contains(read_token) && !log.contains(write_token),
         "{log}"
+    );
+}
+
+// --- Admin plane on a Unix socket (v0.8, ADR-0021) ---
+
+/// The test process's effective uid/gid, read from a file it just created.
+#[cfg(unix)]
+fn current_ids() -> (u32, u32) {
+    use std::os::unix::fs::MetadataExt;
+
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let path = std::env::temp_dir().join(format!(
+        "eqproxy-cli-ids-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::write(&path, b"x").expect("write id probe");
+    let metadata = std::fs::metadata(&path).expect("id probe metadata");
+    let ids = (metadata.uid(), metadata.gid());
+    std::fs::remove_file(&path).expect("remove id probe");
+    ids
+}
+
+/// Exchanges one raw head over a Unix socket and reads the whole answer.
+#[cfg(unix)]
+fn unix_admin_exchange(path: &Path, head: &str) -> String {
+    use std::os::unix::net::UnixStream;
+
+    let mut stream = UnixStream::connect(path).expect("connect admin Unix socket");
+    stream.write_all(head.as_bytes()).expect("write admin head");
+    let mut answer = String::new();
+    stream
+        .read_to_string(&mut answer)
+        .expect("read admin answer");
+    answer
+}
+
+/// The **real binary** on a Unix socket (v0.8, B-H14): the relative path in
+/// the TOML resolves against the config file, the socket is owner-only, the
+/// bearer token still gates every route, proxied traffic is untouched, and
+/// SIGINT removes the socket file. The TCP admin plane is not opened at all.
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and Unix sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_listens_on_a_unix_socket_and_removes_it_on_shutdown() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let origin = start_static_backend("hello-unix-admin");
+    let token = "7c4e2b9d1a6f8e3c5b0d9a7f2e4c6b8d";
+    let socket_name = format!("eqproxy-cli-e2e-{}-admin.sock", std::process::id());
+    let socket_path = std::env::temp_dir().join(&socket_name);
+    let _ = std::fs::remove_file(&socket_path);
+    let config = temp_config(
+        "admin-unix",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n\
+             [admin]\nunix_socket = \"{socket_name}\"\ntoken = \"{token}\"\n"
+        ),
+    );
+    let (mut child, proxy_addr, mut stderr) = spawn_run_and_wait(&config, "web");
+
+    // The announcement names the real endpoint, not the configured one.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut announcement = String::new();
+    while Instant::now() < deadline && !announcement.contains("admin listening on ") {
+        let mut line = String::new();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr before opening the admin socket; log:\n{announcement}"
+        );
+        announcement.push_str(&line);
+    }
+    assert!(
+        socket_path.exists(),
+        "the announced socket exists; log:\n{announcement}"
+    );
+    assert!(
+        announcement.contains(&format!(
+            "admin listening on unix:{}",
+            socket_path.display()
+        )),
+        "the admin endpoint is announced with its real path: {announcement}"
+    );
+
+    let mode = std::fs::metadata(&socket_path)
+        .expect("socket metadata")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "the socket is owner-only");
+
+    // Anonymous and authenticated reads over the socket.
+    let anonymous = unix_admin_exchange(
+        &socket_path,
+        "GET /api/v1/status HTTP/1.1\r\nhost: admin\r\n\r\n",
+    );
+    assert!(anonymous.starts_with("HTTP/1.1 401"), "{anonymous}");
+    let status = unix_admin_exchange(
+        &socket_path,
+        &format!(
+            "GET /api/v1/status HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    let parsed: serde_json::Value =
+        serde_json::from_str(status.split("\r\n\r\n").nth(1).expect("status body"))
+            .expect("status is JSON");
+    assert_eq!(parsed["listeners"][0]["name"], "web");
+    assert_eq!(
+        parsed["listeners"][0]["listen"], proxy_addr,
+        "the status reports the bound dataplane address: {status}"
+    );
+    let metrics = unix_admin_exchange(
+        &socket_path,
+        &format!("GET /metrics HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\n\r\n"),
+    );
+    assert!(metrics.starts_with("HTTP/1.1 200"), "{metrics}");
+    assert!(metrics.contains("eqproxy_build_info"), "{metrics}");
+
+    // The dataplane never depended on the admin transport.
+    let response = proxied(
+        &proxy_addr,
+        b"GET /unix-admin HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "hello-unix-admin", "{response}");
+
+    // Keep draining stderr so the child never blocks on a full pipe.
+    let reader = std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = stderr.read_to_string(&mut rest);
+        rest
+    });
+    wait_for_sigint_shutdown(&mut child, &config);
+    let _ = reader.join();
+    assert!(
+        !socket_path.exists(),
+        "a clean SIGINT removes the socket file this process created"
+    );
+    let _ = std::fs::remove_file(&socket_path);
+}
+
+/// Reads stderr until the Unix admin socket exists, returning what was read.
+#[cfg(unix)]
+fn wait_for_unix_admin(stderr: &mut BufReader<std::process::ChildStderr>, socket: &Path) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut log = String::new();
+    // Wait for the announcement, not merely for the file: the socket exists a
+    // few instructions before the line is written, and reading the file as
+    // the condition made this helper race the logger.
+    while Instant::now() < deadline && !log.contains("admin listening on unix:") {
+        let mut line = String::new();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr before announcing the admin socket; log:\n{log}"
+        );
+        log.push_str(&line);
+    }
+    assert!(
+        log.contains("admin listening on unix:"),
+        "the admin endpoint was not announced; log:\n{log}"
+    );
+    assert!(
+        socket.exists(),
+        "the announced admin socket does not exist; log:\n{log}"
+    );
+    log
+}
+
+/// Group-shared socket plus a `SO_PEERCRED` uid allowlist, through the real
+/// binary (v0.8, B-H14/ADR-0022): the owner's uid passes, the group owns the
+/// file, and a uid outside the list is closed before any HTTP answer.
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and Unix sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_enforces_group_mode_and_uid_allowlist() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::net::UnixStream;
+
+    let origin = start_static_backend("hello-group-admin");
+    let (uid, gid) = current_ids();
+    let token = "1d9f3a7c5e2b8f4a6c0d3e7b9a1f5c2e";
+
+    // Allowed uid: the socket is 0660, owned by the process group, and the
+    // routes answer over it.
+    let allowed_name = format!("eqproxy-cli-e2e-{}-admin-group.sock", std::process::id());
+    let allowed_path = std::env::temp_dir().join(&allowed_name);
+    let _ = std::fs::remove_file(&allowed_path);
+    let allowed_config = temp_config(
+        "admin-unix-group",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n\
+             [admin]\nunix_socket = \"{allowed_name}\"\ntoken = \"{token}\"\n\
+             unix_socket_mode = \"0660\"\nunix_socket_gid = {gid}\n\
+             unix_socket_allow_uids = [{uid}]\n"
+        ),
+    );
+    let (mut child, _proxy_addr, mut stderr) = spawn_run_and_wait(&allowed_config, "web");
+    let _log = wait_for_unix_admin(&mut stderr, &allowed_path);
+    let metadata = std::fs::metadata(&allowed_path).expect("socket metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o660);
+    assert_eq!(metadata.uid(), uid);
+    assert_eq!(metadata.gid(), gid);
+    let status = unix_admin_exchange(
+        &allowed_path,
+        &format!(
+            "GET /api/v1/status HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\n\r\n"
+        ),
+    );
+    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
+    let reader = std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = stderr.read_to_string(&mut rest);
+        rest
+    });
+    wait_for_sigint_shutdown(&mut child, &allowed_config);
+    let _ = reader.join();
+    assert!(!allowed_path.exists(), "clean shutdown removed the socket");
+
+    // Denied uid: the filesystem still lets the owner connect, but the plane
+    // closes the connection before parsing an HTTP head.
+    let denied_name = format!("eqproxy-cli-e2e-{}-admin-denied.sock", std::process::id());
+    let denied_path = std::env::temp_dir().join(&denied_name);
+    let _ = std::fs::remove_file(&denied_path);
+    let denied_config = temp_config(
+        "admin-unix-denied",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n\
+             [admin]\nunix_socket = \"{denied_name}\"\ntoken = \"{token}\"\n\
+             unix_socket_mode = \"0660\"\nunix_socket_gid = {gid}\n\
+             unix_socket_allow_uids = [{}]\n",
+            uid.wrapping_add(1)
+        ),
+    );
+    let (mut child, proxy_addr_denied, mut stderr) = spawn_run_and_wait(&denied_config, "web");
+    let _log = wait_for_unix_admin(&mut stderr, &denied_path);
+    let mut stream =
+        UnixStream::connect(&denied_path).expect("the owner can still open the socket file");
+    let _ = stream.write_all(b"GET /api/v1/status HTTP/1.1\r\nhost: admin\r\n\r\n");
+    let mut answer = String::new();
+    match stream.read_to_string(&mut answer) {
+        Ok(read) => assert_eq!(read, 0, "no HTTP bytes for a denied uid: {answer}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ),
+            "unexpected error after the uid check: {error}"
+        ),
+    }
+    assert!(
+        answer.is_empty(),
+        "the refused peer learns nothing about the plane: {answer}"
+    );
+
+    // The dataplane is independent of the admin decision.
+    let response = proxied(
+        &proxy_addr_denied,
+        b"GET /denied-admin HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "hello-group-admin", "{response}");
+
+    let reader = std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = stderr.read_to_string(&mut rest);
+        rest
+    });
+    wait_for_sigint_shutdown(&mut child, &denied_config);
+    let log = reader.join().unwrap_or_default();
+    assert!(
+        log.contains("is not in unix_socket_allow_uids"),
+        "the refusal is logged: {log}"
+    );
+    assert!(
+        !denied_path.exists(),
+        "clean shutdown removed the denied socket"
+    );
+}
+
+/// Hot reload of the admin socket policy (v0.8, ADR-0022): a SIGHUP applies a
+/// new mode, group and `SO_PEERCRED` allowlist to the socket the **real
+/// binary** already bound, a policy the process cannot write is rejected with
+/// the previous one still in force, and no restart or rebind happens.
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and Unix sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_admin_plane_reloads_unix_socket_policy_on_sighup() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::unix::net::UnixStream;
+
+    let origin = start_static_backend("hello-reloaded-admin");
+    let (uid, gid) = current_ids();
+    let token = "5b8e2f6a9c1d4e7f0a3b6c8d1e4f7a2b";
+    let socket_name = format!("eqproxy-cli-e2e-{}-admin-reload.sock", std::process::id());
+    let socket_path = std::env::temp_dir().join(&socket_name);
+    let _ = std::fs::remove_file(&socket_path);
+
+    let body = |mode: &str, gid_line: &str, allow: &str| {
+        format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n\
+             [admin]\nunix_socket = \"{socket_name}\"\ntoken = \"{token}\"\n\
+             unix_socket_mode = \"{mode}\"\n{gid_line}unix_socket_allow_uids = [{allow}]\n"
+        )
+    };
+    let authorized = format!(
+        "GET /api/v1/status HTTP/1.1\r\nhost: admin\r\nauthorization: Bearer {token}\r\n\r\n"
+    );
+
+    let config = temp_config("admin-unix-reload", &body("0600", "", &uid.to_string()));
+    let (mut child, proxy_addr, mut stderr) = spawn_run_and_wait(&config, "web");
+    wait_for_unix_admin(&mut stderr, &socket_path);
+    let metadata = std::fs::metadata(&socket_path).expect("socket metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    let answer = unix_admin_exchange(&socket_path, &authorized);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+
+    // 1. Widen the file to the group **and** drop the owner from the list in
+    //    one generation: both halves must move on SIGHUP, without a rebind.
+    std::fs::write(
+        &config,
+        body(
+            "0660",
+            &format!("unix_socket_gid = {gid}\n"),
+            &uid.wrapping_add(1).to_string(),
+        ),
+    )
+    .expect("write the widened policy");
+    send_signal(&child, "-HUP");
+    let applied = wait_for_stderr(&mut stderr, "INFO admin socket policy applied");
+    assert!(applied.contains("mode 0660"), "{applied}");
+    assert!(applied.contains("allowed uid(s)"), "{applied}");
+    let metadata = std::fs::metadata(&socket_path).expect("socket metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o660);
+    assert_eq!(metadata.gid(), gid);
+    // The owner can still `connect(2)` (the file is the owner's) but the
+    // running accept loop now refuses its credential before parsing HTTP.
+    let mut stream = UnixStream::connect(&socket_path).expect("connect after reload");
+    let _ = stream.write_all(authorized.as_bytes());
+    let mut denied = String::new();
+    match stream.read_to_string(&mut denied) {
+        Ok(read) => assert_eq!(read, 0, "no HTTP bytes after the reload: {denied}"),
+        Err(error) => assert!(
+            matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+            ),
+            "unexpected error after the reloaded check: {error}"
+        ),
+    }
+    assert!(denied.is_empty(), "{denied}");
+    // The dataplane was never part of this: no restart, no rebind, no drop.
+    let response = proxied(
+        &proxy_addr,
+        b"GET /after-admin-reload HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(body_of(&response), "hello-reloaded-admin", "{response}");
+
+    // 2. A policy the process cannot write is refused as a whole: the socket
+    //    keeps 0660, the group and the deny list, and nothing is swapped.
+    std::fs::write(&config, body("0660", "unix_socket_gid = 54321\n", ""))
+        .expect("write the impossible policy");
+    send_signal(&child, "-HUP");
+    let rejected = wait_for_stderr(
+        &mut stderr,
+        "ERROR admin unix socket policy cannot be applied",
+    );
+    assert!(
+        rejected.contains("unix_socket_gid") || rejected.contains("Operation not permitted"),
+        "the rejection names the failing operation: {rejected}"
+    );
+    let metadata = std::fs::metadata(&socket_path).expect("socket metadata");
+    assert_eq!(
+        metadata.permissions().mode() & 0o777,
+        0o660,
+        "a refused reload must not roll the mode back or forward"
+    );
+    assert_eq!(metadata.gid(), gid);
+    let mut stream = UnixStream::connect(&socket_path).expect("connect after the rejection");
+    let _ = stream.write_all(authorized.as_bytes());
+    let mut still_denied = String::new();
+    let _ = stream.read_to_string(&mut still_denied);
+    assert!(
+        still_denied.is_empty(),
+        "the denied list must survive the rejected reload: {still_denied}"
+    );
+
+    // 3. Back to owner-only and admitting the owner: the same socket answers
+    //    again, so the reload works in both directions.
+    std::fs::write(&config, body("0600", "", &uid.to_string())).expect("write step 3");
+    send_signal(&child, "-HUP");
+    let restored = wait_for_stderr(&mut stderr, "INFO admin socket policy applied");
+    assert!(restored.contains("mode 0600"), "{restored}");
+    let metadata = std::fs::metadata(&socket_path).expect("socket metadata");
+    assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+    assert_eq!(metadata.uid(), uid);
+    let answer = unix_admin_exchange(&socket_path, &authorized);
+    assert!(answer.starts_with("HTTP/1.1 200"), "{answer}");
+
+    // Keep draining stderr so the child never blocks on a full pipe.
+    let reader = std::thread::spawn(move || {
+        let mut rest = String::new();
+        let _ = stderr.read_to_string(&mut rest);
+        rest
+    });
+    wait_for_sigint_shutdown(&mut child, &config);
+    let _ = reader.join();
+    assert!(
+        !socket_path.exists(),
+        "a clean shutdown still removes the socket after reloads"
+    );
+}
+
+// --- Structured access log (v0.8, ADR-0020) ---
+
+/// Spawns `run`, reads stderr until the named listener is announced.
+fn spawn_run_and_wait(
+    config: &Path,
+    listener: &str,
+) -> (
+    std::process::Child,
+    String,
+    BufReader<std::process::ChildStderr>,
+) {
+    let mut child = bin()
+        .args(["run", "--config"])
+        .arg(config)
+        .args(["--metrics-interval", "1h"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn eqproxy run");
+    let mut stderr = BufReader::new(child.stderr.take().expect("stderr piped"));
+    let needle = format!("listener {listener} listening on ");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut line = String::new();
+    let mut addr = String::new();
+    while Instant::now() < deadline && addr.is_empty() {
+        line.clear();
+        let read = stderr.read_line(&mut line).expect("read stderr");
+        assert!(
+            read > 0,
+            "eqproxy closed stderr without announcing the listener"
+        );
+        if let Some(found) = line.split(&needle).nth(1) {
+            addr = found.trim().to_owned();
+        }
+    }
+    assert!(!addr.is_empty(), "listener {listener} was not announced");
+    // Keep the reader alive: closing it would give the child EPIPE on its next
+    // stderr line (the final METRICS), which is not what this test measures.
+    (child, addr, stderr)
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_writes_one_json_access_line_per_request_under_traffic() {
+    let origin = start_body_echo_origin();
+    let log_path = std::env::temp_dir().join(format!(
+        "eqproxy-cli-e2e-{}-access.jsonl",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&log_path);
+    let config = temp_config(
+        "access-json",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [access_log]\nformat = \"json\"\npath = \"{}\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n",
+            log_path.display()
+        ),
+    );
+    let (mut child, addr, _stderr) = spawn_run_and_wait(&config, "web");
+
+    let mut workers = Vec::new();
+    for worker in 0..4 {
+        let addr = addr.clone();
+        workers.push(std::thread::spawn(move || {
+            for request in 0..10 {
+                let mut client = TcpStream::connect(&addr).expect("connect proxy");
+                let head = format!(
+                    "GET /w{worker}/r{request}?token=secret HTTP/1.1\r\nHost: log.test\r\nUser-Agent: e2e/1\r\nConnection: close\r\n\r\n"
+                );
+                client.write_all(head.as_bytes()).expect("write request");
+                let mut response = String::new();
+                client.read_to_string(&mut response).expect("read response");
+                assert!(
+                    response.starts_with("HTTP/1.1 200"),
+                    "request {worker}/{request}: {response}"
+                );
+            }
+        }));
+    }
+    for worker in workers {
+        worker.join().expect("worker must finish");
+    }
+    wait_for_sigint_shutdown(&mut child, &config);
+
+    let text = std::fs::read_to_string(&log_path).expect("the access log must exist");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 40, "one line per request; got:\n{text}");
+    for line in lines {
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("one JSON object per line");
+        assert_eq!(value["listener"], "web");
+        assert_eq!(value["protocol"], "http/1.1");
+        assert_eq!(value["method"], "GET");
+        assert_eq!(value["status"], 200);
+        assert_eq!(value["backend"], "api");
+        assert_eq!(value["bytes"], 0);
+        let path = value["path"].as_str().expect("path");
+        assert!(path.starts_with("/w"), "{path}");
+        assert!(
+            !path.contains("secret"),
+            "the query is never logged: {path}"
+        );
+        assert!(
+            value["client"]
+                .as_str()
+                .expect("client")
+                .starts_with("127.0.0.1:"),
+            "{}",
+            value["client"]
+        );
+        assert!(value["time"].as_str().expect("time").ends_with('Z'));
+        assert!(value["duration_ms"].is_u64());
+    }
+    let _ = std::fs::remove_file(&log_path);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_writes_combined_lines_when_configured() {
+    let origin = start_body_echo_origin();
+    let log_path =
+        std::env::temp_dir().join(format!("eqproxy-cli-e2e-{}-access.log", std::process::id()));
+    let _ = std::fs::remove_file(&log_path);
+    let config = temp_config(
+        "access-combined",
+        &format!(
+            "schema_version = 1\nshutdown_grace = \"1s\"\n\
+             [access_log]\nformat = \"combined\"\npath = \"{}\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n",
+            log_path.display()
+        ),
+    );
+    let (mut child, addr, _stderr) = spawn_run_and_wait(&config, "web");
+
+    let mut client = TcpStream::connect(&addr).expect("connect proxy");
+    client
+        .write_all(
+            b"GET /first?token=secret HTTP/1.1\r\nHost: log.test\r\nUser-Agent: e2e/1\r\nConnection: close\r\n\r\n",
+        )
+        .expect("write request");
+    let mut response = String::new();
+    client.read_to_string(&mut response).expect("read response");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+    wait_for_sigint_shutdown(&mut child, &config);
+
+    let text = std::fs::read_to_string(&log_path).expect("the access log must exist");
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    assert_eq!(lines.len(), 1, "one line per request; got:\n{text}");
+    let line = lines[0];
+    assert!(
+        line.contains("\"GET /first HTTP/1.1\" 200 0 \"-\" \"e2e/1\""),
+        "combined shape: {line}"
+    );
+    assert!(line.starts_with("127.0.0.1 - - "), "{line}");
+    // The stamp must be the real clock in UTC, so the test checks its shape
+    // (`DD/Mon/YYYY:HH:MM:SS +0000`) and not a calendar day it cannot own.
+    let stamp_start = line.find(" [").expect("bracketed timestamp") + 2;
+    let stamp_end = stamp_start + line[stamp_start..].find(']').expect("closed stamp");
+    let stamp = &line[stamp_start..stamp_end];
+    let parts: Vec<&str> = stamp.split(['/', ':', ' ']).collect();
+    assert_eq!(parts.len(), 7, "stamp shape: {stamp}");
+    let is_two_digits = |part: &str| part.len() == 2 && part.chars().all(|c| c.is_ascii_digit());
+    assert!(is_two_digits(parts[0]), "day: {stamp}");
+    assert!(
+        [
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        ]
+        .contains(&parts[1]),
+        "month: {stamp}"
+    );
+    assert!(
+        parts[2].len() == 4 && parts[2].chars().all(|c| c.is_ascii_digit()),
+        "year: {stamp}"
+    );
+    assert!(
+        parts[3..6].iter().all(|part| is_two_digits(part)),
+        "clock: {stamp}"
+    );
+    assert_eq!(parts[6], "+0000", "UTC offset: {stamp}");
+    assert!(
+        !line.contains("secret"),
+        "the query is never logged: {line}"
+    );
+    let _ = std::fs::remove_file(&log_path);
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs processes: miri does not support them (rust-lang/miri#3449)"
+)]
+#[test]
+fn run_refuses_to_start_when_the_access_log_cannot_be_opened() {
+    let origin = start_body_echo_origin();
+    // A directory cannot be opened for append: startup must fail, not serve
+    // without the sink the operator configured.
+    let directory = std::env::temp_dir();
+    let config = temp_config(
+        "access-unopenable",
+        &format!(
+            "schema_version = 1\n\
+             [access_log]\npath = \"{}\"\n\
+             [listener.web]\nlisten = \"127.0.0.1:0\"\nmode = \"http\"\nbackend = \"api\"\n\
+             [backend.api]\nserver = \"{origin}\"\n",
+            directory.display()
+        ),
+    );
+    let output = bin()
+        .args(["run", "--config"])
+        .arg(&config)
+        .args(["--metrics-interval", "1h"])
+        .output()
+        .expect("run eqproxy");
+    remove_temp(&config);
+    assert_eq!(output.status.code(), Some(1), "must fail closed");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("access log cannot be opened"),
+        "stderr: {stderr}"
     );
 }

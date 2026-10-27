@@ -490,10 +490,14 @@ async fn affinity_cookie_and_source_pin_clients_to_a_server() {
                 ResolvedServer {
                     addr: a.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: b.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             3,

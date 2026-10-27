@@ -109,6 +109,8 @@ impl ResolvedBackend {
             vec![ResolvedServer {
                 addr: server.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             }],
             3,
             2,
@@ -146,13 +148,30 @@ impl ResolvedBackend {
     #[must_use]
     pub fn with_balance(mut self, algorithm: Balance, slow_start: Duration) -> Self {
         let (fall, rise) = self.balancer.thresholds();
-        self.balancer = Arc::new(Balancer::with_options(
-            self.servers.clone(),
-            fall,
-            rise,
-            algorithm,
-            slow_start,
-        ));
+        self.balancer = Arc::new(
+            Balancer::with_options(self.servers.clone(), fall, rise, algorithm, slow_start)
+                .with_all_backups(self.balancer.all_backups()),
+        );
+        self
+    }
+
+    /// Balances across every eligible backup (`option allbackups`, B8)
+    /// instead of one rung at a time. Call after
+    /// [`with_balance`](Self::with_balance), which rebuilds the balancer;
+    /// [`with_server_modes`](Self::with_server_modes) preserves it.
+    #[must_use]
+    pub fn with_all_backups(mut self, all_backups: bool) -> Self {
+        let (fall, rise) = self.balancer.thresholds();
+        self.balancer = Arc::new(
+            Balancer::with_options(
+                self.servers.clone(),
+                fall,
+                rise,
+                self.balancer.algorithm(),
+                self.balancer.slow_start(),
+            )
+            .with_all_backups(all_backups),
+        );
         self
     }
 
@@ -171,6 +190,7 @@ impl ResolvedBackend {
                 self.balancer.algorithm(),
                 self.balancer.slow_start(),
             )
+            .with_all_backups(self.balancer.all_backups())
             .with_modes(self.name.clone(), modes),
         );
         self
@@ -815,6 +835,9 @@ pub struct ResolvedListener {
     /// Data maps in force (C10/PP-02): what `map` rule conditions
     /// consult; the file watchers swap their data in hot.
     pub maps: Arc<eqproxy_core::maps::MapRegistry>,
+    /// Structured access log (v0.8, ADR-0020). `None` = no sink, which is
+    /// the default and the only state a test builds on purpose.
+    pub access: Option<Arc<crate::access::AccessLog>>,
 }
 
 impl ResolvedListener {
@@ -856,7 +879,15 @@ impl ResolvedListener {
             local_response: None,
             compression: None,
             maps: Arc::new(eqproxy_core::maps::MapRegistry::new()),
+            access: None,
         }
+    }
+
+    /// Attaches the process-wide access-log sink (ADR-0020).
+    #[must_use]
+    pub fn with_access(mut self, access: Arc<crate::access::AccessLog>) -> Self {
+        self.access = Some(access);
+        self
     }
 
     /// Response compression (B-N6/H6): gzip negotiated per request.
@@ -889,60 +920,73 @@ impl ResolvedListener {
     /// route each exchange differently).
     #[must_use]
     pub fn decide(&self, facts: &eqproxy_core::rules::RequestFacts<'_>) -> RouteDecision<'_> {
-        self.routes
-            .iter()
-            .find(|route| route.rule.matches(facts))
-            .map_or(
+        self.decide_routed(facts).0
+    }
+
+    /// [`decide`](Self::decide) plus the **name** of the rule that produced
+    /// the decision (CE4): `None` when no rule matched and the listener's
+    /// default backend took the request. The name is borrowed from the
+    /// listener, so attributing an exchange allocates nothing.
+    #[must_use]
+    pub fn decide_routed(
+        &self,
+        facts: &eqproxy_core::rules::RequestFacts<'_>,
+    ) -> (RouteDecision<'_>, Option<&str>) {
+        let Some(route) = self.routes.iter().find(|route| route.rule.matches(facts)) else {
+            return (
                 RouteDecision::Proxy {
                     backend: &self.backend,
                     rewrite: None,
                     headers: None,
                 },
-                |route| {
-                    let headers = route.headers.as_ref();
-                    match &route.action {
-                        RouteAction::Backend { backend, rewrite } => RouteDecision::Proxy {
-                            backend,
-                            rewrite: rewrite.as_ref(),
-                            headers,
-                        },
-                        RouteAction::Split {
-                            targets,
-                            rewrite,
-                            hash,
-                        } => {
-                            // B-H3: with a hash policy the target follows
-                            // the request key; a request without the key
-                            // falls back to the weighted rotation.
-                            let backend = hash
-                                .as_ref()
-                                .and_then(|policy| policy.key_for(facts))
-                                .and_then(|key| targets.pick_hashed(&key))
-                                .unwrap_or_else(|| targets.pick());
-                            RouteDecision::Proxy {
-                                backend,
-                                rewrite: rewrite.as_ref(),
-                                headers,
-                            }
-                        }
-                        RouteAction::Redirect { status, location } => RouteDecision::Redirect {
-                            status: *status,
-                            location,
-                            headers,
-                        },
-                        RouteAction::Direct {
-                            status,
-                            content_type,
-                            body,
-                        } => RouteDecision::Direct {
-                            status: *status,
-                            content_type,
-                            body,
-                            headers,
-                        },
-                    }
+                None,
+            );
+        };
+        let decision = {
+            let headers = route.headers.as_ref();
+            match &route.action {
+                RouteAction::Backend { backend, rewrite } => RouteDecision::Proxy {
+                    backend,
+                    rewrite: rewrite.as_ref(),
+                    headers,
                 },
-            )
+                RouteAction::Split {
+                    targets,
+                    rewrite,
+                    hash,
+                } => {
+                    // B-H3: with a hash policy the target follows
+                    // the request key; a request without the key
+                    // falls back to the weighted rotation.
+                    let backend = hash
+                        .as_ref()
+                        .and_then(|policy| policy.key_for(facts))
+                        .and_then(|key| targets.pick_hashed(&key))
+                        .unwrap_or_else(|| targets.pick());
+                    RouteDecision::Proxy {
+                        backend,
+                        rewrite: rewrite.as_ref(),
+                        headers,
+                    }
+                }
+                RouteAction::Redirect { status, location } => RouteDecision::Redirect {
+                    status: *status,
+                    location,
+                    headers,
+                },
+                RouteAction::Direct {
+                    status,
+                    content_type,
+                    body,
+                } => RouteDecision::Direct {
+                    status: *status,
+                    content_type,
+                    body,
+                    headers,
+                },
+            }
+        };
+        (decision, Some(route.rule.name.as_str()))
     }
 
     /// Every distinct backend this listener can route to (default +
@@ -1032,9 +1076,24 @@ pub enum ProxyError {
     #[error("listener \"{name}\": invalid QUIC configuration: {reason}")]
     QuicConfig { name: String, reason: String },
     #[error(
-        "listener \"{name}\": changing the TLS material of a live QUIC endpoint needs a process restart; the running config keeps serving"
+        "listener \"{name}\": changing ALPN, the client CA or the minimum TLS version of a live QUIC endpoint needs a process restart; the running config keeps serving"
     )]
     QuicTlsReload { name: String },
+}
+
+/// What a hot swap does with a kept listener's QUIC endpoint.
+enum KeptQuic {
+    /// Leave the UDP side exactly as it is.
+    None,
+    /// `quic = false → true`: open the endpoint on the address this listener
+    /// already owns.
+    Start(quinn::Endpoint),
+    /// New certificate material on a live endpoint: the endpoint is kept and
+    /// its certificate resolver is swapped at commit (D7). A QUIC endpoint
+    /// freezes its ALPN, mTLS verifier and TLS version, but not the resolver
+    /// it consults per handshake — so renewal needs no rebind, no dropped
+    /// connection and no window where handshakes are refused.
+    Adopt,
 }
 
 /// What a hot swap prepared for one listener: a kept TCP socket (whose QUIC
@@ -1045,11 +1104,11 @@ enum PreparedSocket {
         /// Position in `entries` when phase 1 matched it (stable: phase 2
         /// only appends before the removal pass).
         index: usize,
-        start_quic: Option<quinn::Endpoint>,
+        quic: KeptQuic,
     },
     Fresh {
         listener: TcpListener,
-        endpoint: Option<quinn::Endpoint>,
+        quic: Option<quinn::Endpoint>,
     },
 }
 
@@ -1195,8 +1254,8 @@ struct Entry {
     quic: Option<QuicEntry>,
 }
 
-/// The UDP side of one listener: QUIC endpoint + h3 accept task. Dropping
-/// it stops the task and sends CONNECTION_CLOSE to every live connection.
+/// One live QUIC endpoint: QUIC endpoint + h3 accept task. Dropping it stops
+/// the task and sends CONNECTION_CLOSE to every live connection.
 struct QuicEntry {
     /// A second handle so a stop closes the endpoint immediately instead of
     /// waiting for the accept loop to drop its own clone.
@@ -1240,6 +1299,19 @@ impl SwapRequest {
     }
 }
 
+/// The certificate one live listener is serving (D7). Read from the acceptor
+/// that actually answers handshakes, never from the file the config points
+/// at: a renewal that was not applied must not look applied.
+#[derive(Debug, Clone)]
+pub struct CertificateFact {
+    pub listener: String,
+    pub listen: SocketAddr,
+    /// `sha256:<hex>` of the leaf certificate served to a client without SNI.
+    pub fingerprint: String,
+    /// `true` when this listener also serves HTTP/3 on the same address.
+    pub quic: bool,
+}
+
 /// Outcome of a committed swap.
 #[derive(Debug)]
 pub struct SwapOutcome {
@@ -1247,6 +1319,8 @@ pub struct SwapOutcome {
     /// Real bound addresses after the swap (`(listener name, address)`), so a
     /// configured port 0 can be reported by its assigned port.
     pub listeners: Vec<(String, SocketAddr)>,
+    /// Certificate identity of every TLS listener, after the commit (D7).
+    pub certificates: Vec<CertificateFact>,
     /// Commit latency measured by the dataplane, not assumed.
     pub elapsed: Duration,
 }
@@ -1319,7 +1393,7 @@ pub async fn bind(
         // retry the pair instead of failing startup. An explicit port still
         // fails closed: there the clash is a configuration error.
         let mut attempts = 0;
-        let (listener, endpoint) = loop {
+        let (listener, quic) = loop {
             let listener = TcpListener::bind(addr)
                 .await
                 .map_err(|source| ProxyError::Bind {
@@ -1344,7 +1418,7 @@ pub async fn bind(
                 Err(err) => return Err(err),
             }
         };
-        entries.push(make_entry(cfg, listener, endpoint, Arc::clone(&metrics)));
+        entries.push(make_entry(cfg, listener, quic, Arc::clone(&metrics)));
     }
     let (bg_stop, _bg_shutdown) = eqproxy_core::shutdown::channel();
     let mut proxy = BoundProxy {
@@ -1458,6 +1532,25 @@ impl BoundProxy {
             .collect()
     }
 
+    /// The certificate every TLS listener is serving **now** (D7), read from
+    /// the live acceptors; a plain-TCP listener is absent from the list.
+    #[must_use]
+    pub fn certificates(&self) -> Vec<CertificateFact> {
+        self.entries
+            .iter()
+            .filter_map(|entry| {
+                let cfg = current_cfg(&entry.cfg);
+                let server_tls = cfg.server_tls.as_ref()?;
+                Some(CertificateFact {
+                    listener: cfg.name.clone(),
+                    listen: entry.local,
+                    fingerprint: server_tls.leaf_fingerprint(),
+                    quic: cfg.quic,
+                })
+            })
+            .collect()
+    }
+
     /// Hot swap (S-CFG-01): applies a new listener set while serving.
     ///
     /// Matching is by listener name (unique in the config):
@@ -1497,35 +1590,44 @@ impl BoundProxy {
                     Err(source) => return Err(ProxyError::Bind { name, addr, source }),
                 };
                 let local = listener.local_addr().unwrap_or(addr);
-                let endpoint = if cfg.quic {
+                let quic = if cfg.quic {
                     Some(open_quic(&cfg, local)?)
                 } else {
                     None
                 };
-                prepared.push((cfg, PreparedSocket::Fresh { listener, endpoint }));
+                prepared.push((cfg, PreparedSocket::Fresh { listener, quic }));
                 continue;
             };
-            // A live QUIC endpoint froze its TLS material when it was built:
-            // a certificate/key/ALPN/mTLS change cannot be applied to it, and
-            // silently serving the old one would diverge from the TCP side.
-            // Fail closed (the running config keeps serving) until restart.
+            // A live QUIC endpoint freezes its ALPN, mTLS verifier and TLS
+            // version, but it consults its certificate resolver on every
+            // handshake. A renewal (chains, keys, SNI names) is therefore
+            // adopted in place at commit; anything else still needs a
+            // restart, and the swap is refused before mutating (D7).
             let entry = &self.entries[index];
             let running = current_cfg(&entry.cfg);
-            let start_quic = if !cfg.quic {
-                None
+            let quic = if !cfg.quic {
+                KeptQuic::None
             } else if running.quic {
                 let old = running.server_tls.as_ref().map(tls::ServerTls::fingerprint);
                 let new = cfg.server_tls.as_ref().map(tls::ServerTls::fingerprint);
-                if old != new {
+                if old == new {
+                    KeptQuic::None
+                } else if running
+                    .server_tls
+                    .as_ref()
+                    .zip(cfg.server_tls.as_ref())
+                    .is_some_and(|(old, new)| old.can_adopt_certificates(new))
+                {
+                    KeptQuic::Adopt
+                } else {
                     return Err(ProxyError::QuicTlsReload {
                         name: cfg.name.clone(),
                     });
                 }
-                None
             } else {
-                Some(open_quic(&cfg, entry.local)?)
+                KeptQuic::Start(open_quic(&cfg, entry.local)?)
             };
-            prepared.push((cfg, PreparedSocket::Kept { index, start_quic }));
+            prepared.push((cfg, PreparedSocket::Kept { index, quic }));
         }
 
         // Phase 2 — commit: only infallible steps from here on. The
@@ -1541,44 +1643,54 @@ impl BoundProxy {
         for (cfg, prepared) in prepared {
             let name = cfg.name.clone();
             match prepared {
-                PreparedSocket::Kept { index, start_quic } => {
+                PreparedSocket::Kept { index, quic } => {
                     // Kept socket: swap the config new connections see.
                     keep[index] = true;
                     let entry = &mut self.entries[index];
                     let stop_quic = current_cfg(&entry.cfg).quic && !cfg.quic;
-                    if let Some(endpoint) = start_quic {
-                        // The endpoint reads the new config from the shared
-                        // slot for every connection it accepts.
-                        *entry
-                            .cfg
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(cfg);
-                        entry.quic = Some(spawn_quic(
-                            Arc::clone(&entry.cfg),
-                            endpoint,
-                            name,
-                            Arc::clone(&self.metrics),
-                        ));
-                    } else {
-                        *entry
-                            .cfg
-                            .write()
-                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(cfg);
-                        if stop_quic {
-                            // Dropping the QUIC entry stops its loop, sends
-                            // CONNECTION_CLOSE and releases the UDP port.
-                            entry.quic = None;
+                    if matches!(quic, KeptQuic::Adopt) {
+                        // Install the new chains/keys in the resolver the live
+                        // endpoint reads, before the config the TCP side will
+                        // use replaces this generation: both sides then serve
+                        // the same certificate from the same atomic swap.
+                        let running = current_cfg(&entry.cfg);
+                        if let (Some(old), Some(new)) =
+                            (running.server_tls.as_ref(), cfg.server_tls.as_ref())
+                        {
+                            old.adopt_certificates(new);
                         }
+                    }
+                    // The endpoint reads the new config from the shared slot
+                    // for every connection it accepts.
+                    *entry
+                        .cfg
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::new(cfg);
+                    match quic {
+                        KeptQuic::None => {
+                            if stop_quic {
+                                // Dropping the QUIC entry stops its loop, sends
+                                // CONNECTION_CLOSE and releases the UDP port.
+                                entry.quic = None;
+                            }
+                        }
+                        KeptQuic::Start(endpoint) => {
+                            entry.quic = Some(spawn_quic(
+                                Arc::clone(&entry.cfg),
+                                endpoint,
+                                name,
+                                Arc::clone(&self.metrics),
+                            ));
+                        }
+                        // The resolver now answers with the new material; the
+                        // endpoint, its socket and its live connections stay.
+                        KeptQuic::Adopt => {}
                     }
                     summary.kept += 1;
                 }
-                PreparedSocket::Fresh { listener, endpoint } => {
-                    self.entries.push(make_entry(
-                        cfg,
-                        listener,
-                        endpoint,
-                        Arc::clone(&self.metrics),
-                    ));
+                PreparedSocket::Fresh { listener, quic } => {
+                    self.entries
+                        .push(make_entry(cfg, listener, quic, Arc::clone(&self.metrics)));
                     summary.added += 1;
                 }
             }
@@ -1703,6 +1815,7 @@ impl BoundProxy {
                                 let _ = reply.send(Ok(SwapOutcome {
                                     summary,
                                     listeners: self.local_addrs(),
+                                    certificates: self.certificates(),
                                     elapsed,
                                 }));
                             }
@@ -2355,6 +2468,8 @@ pub(crate) struct GrpcStream<'a> {
     pub send: h2::SendStream<bytes::Bytes>,
     /// Response HEADERS of the same stream.
     pub response: h2::client::ResponseFuture,
+    /// Server that carries the stream (CE4: per-server attribution).
+    pub addr: SocketAddr,
     /// Keeps the session from closing while the stream runs.
     _slot: backend_h2::ExchangeSlot,
     /// Holds the leastconn in-flight slot until the exchange ends.
@@ -2459,6 +2574,7 @@ pub(crate) async fn open_grpc_stream<'a>(
                 return Ok(GrpcStream {
                     send,
                     response,
+                    addr,
                     _slot: slot,
                     _active: active,
                 });
@@ -2779,7 +2895,16 @@ async fn handle_connection(
             return;
         }
         let (client_read, client_write) = tokio::io::split(io);
-        http1::serve_http(client_read, client_write, peer, local, &cfg, metrics).await;
+        http1::serve_http(
+            client_read,
+            client_write,
+            peer,
+            local,
+            &cfg,
+            metrics,
+            crate::access::ClientProtocol::Http1,
+        )
+        .await;
         return;
     }
     let (client_read, client_write) = tokio::io::split(io);

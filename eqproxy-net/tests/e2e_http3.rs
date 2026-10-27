@@ -25,12 +25,17 @@ use eqproxy_core::Metrics;
 use eqproxy_core::rules::{Rule, RuleSpec};
 use eqproxy_net::tls::{self, TlsVersion};
 use eqproxy_net::{
-    BoundProxy, ProxyError, ProxyMode, ResolvedListener, ResolvedRoute, RouteAction, bind,
+    BoundProxy, ProxyMode, ResolvedBackend, ResolvedListener, ResolvedRoute, ResolvedServer,
+    RouteAction, ServerAddr, bind,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
 const CERT: &[u8] = include_bytes!("fixtures/cert.pem");
 const KEY: &[u8] = include_bytes!("fixtures/key.pem");
+// Rotation target: a different chain (and root) for the same name.
+const MTLS_SERVER: &[u8] = include_bytes!("fixtures/mtls-server.pem");
+const MTLS_SERVER_KEY: &[u8] = include_bytes!("fixtures/mtls-server.key");
+const MTLS_CA: &[u8] = include_bytes!("fixtures/mtls-ca.pem");
 
 // ---------------------------------------------------------------- harness ---
 
@@ -50,8 +55,12 @@ fn listener(server: SocketAddr) -> ResolvedListener {
 }
 
 fn tls_config(alpn: &[&str]) -> tls::ServerTls {
+    server_tls(CERT, KEY, alpn)
+}
+
+fn server_tls(cert: &[u8], key: &[u8], alpn: &[&str]) -> tls::ServerTls {
     let alpn: Vec<String> = alpn.iter().map(|p| (*p).to_owned()).collect();
-    tls::server_config_with_sni(CERT, KEY, &[], None, &alpn, TlsVersion::V1_3).expect("server tls")
+    tls::server_config_with_sni(cert, key, &[], None, &alpn, TlsVersion::V1_3).expect("server tls")
 }
 
 fn quic_listener(server: SocketAddr) -> ResolvedListener {
@@ -234,8 +243,14 @@ struct Answer {
 }
 
 fn client_config() -> quinn::ClientConfig {
+    client_config_with_root(CERT)
+}
+
+/// A client trusting exactly `root_pem` (rotation tests: the root is what
+/// distinguishes the old certificate from the new one).
+fn client_config_with_root(root_pem: &[u8]) -> quinn::ClientConfig {
     let mut roots = rustls::RootCertStore::empty();
-    for certificate in tls::parse_certs(CERT).expect("fixture certificates") {
+    for certificate in tls::parse_certs(root_pem).expect("fixture certificates") {
         roots.add(certificate).expect("fixture root");
     }
     let mut config =
@@ -248,11 +263,19 @@ fn client_config() -> quinn::ClientConfig {
 }
 
 async fn try_connect(addr: SocketAddr) -> Result<Client, String> {
+    try_connect_with(addr, client_config(), "localhost").await
+}
+
+async fn try_connect_with(
+    addr: SocketAddr,
+    config: quinn::ClientConfig,
+    name: &str,
+) -> Result<Client, String> {
     let mut endpoint = quinn::Endpoint::client("127.0.0.1:0".parse().expect("client addr"))
         .map_err(|err| format!("client endpoint: {err}"))?;
-    endpoint.set_default_client_config(client_config());
+    endpoint.set_default_client_config(config);
     let connection = endpoint
-        .connect(addr, "localhost")
+        .connect(addr, name)
         .map_err(|err| format!("connect: {err}"))?
         .await
         .map_err(|err| format!("quic handshake: {err}"))?;
@@ -386,6 +409,72 @@ async fn http3_get_is_terminated_and_relayed_to_the_h1_origin() {
     assert_eq!(metrics.connections_accepted.load(Ordering::Relaxed), 1);
 
     drop(requests);
+    drop(client);
+    drop(proxy);
+}
+
+/// B8 over HTTP/3: the h3 engine feeds the same selection. The primary owns
+/// the tier, the backup origin serves only when every primary is down, and
+/// the recovered primary takes it back. The origins are told apart by what
+/// each one saw.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http3_fails_over_to_the_backup_when_every_primary_is_down() {
+    let (primary, primary_origin) = start_origin().await;
+    let (backup, backup_origin) = start_origin().await;
+    let metrics = Arc::new(Metrics::default());
+    let backend = Arc::new(ResolvedBackend::new(
+        "api",
+        vec![
+            ResolvedServer {
+                addr: ServerAddr::Ip(primary),
+                weight: 1,
+                backup: false,
+                priority: 0,
+            },
+            ResolvedServer {
+                addr: ServerAddr::Ip(backup),
+                weight: 1,
+                backup: true,
+                priority: 0,
+            },
+        ],
+        1,
+        1,
+    ));
+    let (proxy, addr) = start_proxy(
+        quic_listener(primary).with_backend(Arc::clone(&backend)),
+        Arc::clone(&metrics),
+    )
+    .await;
+    let mut client = connect(addr).await;
+
+    let answer = client.request("GET", "/hello", &[], None).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.body, b"hello from origin");
+    assert_eq!(primary_origin.seen.lock().await.len(), 1);
+    assert!(backup_origin.seen.lock().await.is_empty());
+
+    // Every primary down: the backup origin serves the h3 request.
+    backend.balancer.report_fail(primary);
+    let answer = client.request("GET", "/hello", &[], None).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(answer.body, b"hello from origin");
+    assert_eq!(
+        backup_origin.seen.lock().await.len(),
+        1,
+        "the backup must serve the h3 request"
+    );
+    assert_eq!(
+        primary_origin.seen.lock().await.len(),
+        1,
+        "a primary marked down receives nothing"
+    );
+
+    // The recovered primary takes it back.
+    backend.balancer.report_ok(primary);
+    let answer = client.request("GET", "/hello", &[], None).await;
+    assert_eq!(answer.status, StatusCode::OK);
+    assert_eq!(primary_origin.seen.lock().await.len(), 2);
     drop(client);
     drop(proxy);
 }
@@ -565,8 +654,12 @@ async fn http3_maxconn_refuses_a_second_quic_connection() {
     drop(proxy);
 }
 
+/// Certificate rotation on a **live** HTTP/3 endpoint (D7): a QUIC endpoint
+/// freezes its TLS at creation, so the swap rebuilds it on the socket it
+/// already holds. The port never closes, the new material answers h3 and the
+/// rotated-out root fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn http3_reload_rejects_a_tls_change_and_can_turn_quic_off() {
+async fn http3_reload_applies_new_tls_on_the_same_socket() {
     let (origin, _seen) = start_origin().await;
     let metrics = Arc::new(Metrics::default());
     let mut proxy = bind(vec![quic_listener(origin)], Arc::clone(&metrics))
@@ -574,30 +667,56 @@ async fn http3_reload_rejects_a_tls_change_and_can_turn_quic_off() {
         .expect("bind proxy");
     let addr = proxy.local_addrs()[0].1;
 
-    // Same name and address, different TLS material (ALPN): the live QUIC
-    // endpoint cannot adopt it, so the swap is rejected before mutating.
-    let rotated = listener(origin)
-        .with_server_tls(tls_config(&["http/1.1"]))
-        .with_quic(true);
-    let error = proxy
-        .apply(vec![rotated])
-        .await
-        .expect_err("a TLS change on a live QUIC endpoint must be rejected");
-    assert!(
-        matches!(error, ProxyError::QuicTlsReload { .. }),
-        "unexpected error: {error}"
-    );
-    // The running config keeps serving HTTP/3 with its original TLS.
     let mut client = connect(addr).await;
     assert_eq!(
         client.request("GET", "/hello", &[], None).await.status,
         StatusCode::OK
     );
+
+    // Same name and address, new certificate + key (`mtls-server`, issued by
+    // the CA the new client trusts).
+    let rotated = listener(origin)
+        .with_server_tls(server_tls(MTLS_SERVER, MTLS_SERVER_KEY, &[]))
+        .with_quic(true);
+    let summary = proxy
+        .apply(vec![rotated])
+        .await
+        .expect("the rotation is applied, not refused");
+    assert_eq!(summary.kept, 1, "the TCP socket is kept");
+
+    // No connection was cut: the session opened before the renewal still
+    // serves, because the rotation changed the certificate a *new* handshake
+    // sees, not the endpoint.
+    assert_eq!(
+        client.request("GET", "/hello", &[], None).await.status,
+        StatusCode::OK,
+        "the connection opened before the rotation must keep serving"
+    );
     drop(client);
 
-    // Turning QUIC off is a supported hot swap: the UDP endpoint closes and
-    // new h3 connections are refused while the TCP socket stays.
-    let tcp_only = listener(origin).with_server_tls(tls_config(&[]));
+    // The rotated-out root no longer authenticates the listener; the new one
+    // speaks h3 on the same address.
+    let stale = tokio::time::timeout(WAIT, try_connect(addr)).await;
+    assert!(
+        matches!(stale, Ok(Err(_))),
+        "a client trusting the rotated-out root must be refused its handshake"
+    );
+    let mut fresh = tokio::time::timeout(
+        WAIT,
+        try_connect_with(addr, client_config_with_root(MTLS_CA), "localhost"),
+    )
+    .await
+    .expect("connect in time")
+    .expect("h3 handshake with the new certificate");
+    assert_eq!(
+        fresh.request("GET", "/hello", &[], None).await.status,
+        StatusCode::OK
+    );
+    drop(fresh);
+
+    // Turning QUIC off is still a supported hot swap: the UDP endpoint closes
+    // and new h3 connections are refused while the TCP socket stays.
+    let tcp_only = listener(origin).with_server_tls(server_tls(MTLS_SERVER, MTLS_SERVER_KEY, &[]));
     let summary = proxy.apply(vec![tcp_only]).await.expect("apply quic=false");
     assert_eq!(summary.kept, 1);
     let refused = tokio::time::timeout(WAIT, try_connect(addr)).await;
@@ -605,9 +724,10 @@ async fn http3_reload_rejects_a_tls_change_and_can_turn_quic_off() {
         matches!(refused, Ok(Err(_))),
         "an h3 connection must fail after quic = false"
     );
-    // The TCP listener is still there and still speaks TLS.
+    // The TCP listener is still there and still speaks TLS, with the
+    // certificate it was renewed to.
     let connector = tls::client_config(
-        Some(CERT),
+        Some(MTLS_CA),
         true,
         None,
         &["http/1.1".into()],

@@ -1,0 +1,8 @@
+HTTP/1.1 303 Error
+content-type: text/plain; charset=utf-8
+content-length: 0
+cache-control: no-store
+connection: close
+location: /panel
+set-cookie: eqproxy_session=ad2aa8e77f577f3bc0a6def72a75bc5c3bf5ba3d95f4d6274915084a20adcaf5; HttpOnly; SameSite=Strict; Path=/panel; Max-Age=1800
+

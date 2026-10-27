@@ -13,6 +13,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -22,16 +23,18 @@ use std::sync::{Arc, RwLock};
 use clap::{Parser, Subcommand};
 
 use eqproxy_config::error::ConfigError;
-use eqproxy_config::schema::Config;
+use eqproxy_config::schema::{AdminConfig, Config};
 use eqproxy_config::validate::{self, CheckResult};
 use eqproxy_core::{Metrics, RequestFacts, shutdown};
-use eqproxy_net::admin::{AdminTopology, ApplyMessage, ApplyReply, ConfigChange};
+use eqproxy_net::admin::{
+    AdminTopology, ApplyMessage, ApplyReply, CertificateInfo, ConfigChange, UnixSocketPolicy,
+};
 use eqproxy_net::health::HealthCheck;
 use eqproxy_net::proxy::SwapRequest;
 use eqproxy_net::tls::{self, TlsVersion};
 use eqproxy_net::{
-    AdminState, ListenerInfo, ProxyMode, ProxyProtocolMode, ResolvedAdmin, ResolvedBackend,
-    ResolvedListener, ResolvedServer, bind,
+    AdminEndpoint, AdminState, ListenerInfo, ProxyMode, ProxyProtocolMode, ResolvedAdmin,
+    ResolvedBackend, ResolvedListener, ResolvedServer, UnixSocketOptions, bind,
 };
 
 /// Writes a generated report to stdout, treating a reader that closed the
@@ -476,15 +479,15 @@ fn diff_changes(left: &Config, right: &Config) -> Vec<String> {
     {
         let l = &left.backend[name];
         let r = &right.backend[name];
-        let l_servers: Vec<(String, u32)> = l
+        let l_servers: Vec<(String, u32, bool, u32)> = l
             .server_entries()
             .into_iter()
-            .map(|(addr, w)| (addr.to_owned(), w))
+            .map(|s| (s.addr.to_owned(), s.weight, s.backup, s.priority))
             .collect();
-        let r_servers: Vec<(String, u32)> = r
+        let r_servers: Vec<(String, u32, bool, u32)> = r
             .server_entries()
             .into_iter()
-            .map(|(addr, w)| (addr.to_owned(), w))
+            .map(|s| (s.addr.to_owned(), s.weight, s.backup, s.priority))
             .collect();
         if l_servers != r_servers {
             changes.push(format!(
@@ -497,6 +500,12 @@ fn diff_changes(left: &Config, right: &Config) -> Vec<String> {
             changes.push(format!(
                 "~ backend \"{name}\" balance: {:?} -> {:?}",
                 l.balance, r.balance
+            ));
+        }
+        if l.all_backups != r.all_backups {
+            changes.push(format!(
+                "~ backend \"{name}\" all_backups: {} -> {}",
+                l.all_backups, r.all_backups
             ));
         }
         if l.proxy_protocol != r.proxy_protocol {
@@ -523,11 +532,16 @@ fn diff_changes(left: &Config, right: &Config) -> Vec<String> {
     changes
 }
 
-/// `addr(weight), …` for a normalized server list; `[]` when empty.
-fn entries_summary(entries: &[(String, u32)]) -> String {
+/// `addr(weight)` for a primary and `addr(weight,backup)` for a backup
+/// (B8), for a normalized server list; `[]` when empty.
+fn entries_summary(entries: &[(String, u32, bool, u32)]) -> String {
     let items: Vec<String> = entries
         .iter()
-        .map(|(addr, w)| format!("{addr}({w})"))
+        .map(|(addr, w, backup, priority)| match (*backup, *priority) {
+            (true, 0) => format!("{addr}({w},backup)"),
+            (true, p) => format!("{addr}({w},backup,{p})"),
+            (false, _) => format!("{addr}({w})"),
+        })
         .collect();
     format!("[{}]", items.join(", "))
 }
@@ -1592,12 +1606,13 @@ fn explain_report(
                 .and_then(|b| b.health_check.as_ref())
                 .map(|hc| (hc.fall, hc.rise))
                 .unwrap_or((3, 2));
-            let (algorithm, slow_start) = backend_cfg.map_or(
+            let (algorithm, slow_start, all_backups) = backend_cfg.map_or(
                 (
                     eqproxy_config::schema::BalanceAlgorithm::RoundRobin,
                     std::time::Duration::ZERO,
+                    false,
                 ),
-                |b| (b.balance, b.slow_start),
+                |b| (b.balance, b.slow_start, b.all_backups),
             );
             // Throwaway balancer: the simulated pick advances no shared state.
             let sim = eqproxy_net::Balancer::with_options(
@@ -1606,7 +1621,8 @@ fn explain_report(
                 rise,
                 balance_algorithm(algorithm),
                 slow_start,
-            );
+            )
+            .with_all_backups(all_backups);
             let pick = sim.pick();
             let affinity = match &backend.affinity {
                 Some(affinity) => match affinity.mode {
@@ -1639,9 +1655,16 @@ fn explain_report(
             } else {
                 format!(" slow_start={slow_start:?}")
             };
+            // `option allbackups` (B8) changes which server the simulated
+            // pick reaches, so `explain` names it when it is on.
+            let backups_pool = if all_backups {
+                " all_backups=true".to_owned()
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 out,
-                "backend \"{}\": balance={} servers={} tls={} proxy_protocol={} health_check={} affinity={}{}",
+                "backend \"{}\": balance={} servers={} tls={} proxy_protocol={} health_check={} affinity={}{}{}",
                 backend.name,
                 balance_name,
                 backend.servers.len(),
@@ -1649,6 +1672,7 @@ fn explain_report(
                 proxy_protocol,
                 health,
                 affinity,
+                backups_pool,
                 slow
             );
             Some((sim, pick))
@@ -1862,17 +1886,45 @@ fn load_maps(
     Ok(Arc::new(registry))
 }
 
-/// Resolves `[admin]` (v0.8, D6): the listener address and the bearer
-/// token. The token file is read here, fail-closed like certificates; the
-/// running process never re-reads it (changing it needs a restart).
+/// Translates `[access_log]` to the dataplane settings (ADR-0020). A
+/// relative path is resolved against the configuration file, like every
+/// other file the document names (TLS, CAs, maps).
+fn access_settings(config: &Config, base_dir: &Path) -> Option<eqproxy_net::AccessLogSettings> {
+    let access = config.access_log.as_ref()?;
+    Some(eqproxy_net::AccessLogSettings {
+        path: access.path.as_ref().map(|path| base_dir.join(path)),
+        format: match access.format {
+            eqproxy_config::schema::AccessLogFormat::Json => eqproxy_net::AccessLogFormat::Json,
+            eqproxy_config::schema::AccessLogFormat::Combined => {
+                eqproxy_net::AccessLogFormat::Combined
+            }
+        },
+    })
+}
+
+/// Resolves `[admin]` (v0.8, D6): the endpoint (TCP address or Unix socket
+/// path, ADR-0021) and the bearer token. The token file is read here,
+/// fail-closed like certificates; the running process never re-reads it
+/// (changing it needs a restart).
 fn resolve_admin(config: &Config, base_dir: &Path) -> Result<Option<ResolvedAdmin>, String> {
     let Some(admin) = &config.admin else {
         return Ok(None);
     };
-    let listen: SocketAddr = admin
-        .listen
-        .parse()
-        .map_err(|_| format!("admin.listen invalid: \"{}\"", admin.listen))?;
+    let endpoint = match (&admin.listen, &admin.unix_socket) {
+        (Some(listen), None) => AdminEndpoint::Tcp(
+            listen
+                .parse()
+                .map_err(|_| format!("admin.listen invalid: \"{listen}\""))?,
+        ),
+        (None, Some(path)) => AdminEndpoint::Unix(base_dir.join(path)),
+        (Some(_), Some(_)) => {
+            return Err("admin: set exactly one of listen or unix_socket, not both".to_owned());
+        }
+        (None, None) => {
+            return Err("admin: set exactly one of listen or unix_socket".to_owned());
+        }
+    };
+    let unix = unix_socket_options(admin)?;
     let token = admin_secret(
         admin.token.as_deref(),
         admin.token_file.as_deref(),
@@ -1895,10 +1947,33 @@ fn resolve_admin(config: &Config, base_dir: &Path) -> Result<Option<ResolvedAdmi
         );
     }
     Ok(Some(ResolvedAdmin {
-        listen,
+        endpoint,
+        unix,
         token,
         write_token,
+        panel: admin.panel,
     }))
+}
+
+/// The Unix-socket half of `[admin]` (ADR-0021/0022/0023), shared by the
+/// initial bind and by the SIGHUP path that re-applies it to a live socket.
+/// Only the two documented modes exist; every other value is a configuration
+/// error, never a silently rounded one.
+fn unix_socket_options(admin: &AdminConfig) -> Result<UnixSocketOptions, String> {
+    Ok(UnixSocketOptions {
+        mode: match admin.unix_socket_mode.as_deref().unwrap_or("0600") {
+            "0600" => 0o600,
+            "0660" => 0o660,
+            other => {
+                return Err(format!(
+                    "admin.unix_socket_mode: \"{other}\" is not 0600 or 0660"
+                ));
+            }
+        },
+        gid: admin.unix_socket_gid,
+        allow_uids: admin.unix_socket_allow_uids.iter().copied().collect(),
+        acl_uids: admin.unix_socket_acl_uids.iter().copied().collect(),
+    })
 }
 
 /// Reads one admin secret (`<field>` or `<field>_file`, trailing newline
@@ -1941,7 +2016,11 @@ fn admin_secret(
 /// The listener view the API reports. `bound` carries the addresses the
 /// dataplane really opened, so a configured port 0 is reported by its
 /// assigned port (the operator asked what is running, not what was written).
-fn listener_infos(config: &Config, bound: &[(String, SocketAddr)]) -> Vec<ListenerInfo> {
+fn listener_infos(
+    config: &Config,
+    bound: &[(String, SocketAddr)],
+    certificates: &BTreeMap<String, String>,
+) -> Vec<ListenerInfo> {
     config
         .listener
         .iter()
@@ -1958,6 +2037,9 @@ fn listener_infos(config: &Config, bound: &[(String, SocketAddr)]) -> Vec<Listen
             .to_owned(),
             backend: listener.backend.clone(),
             maxconn: listener.maxconn,
+            // Read from the acceptors, not from the config: a renewal that
+            // was rejected must not be reported as applied (D7).
+            tls_fingerprint: certificates.get(name).cloned(),
         })
         .collect()
 }
@@ -1969,10 +2051,11 @@ fn admin_topology(
     bound: &[(String, SocketAddr)],
     backends: Vec<Arc<ResolvedBackend>>,
     revision: String,
+    certificates: &BTreeMap<String, String>,
 ) -> AdminTopology {
     AdminTopology {
         revision,
-        listeners: listener_infos(config, bound),
+        listeners: listener_infos(config, bound, certificates),
         backends,
     }
 }
@@ -1990,6 +2073,16 @@ struct ConfigApplier {
     topology: Arc<RwLock<AdminTopology>>,
     reloads: tokio::sync::mpsc::Sender<SwapRequest>,
     metrics: Arc<Metrics>,
+    /// Access-log sink fixed at startup (ADR-0020): every generation keeps
+    /// writing to the same destination, even when the file edits the section.
+    access: Option<Arc<eqproxy_net::AccessLog>>,
+    /// Live Unix socket policy of the admin plane (ADR-0022); `None` when the
+    /// plane is on TCP or off, so no reload can widen a socket it does not own.
+    admin_unix: Option<UnixSocketPolicy>,
+    /// The `sha256:` leaf fingerprint each TLS listener was serving before the
+    /// current generation, so a renewal can say what it actually changed
+    /// (D7). Seeded from the acceptors opened at startup.
+    certificates: BTreeMap<String, String>,
 }
 
 impl ConfigApplier {
@@ -2069,7 +2162,20 @@ impl ConfigApplier {
                     .join("; "),
             );
         }
-        self.apply_candidate(config).await
+        let reply = self.apply_candidate(config).await;
+        // A candidate rejected after validation (an impossible socket policy,
+        // an inconsistent topology, a certificate that does not parse) is
+        // still a failed reload: the counter must show it and the process log
+        // must say why, or an operator sees a green metric and a silent
+        // rejected renewal. Validation failures were already reported by
+        // `reload_failed`.
+        if let ApplyReply::Invalid { message } = &reply {
+            self.metrics
+                .config_reload_failures
+                .fetch_add(1, Ordering::Relaxed);
+            eprintln!("ERROR config reload rejected: {message}");
+        }
+        reply
     }
 
     fn reload_failed(&self, message: String) -> ApplyReply {
@@ -2098,22 +2204,38 @@ impl ConfigApplier {
                     .join("; "),
             };
         }
-        let (listeners, backends) =
-            match resolve_with(&candidate, base_dir(&self.path), &self.modes) {
-                Ok(resolved) => resolved,
-                Err(message) => {
-                    return ApplyReply::Invalid {
-                        message: format!("inconsistent configuration after validation: {message}"),
-                    };
-                }
-            };
+        if candidate.access_log != self.config.access_log {
+            eprintln!(
+                "WARN [access_log] changed in the configuration but the sink is fixed at startup; restart to apply the new destination or format"
+            );
+        }
+        let (listeners, backends) = match resolve_with(
+            &candidate,
+            base_dir(&self.path),
+            &self.modes,
+            self.access.as_ref(),
+        ) {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                return ApplyReply::Invalid {
+                    message: format!("inconsistent configuration after validation: {message}"),
+                };
+            }
+        };
         if listeners.is_empty() {
             return ApplyReply::Invalid {
                 message: "the configuration defines no listeners; nothing to serve".to_owned(),
             };
         }
+        // The admin socket policy moves before the dataplane swap and is put
+        // back if the swap is refused: a rejected generation leaves neither
+        // a new socket mode nor a new allowlist behind.
+        let previous_unix = match self.apply_admin_unix_policy(&candidate) {
+            Ok(previous) => previous,
+            Err(message) => return ApplyReply::Invalid { message },
+        };
         let (reply, outcome) = tokio::sync::oneshot::channel();
-        if self
+        let swap = if self
             .reloads
             .send(SwapRequest {
                 listeners,
@@ -2122,26 +2244,53 @@ impl ConfigApplier {
             .await
             .is_err()
         {
-            return ApplyReply::Rejected {
-                message: "the dataplane is not accepting swaps".to_owned(),
-            };
-        }
-        let outcome = match outcome.await {
-            Ok(Ok(outcome)) => outcome,
-            Ok(Err(message)) => return ApplyReply::Rejected { message },
-            Err(_) => {
-                return ApplyReply::Rejected {
-                    message: "the dataplane dropped the swap without an answer".to_owned(),
-                };
+            Err("the dataplane is not accepting swaps".to_owned())
+        } else {
+            match outcome.await {
+                Ok(Ok(outcome)) => Ok(outcome),
+                Ok(Err(message)) => Err(message),
+                Err(_) => Err("the dataplane dropped the swap without an answer".to_owned()),
             }
         };
+        let outcome = match swap {
+            Ok(outcome) => outcome,
+            Err(message) => {
+                self.restore_admin_unix(previous_unix);
+                return ApplyReply::Rejected { message };
+            }
+        };
+        // What the reload actually changed, listener by listener (D7): the
+        // fingerprints come from the live acceptors after the commit, so a
+        // certificate that failed to load is never reported as renewed.
+        let certificates: Vec<CertificateInfo> = outcome
+            .certificates
+            .iter()
+            .map(|fact| CertificateInfo {
+                listener: fact.listener.clone(),
+                listen: fact.listen.to_string(),
+                fingerprint: fact.fingerprint.clone(),
+                changed: self.certificates.get(&fact.listener) != Some(&fact.fingerprint),
+                quic: fact.quic,
+            })
+            .collect();
+        for fact in &outcome.certificates {
+            self.certificates
+                .insert(fact.listener.clone(), fact.fingerprint.clone());
+        }
         self.revision += 1;
         let revision = format!("v{}", self.revision);
-        let view = admin_topology(&candidate, &outcome.listeners, backends, revision.clone());
+        let view = admin_topology(
+            &candidate,
+            &outcome.listeners,
+            backends,
+            revision.clone(),
+            &self.certificates,
+        );
         *self
             .topology
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = view;
+        self.apply_metrics_options(&candidate);
         self.config = candidate;
         ApplyReply::Applied {
             revision,
@@ -2152,6 +2301,105 @@ impl ConfigApplier {
                 .into_iter()
                 .map(|(name, addr)| (name, addr.to_string()))
                 .collect(),
+            certificates,
+        }
+    }
+}
+
+impl ConfigApplier {
+    /// Applies the `[metrics]` options of `candidate` after a committed swap
+    /// (CE4). `detailed` moves in hot — enabling starts an empty window and
+    /// disabling drops it, so the export never shows a window whose flag is
+    /// off. The budget is fixed at startup: shrinking it under live series
+    /// would need an eviction policy nobody asked for, so it is reported and
+    /// left for the next restart instead of being silently ignored.
+    fn apply_metrics_options(&self, candidate: &Config) {
+        if candidate.metrics.detailed != self.config.metrics.detailed {
+            self.metrics.detail.set_enabled(candidate.metrics.detailed);
+            eprintln!(
+                "INFO metrics detail {} (budget {} series)",
+                if candidate.metrics.detailed {
+                    "enabled"
+                } else {
+                    "disabled; collected series dropped"
+                },
+                self.metrics.detail.budget()
+            );
+        }
+        if candidate.metrics.max_series != self.config.metrics.max_series {
+            eprintln!(
+                "WARN [metrics] max_series changed from {} to {} but the budget is fixed at startup; restart to apply it (the live budget stays {})",
+                self.config.metrics.max_series,
+                candidate.metrics.max_series,
+                self.metrics.detail.budget()
+            );
+        }
+    }
+
+    /// Applies the `[admin]` Unix socket policy of `candidate` to the socket
+    /// this process already bound (ADR-0022). Returns the policy that was in
+    /// force when the socket changed, so a refused swap can restore it.
+    ///
+    /// Only the mode, the owning group and the peer-uid allowlist are hot: the
+    /// endpoint is a bound socket and the tokens were loaded at startup, so
+    /// those changes are reported and left for the next restart instead of
+    /// being silently pretended.
+    fn apply_admin_unix_policy(
+        &self,
+        candidate: &Config,
+    ) -> Result<Option<UnixSocketOptions>, String> {
+        let Some(policy) = &self.admin_unix else {
+            return Ok(None);
+        };
+        let Some(next_admin) = candidate.admin.as_ref() else {
+            eprintln!(
+                "WARN [admin] removed from the configuration but the plane is fixed at startup; it keeps serving until a restart"
+            );
+            return Ok(None);
+        };
+        let current_admin = self.config.admin.as_ref();
+        let moved = current_admin.is_none_or(|current| {
+            current.listen != next_admin.listen || current.unix_socket != next_admin.unix_socket
+        });
+        if moved {
+            eprintln!(
+                "WARN [admin] endpoint changed but the plane is fixed at startup; restart to move it (the bound socket keeps serving)"
+            );
+            return Ok(None);
+        }
+        let next = unix_socket_options(next_admin)?;
+        let current = policy.options();
+        if next.mode == current.mode
+            && next.gid == current.gid
+            && next.allow_uids == current.allow_uids
+            && next.acl_uids == current.acl_uids
+        {
+            return Ok(None);
+        }
+        if let Err(error) = policy.apply(&next) {
+            // The socket keeps the policy it had: the rejection is reported
+            // once, here, with the failing syscall, and nothing is swapped.
+            let message = format!("admin unix socket policy cannot be applied: {error}");
+            eprintln!("ERROR {message}");
+            return Err(message);
+        }
+        eprintln!(
+            "INFO admin socket policy applied: mode {:04o}, gid {}, {} allowed uid(s)",
+            next.mode,
+            next.gid
+                .map_or_else(|| "unchanged".to_owned(), |gid| gid.to_string()),
+            next.allow_uids.len()
+        );
+        Ok(Some(current))
+    }
+
+    /// Puts the previous policy back after the dataplane refused the swap.
+    fn restore_admin_unix(&self, previous: Option<UnixSocketOptions>) {
+        let (Some(policy), Some(previous)) = (&self.admin_unix, previous) else {
+            return;
+        };
+        if let Err(error) = policy.apply(&previous) {
+            eprintln!("WARN admin socket policy cannot be restored after a refused swap: {error}");
         }
     }
 }
@@ -2161,9 +2409,15 @@ impl ConfigApplier {
 /// TLS and health checks. `base_dir` is the base of relative paths.
 fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, String> {
     // One-off registry: the check paths (`config validate`, `plan`) only need
-    // the listeners, and no state can be declared there.
-    resolve_with(config, base_dir, &Arc::new(eqproxy_net::ServerModes::new()))
-        .map(|(listeners, _)| listeners)
+    // the listeners, and no state can be declared there. No access sink: a
+    // validation command never opens a log file (ADR-0020).
+    resolve_with(
+        config,
+        base_dir,
+        &Arc::new(eqproxy_net::ServerModes::new()),
+        None,
+    )
+    .map(|(listeners, _)| listeners)
 }
 
 /// [`resolve`] with a shared administration-state registry (ADR-0018): the
@@ -2173,6 +2427,7 @@ fn resolve_with(
     config: &Config,
     base_dir: &Path,
     modes: &Arc<eqproxy_net::ServerModes>,
+    access: Option<&Arc<eqproxy_net::AccessLog>>,
 ) -> Result<
     (
         Vec<ResolvedListener>,
@@ -2187,11 +2442,11 @@ fn resolve_with(
         let servers: Vec<ResolvedServer> = backend
             .server_entries()
             .into_iter()
-            .map(|(addr, weight)| {
+            .map(|entry| {
                 // Literal IPs serve immediately; hostnames start
                 // unresolved and the background resolver (B-H13) fills
                 // them in — nothing here blocks on DNS.
-                let target = eqproxy_config::schema::parse_server_target(addr)
+                let target = eqproxy_config::schema::parse_server_target(entry.addr)
                     .map_err(|why| format!("backend.{name} invalid server address: {why}"))?;
                 let addr = match target {
                     eqproxy_config::schema::ServerTarget::Ip(ip) => eqproxy_net::ServerAddr::Ip(ip),
@@ -2199,7 +2454,12 @@ fn resolve_with(
                         eqproxy_net::ServerAddr::Name { host, port }
                     }
                 };
-                Ok(ResolvedServer { addr, weight })
+                Ok(ResolvedServer {
+                    addr,
+                    weight: entry.weight,
+                    backup: entry.backup,
+                    priority: entry.priority,
+                })
             })
             .collect::<Result<_, String>>()?;
         let (fall, rise) = backend
@@ -2216,6 +2476,9 @@ fn resolve_with(
             // Balance avanzado (B-H5/B-N12/B-E6 + B14): algoritmo y
             // ventana de slow start (ponderación dinámica).
             .with_balance(balance_algorithm(backend.balance), backend.slow_start)
+            // Backups en conjunto (`option allbackups`, B8): con true la
+            // tier de backup completa balancea por peso.
+            .with_all_backups(backend.all_backups)
             // DNS dinámico (B-H13/B-N18/B-E15): re-resolución periódica
             // de HOSTNAME:PORT fuera de la ruta caliente.
             .with_resolve_interval(backend.resolve_interval);
@@ -2594,6 +2857,10 @@ fn resolve_with(
             // HTTP/3 (B-H2): the UDP endpoint is opened by the dataplane on
             // the same address; validation already required TLS and http.
             resolved = resolved.with_quic(listener.quic);
+            // One process-wide sink, attached to every listener (ADR-0020).
+            if let Some(log) = access {
+                resolved = resolved.with_access(Arc::clone(log));
+            }
             Ok(resolved)
         })
         .collect::<Result<Vec<_>, String>>()?;
@@ -2646,16 +2913,39 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         return 1;
     }
 
+    // CE4: the detail registry exists from startup; whether it records, and
+    // the budget it can never exceed, come from the configuration.
+    let metrics = Arc::new(Metrics::with_detail(
+        config.metrics.detailed,
+        config.metrics.max_series,
+    ));
+    // Access log (ADR-0020): opened once, before any listener serves. A
+    // configured sink the process cannot open is a startup error, never a
+    // silent downgrade.
+    let access_handle = match access_settings(&config, base_dir(&path)) {
+        Some(access_cfg) => {
+            match eqproxy_net::AccessLog::start(&access_cfg, Arc::clone(&metrics)).await {
+                Ok(handle) => Some(handle),
+                Err(err) => {
+                    eprintln!("error: access log cannot be opened: {err}");
+                    return 1;
+                }
+            }
+        }
+        None => None,
+    };
+    let access = access_handle.as_ref().map(|handle| Arc::clone(&handle.log));
     // One registry for the whole process: the admin plane writes to it and
     // every balancer (startup and each SIGHUP reload) reads it (ADR-0018).
     let modes = Arc::new(eqproxy_net::ServerModes::new());
-    let (listeners, live_backends) = match resolve_with(&config, base_dir(&path), &modes) {
-        Ok(resolved) => resolved,
-        Err(msg) => {
-            eprintln!("error: inconsistent configuration after validation: {msg}");
-            return 1;
-        }
-    };
+    let (listeners, live_backends) =
+        match resolve_with(&config, base_dir(&path), &modes, access.as_ref()) {
+            Ok(resolved) => resolved,
+            Err(msg) => {
+                eprintln!("error: inconsistent configuration after validation: {msg}");
+                return 1;
+            }
+        };
     if listeners.is_empty() {
         eprintln!("error: the configuration defines no listeners; nothing to serve");
         return 1;
@@ -2668,7 +2958,6 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         }
     };
 
-    let metrics = Arc::new(Metrics::default());
     let bound = match bind(listeners, Arc::clone(&metrics)).await {
         Ok(bound) => bound,
         Err(err) => {
@@ -2685,11 +2974,19 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
     // and SIGHUP both land here, so the revision check and the swap it
     // authorizes are serialized in a single consumer.
     let (apply_tx, apply_rx) = tokio::sync::mpsc::channel::<ApplyMessage>(8);
+    // What the acceptors are serving now: the baseline a renewal reports
+    // against (D7), read from the dataplane and never from the config files.
+    let certificates: BTreeMap<String, String> = bound
+        .certificates()
+        .into_iter()
+        .map(|fact| (fact.listener, fact.fingerprint))
+        .collect();
     let topology = Arc::new(RwLock::new(admin_topology(
         &config,
         &bound.local_addrs(),
         live_backends,
         "v1".to_owned(),
+        &certificates,
     )));
     // Bind the admin plane only after the dataplane is open, and fail the
     // process when it cannot open: a configured plane that silently downgrades
@@ -2698,27 +2995,32 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
     let admin = match admin_cfg {
         Some(cfg) => {
             let writable = cfg.write_token.is_some();
+            let panel_on = cfg.panel;
+            let panel = panel_on.then(|| Arc::new(eqproxy_net::Panel::new()));
             let state = Arc::new(AdminState {
                 version: env!("CARGO_PKG_VERSION"),
                 started: std::time::Instant::now(),
                 topology: Arc::clone(&topology),
                 modes: Arc::clone(&modes),
                 metrics: Arc::clone(&metrics),
-                metrics_detailed: config.metrics.detailed,
                 // Without a write token the plane stays read-only; the sender
                 // exists so a later-generated token cannot be implied.
                 apply: writable.then(|| apply_tx.clone()),
+                panel,
             });
             match eqproxy_net::admin::bind(cfg, state).await {
                 Ok(handle) => {
                     eprintln!(
-                        "INFO admin listening on {} (routes: /api/v1/status, /metrics{})",
-                        handle.local_addr(),
+                        "INFO admin listening on {} (routes: /api/v1/status, /metrics{}{})",
+                        handle.endpoint(),
                         if writable {
-                            ", PUT /api/v1/backends/{name}, PUT /api/v1/listeners/{name}"
+                            ", PUT /api/v1/backends/{name}, PUT /api/v1/listeners/{name}, \
+                             PUT /api/v1/backends/{backend}/servers/{target}/state, \
+                             POST /api/v1/certificates/reload"
                         } else {
                             " (read-only)"
-                        }
+                        },
+                        if panel_on { ", panel /panel" } else { "" }
                     );
                     Some(handle)
                 }
@@ -2741,6 +3043,11 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
             topology: Arc::clone(&topology),
             reloads: reload_tx,
             metrics: Arc::clone(&metrics),
+            access: access.clone(),
+            admin_unix: admin
+                .as_ref()
+                .and_then(|handle| handle.unix_policy().cloned()),
+            certificates,
         }
         .run(apply_rx, signal.clone()),
     );
@@ -2807,6 +3114,12 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
 
     let serve_result = bound.serve_with_reloads(signal, grace, reload_rx).await;
     let _ = applier.await;
+    // The dataplane and the applier hold the last clones: drop ours, then
+    // flush what the writer still has (ADR-0020).
+    drop(access);
+    if let Some(handle) = access_handle {
+        handle.shutdown().await;
+    }
     if let Some(admin) = admin {
         admin.shutdown().await;
     }
@@ -2839,10 +3152,14 @@ mod tests {
                     eqproxy_config::schema::ServerConfig {
                         addr: "127.0.0.1:9000".to_owned(),
                         weight: 3,
+                        backup: false,
+                        priority: 0,
                     },
                     eqproxy_config::schema::ServerConfig {
                         addr: "127.0.0.1:9001".to_owned(),
                         weight: 1,
+                        backup: false,
+                        priority: 0,
                     },
                 ]),
                 ..eqproxy_config::schema::BackendConfig::default()
@@ -2856,6 +3173,7 @@ mod tests {
             shutdown_grace: Duration::from_secs(10),
             metrics: eqproxy_config::schema::MetricsConfig::default(),
             admin: None,
+            access_log: None,
         };
         let backend = Arc::new(ResolvedBackend::new(
             "api",
@@ -2863,10 +3181,14 @@ mod tests {
                 ResolvedServer {
                     addr: eqproxy_net::ServerAddr::Ip("127.0.0.1:9000".parse().expect("addr")),
                     weight: 3,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: eqproxy_net::ServerAddr::Ip("127.0.0.1:9001".parse().expect("addr")),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             3,
@@ -2942,6 +3264,55 @@ mod tests {
                 "missing {expected:?} in:\n{report}"
             );
         }
+    }
+
+    #[test]
+    fn diff_report_names_a_server_turning_backup() {
+        let left = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\" }]\n",
+        );
+        let right = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", backup = true }]\n",
+        );
+        let report = diff_report(&left, &right);
+        assert!(
+            report.contains(
+                "~ backend \"api\" servers: [127.0.0.1:9000(1)] -> [127.0.0.1:9000(1,backup)]"
+            ),
+            "missing the backup transition in:\n{report}"
+        );
+    }
+
+    #[test]
+    fn diff_report_names_a_priority_change() {
+        let left = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", backup = true }]\n",
+        );
+        let right = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", backup = true, priority = 10 }]\n",
+        );
+        let report = diff_report(&left, &right);
+        assert!(
+            report.contains(
+                "~ backend \"api\" servers: [127.0.0.1:9000(1,backup)] -> [127.0.0.1:9000(1,backup,10)]"
+            ),
+            "missing the priority transition in:\n{report}"
+        );
+    }
+
+    #[test]
+    fn diff_report_names_an_all_backups_change() {
+        let left = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", backup = true }, { addr = \"127.0.0.1:9001\", backup = true }]\n",
+        );
+        let right = parse_config(
+            "schema_version = 1\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n[backend.api]\nall_backups = true\nservers = [{ addr = \"127.0.0.1:9000\", backup = true }, { addr = \"127.0.0.1:9001\", backup = true }]\n",
+        );
+        let report = diff_report(&left, &right);
+        assert!(
+            report.contains("~ backend \"api\" all_backups: false -> true"),
+            "missing the all_backups transition in:\n{report}"
+        );
     }
 
     #[test]

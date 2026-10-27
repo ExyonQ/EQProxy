@@ -11,10 +11,10 @@ use eqproxy_core::rules::{Rule, validate_header_value, validate_location};
 use crate::error::{ConfigError, Location};
 use crate::find_line;
 use crate::schema::{
-    Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_AUTH_USERS,
-    MAX_LOCAL_RESPONSE_BYTES, MAX_MAP_RELOAD_INTERVAL, MAX_QUEUE, MAX_RETRIES, MAX_RULES,
-    MAX_SECTIONS, MAX_SERVER_WEIGHT, MAX_SPLIT_TARGETS, MIN_ADMIN_TOKEN_BYTES,
-    MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
+    Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_ADMIN_ACL_UIDS, MAX_AUTH_USERS,
+    MAX_LOCAL_RESPONSE_BYTES, MAX_MAP_RELOAD_INTERVAL, MAX_METRICS_SERIES, MAX_QUEUE, MAX_RETRIES,
+    MAX_RULES, MAX_SECTIONS, MAX_SERVER_PRIORITY, MAX_SERVER_WEIGHT, MAX_SPLIT_TARGETS,
+    MIN_ADMIN_TOKEN_BYTES, MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
 };
 
 /// Result of validating a full configuration.
@@ -93,51 +93,228 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
         );
     }
 
+    // Metrics detail (CE4): the series budget is a hard ceiling. Zero (which
+    // would refuse every series and make `detailed = true` a lie) and
+    // anything above the resource cap are rejected, never clamped.
+    if config.metrics.max_series == 0 || config.metrics.max_series > MAX_METRICS_SERIES {
+        err(
+            "metrics.max_series".to_owned(),
+            format!(
+                "metrics.max_series must be between 1 and {MAX_METRICS_SERIES} (got {})",
+                config.metrics.max_series
+            ),
+            "max_series = 128".to_owned(),
+            "[metrics]",
+        );
+    }
+
     // Administration plane (v0.8, D6): loopback by default, a real secret,
     // and never the public listener's address. SPEC §9 requires the strict
     // separation between public and administration, so none of this is a
     // warning: a config that would expose the plane is rejected.
     if let Some(admin) = &config.admin {
         let section = "[admin]";
-        match admin.listen.parse::<SocketAddr>() {
-            Ok(addr) => {
-                if !addr.ip().is_loopback() && !admin.allow_remote {
-                    err(
-                        "admin.listen".to_owned(),
-                        format!(
-                            "{} is not a loopback address; this slice has no TLS and would send the bearer token in the clear",
-                            admin.listen
-                        ),
-                        "listen = \"127.0.0.1:9001\" (or allow_remote = true deliberately)"
-                            .to_owned(),
-                        section,
-                    );
-                }
-                // Port 0 asks the kernel for a free port, so two `:0` binds
-                // cannot collide (each gets its own ephemeral port); only a
-                // concrete port is a real overlap.
-                let shared = addr.port() != 0
-                    && config.listener.values().any(|listener| {
-                        listener
-                            .listen
-                            .parse::<SocketAddr>()
-                            .is_ok_and(|public| public == addr)
-                    });
-                if shared {
-                    err(
-                        "admin.listen".to_owned(),
-                        format!("{} is also a [listener.*] address", admin.listen),
-                        "give the admin plane its own port, never the public one".to_owned(),
-                        section,
-                    );
-                }
+        // Unix-only knobs are refused without a Unix socket instead of
+        // being silently ignored (the operator would believe they apply).
+        if admin.unix_socket.is_none() {
+            if admin.unix_socket_mode.is_some() {
+                err(
+                    "admin.unix_socket_mode".to_owned(),
+                    "unix_socket_mode only applies when unix_socket is set".to_owned(),
+                    "remove unix_socket_mode or set unix_socket".to_owned(),
+                    section,
+                );
             }
-            Err(_) => err(
+            if admin.unix_socket_gid.is_some() {
+                err(
+                    "admin.unix_socket_gid".to_owned(),
+                    "unix_socket_gid only applies when unix_socket is set".to_owned(),
+                    "remove unix_socket_gid or set unix_socket".to_owned(),
+                    section,
+                );
+            }
+            if !admin.unix_socket_allow_uids.is_empty() {
+                err(
+                    "admin.unix_socket_allow_uids".to_owned(),
+                    "unix_socket_allow_uids only applies when unix_socket is set".to_owned(),
+                    "remove unix_socket_allow_uids or set unix_socket".to_owned(),
+                    section,
+                );
+            }
+            if !admin.unix_socket_acl_uids.is_empty() {
+                err(
+                    "admin.unix_socket_acl_uids".to_owned(),
+                    "unix_socket_acl_uids only applies when unix_socket is set".to_owned(),
+                    "remove unix_socket_acl_uids or set unix_socket".to_owned(),
+                    section,
+                );
+            }
+        }
+        match (&admin.listen, &admin.unix_socket) {
+            (Some(_), Some(_)) => err(
                 "admin.listen".to_owned(),
-                format!("\"{}\" is not an IP:PORT address", admin.listen),
-                "listen = \"127.0.0.1:9001\"".to_owned(),
+                "set exactly one of listen or unix_socket, not both".to_owned(),
+                "unix_socket = \"/run/eqproxy/admin.sock\"".to_owned(),
                 section,
             ),
+            (None, None) => err(
+                "admin.listen".to_owned(),
+                "set exactly one of listen (IP:PORT) or unix_socket (path)".to_owned(),
+                "unix_socket = \"/run/eqproxy/admin.sock\"".to_owned(),
+                section,
+            ),
+            (Some(listen), None) => match listen.parse::<SocketAddr>() {
+                Ok(addr) => {
+                    if !addr.ip().is_loopback() && !admin.allow_remote {
+                        err(
+                            "admin.listen".to_owned(),
+                            format!(
+                                "{listen} is not a loopback address; this slice has no TLS and would send the bearer token in the clear"
+                            ),
+                            "listen = \"127.0.0.1:9001\" (or allow_remote = true deliberately)"
+                                .to_owned(),
+                            section,
+                        );
+                    }
+                    // Port 0 asks the kernel for a free port, so two `:0` binds
+                    // cannot collide (each gets its own ephemeral port); only a
+                    // concrete port is a real overlap.
+                    let shared = addr.port() != 0
+                        && config.listener.values().any(|listener| {
+                            listener
+                                .listen
+                                .parse::<SocketAddr>()
+                                .is_ok_and(|public| public == addr)
+                        });
+                    if shared {
+                        err(
+                            "admin.listen".to_owned(),
+                            format!("{listen} is also a [listener.*] address"),
+                            "give the admin plane its own port, never the public one".to_owned(),
+                            section,
+                        );
+                    }
+                }
+                Err(_) => err(
+                    "admin.listen".to_owned(),
+                    format!("\"{listen}\" is not an IP:PORT address"),
+                    "listen = \"127.0.0.1:9001\"".to_owned(),
+                    section,
+                ),
+            },
+            (None, Some(path)) => {
+                if admin.allow_remote {
+                    err(
+                        "admin.allow_remote".to_owned(),
+                        "allow_remote only applies to a TCP listen address; a Unix socket has no remote bind".to_owned(),
+                        "remove allow_remote (the socket's mode 0600 is the boundary)".to_owned(),
+                        section,
+                    );
+                }
+                if path.as_os_str().is_empty() {
+                    err(
+                        "admin.unix_socket".to_owned(),
+                        "unix_socket must not be empty".to_owned(),
+                        "unix_socket = \"/run/eqproxy/admin.sock\"".to_owned(),
+                        section,
+                    );
+                }
+                let mode = admin.unix_socket_mode.as_deref().unwrap_or("0600");
+                match mode {
+                    "0600" => {
+                        if admin.unix_socket_gid.is_some() {
+                            err(
+                                "admin.unix_socket_gid".to_owned(),
+                                "a 0600 socket has no group owner; set unix_socket_mode = \"0660\" to use the gid".to_owned(),
+                                "remove unix_socket_gid or set unix_socket_mode = \"0660\"".to_owned(),
+                                section,
+                            );
+                        }
+                    }
+                    "0660" => {
+                        if admin.unix_socket_gid.is_none() {
+                            err(
+                                "admin.unix_socket_gid".to_owned(),
+                                "unix_socket_mode = \"0660\" requires the numeric group id that will own the socket".to_owned(),
+                                "unix_socket_gid = 20".to_owned(),
+                                section,
+                            );
+                        }
+                    }
+                    other => err(
+                        "admin.unix_socket_mode".to_owned(),
+                        format!(
+                            "\"{other}\" is not a supported socket mode; use \"0600\" (owner only) or \"0660\" (owner and group)"
+                        ),
+                        "unix_socket_mode = \"0600\"".to_owned(),
+                        section,
+                    ),
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for uid in &admin.unix_socket_allow_uids {
+                    if !seen.insert(*uid) {
+                        err(
+                            "admin.unix_socket_allow_uids".to_owned(),
+                            format!("uid {uid} is listed more than once"),
+                            "unix_socket_allow_uids = [501, 502]".to_owned(),
+                            section,
+                        );
+                    }
+                }
+                // Named ACL users (ADR-0023) are a filesystem layer, not a
+                // credential one: the kernel checks them at connect.
+                if !admin.unix_socket_acl_uids.is_empty() {
+                    if mode != "0660" {
+                        err(
+                            "admin.unix_socket_acl_uids".to_owned(),
+                            "a named ACL user needs the group class (the ACL mask); set unix_socket_mode = \"0660\""
+                                .to_owned(),
+                            "unix_socket_mode = \"0660\"\nunix_socket_acl_uids = [501]".to_owned(),
+                            section,
+                        );
+                    }
+                    if !cfg!(target_os = "linux") {
+                        err(
+                            "admin.unix_socket_acl_uids".to_owned(),
+                            "POSIX ACLs on the admin socket are implemented on Linux only (system.posix_acl_access)"
+                                .to_owned(),
+                            "remove unix_socket_acl_uids or move the plane to Linux".to_owned(),
+                            section,
+                        );
+                    }
+                    if admin.unix_socket_acl_uids.len() > MAX_ADMIN_ACL_UIDS {
+                        err(
+                            "admin.unix_socket_acl_uids".to_owned(),
+                            format!(
+                                "{} uids listed; at most {MAX_ADMIN_ACL_UIDS} fit in one access ACL",
+                                admin.unix_socket_acl_uids.len()
+                            ),
+                            format!(
+                                "unix_socket_acl_uids = [{}]",
+                                admin
+                                    .unix_socket_acl_uids
+                                    .iter()
+                                    .take(2)
+                                    .map(u32::to_string)
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                            section,
+                        );
+                    }
+                    let mut acl_seen = std::collections::BTreeSet::new();
+                    for uid in &admin.unix_socket_acl_uids {
+                        if !acl_seen.insert(*uid) {
+                            err(
+                                "admin.unix_socket_acl_uids".to_owned(),
+                                format!("uid {uid} is listed more than once"),
+                                "unix_socket_acl_uids = [501, 502]".to_owned(),
+                                section,
+                            );
+                        }
+                    }
+                }
+            }
         }
         match (&admin.token, &admin.token_file) {
             (Some(_), Some(_)) | (None, None) => err(
@@ -228,10 +405,36 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                 }
             }
         }
-        if admin.allow_remote {
+        if admin.allow_remote && admin.listen.is_some() && admin.unix_socket.is_none() {
             result.warnings.push(
                 "admin.allow_remote = true: the admin plane listens beyond loopback and this slice has no TLS; the bearer token travels in the clear"
                     .to_owned(),
+            );
+        }
+    }
+
+    // Structured access log (v0.8, ADR-0020): absent = off. A destination
+    // that cannot be represented as one line is refused at the gate, before
+    // the process starts writing (a newline in a path is a config error,
+    // not a log-injection vector).
+    if let Some(access) = &config.access_log
+        && let Some(path) = &access.path
+    {
+        let section = "[access_log]";
+        let raw = path.to_string_lossy();
+        if raw.trim().is_empty() {
+            err(
+                "access_log.path".to_owned(),
+                "path is empty".to_owned(),
+                "path = \"/var/log/eqproxy/access.log\" (or omit it to use stdout)".to_owned(),
+                section,
+            );
+        } else if raw.contains('\n') || raw.contains('\r') || raw.contains('\0') {
+            err(
+                "access_log.path".to_owned(),
+                "path contains a control character".to_owned(),
+                "path = \"/var/log/eqproxy/access.log\"".to_owned(),
+                section,
             );
         }
     }
@@ -1201,8 +1404,11 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             );
         }
 
+        let entries = backend.server_entries();
         let mut seen_addrs = std::collections::BTreeSet::new();
-        for (idx, (addr, weight)) in backend.server_entries().into_iter().enumerate() {
+        for (idx, entry) in entries.iter().copied().enumerate() {
+            let addr = entry.addr;
+            let weight = entry.weight;
             let suffix = if backend.server.is_some() {
                 "server".to_owned()
             } else {
@@ -1224,11 +1430,56 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
+            if entry.priority > MAX_SERVER_PRIORITY {
+                err(
+                    field(&format!("servers[{idx}].priority")),
+                    format!(
+                        "priority = {} out of range (maximum {MAX_SERVER_PRIORITY})",
+                        entry.priority
+                    ),
+                    "priority = 10 (range 0..=255; higher fails over first)".to_owned(),
+                    &section,
+                );
+            }
+            if entry.priority > 0 && !entry.backup {
+                err(
+                    field(&format!("servers[{idx}].priority")),
+                    "priority is only meaningful on a backup server, and this slot is not `backup`"
+                        .to_owned(),
+                    "add `backup = true` to order it, or drop `priority`".to_owned(),
+                    &section,
+                );
+            }
             if !seen_addrs.insert(addr.to_ascii_lowercase()) {
                 err(
                     field(&suffix),
                     format!("duplicate server: \"{addr}\" appears more than once"),
                     "each `addr` must be unique within the backend".to_owned(),
+                    &section,
+                );
+            }
+        }
+
+        // `option allbackups` (B8): the whole backup tier balances at once,
+        // so there is no rung left for `priority` to order — the reference
+        // says so explicitly ("there will not be any priority order between
+        // the backup servers anymore"). A silent no-op is refused, like
+        // `priority` on a primary; and an option that has no backup server
+        // to balance would be exactly that.
+        if backend.all_backups {
+            if let Some(idx) = entries.iter().position(|entry| entry.priority > 0) {
+                err(
+                    field(&format!("servers[{idx}].priority")),
+                    "all_backups = true balances every backup at once: no failover ladder is left for `priority` to order".to_owned(),
+                    "drop `priority` (keep it only when one backup serves at a time)".to_owned(),
+                    &section,
+                );
+            }
+            if !entries.iter().any(|entry| entry.backup) {
+                err(
+                    field("all_backups"),
+                    "all_backups = true has no `backup = true` server to balance".to_owned(),
+                    "mark the pool members `backup = true`, or drop `all_backups`".to_owned(),
                     &section,
                 );
             }
@@ -1605,6 +1856,7 @@ mod tests {
             shutdown_grace: Duration::from_secs(10),
             metrics: crate::schema::MetricsConfig::default(),
             admin: None,
+            access_log: None,
         };
         for i in 0..backends {
             config.backend.insert(
@@ -1853,6 +2105,40 @@ mod tests {
     }
 
     #[test]
+    fn metrics_series_budget_is_validated_not_clamped() {
+        let base = |budget: &str| {
+            format!(
+                "schema_version = 1\n[metrics]\ndetailed = true\nmax_series = {budget}\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n"
+            )
+        };
+        // The default is the documented one, not zero.
+        let default = check_source(
+            "schema_version = 1\n[metrics]\ndetailed = true\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nserver = \"127.0.0.1:9000\"\n",
+        );
+        assert!(default.is_valid(), "errors: {:?}", default.errors);
+        for (budget, ok) in [("1", true), ("4096", true), ("0", false), ("4097", false)] {
+            let result = check_source(&base(budget));
+            assert_eq!(
+                result.is_valid(),
+                ok,
+                "max_series = {budget}: errors {:?}",
+                result.errors
+            );
+            if !ok {
+                assert_eq!(
+                    result.errors[0].field.as_deref(),
+                    Some("metrics.max_series")
+                );
+                assert!(
+                    result.errors[0].cause.contains("between 1 and 4096"),
+                    "cause: {}",
+                    result.errors[0].cause
+                );
+            }
+        }
+    }
+
+    #[test]
     fn schema_version_policy_accepts_known_rejects_newer() {
         // Backward compatibility (Q3): every known version is accepted.
         let result = check_source(
@@ -2053,6 +2339,100 @@ server = "127.0.0.1:9000"
             "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\", weight = 3 }, { addr = \"127.0.0.1:2\", weight = 0 }]\n",
         );
         assert!(ok.is_valid(), "errors: {:?}", ok.errors);
+    }
+
+    #[test]
+    fn priority_orders_backups_and_is_rejected_outside_the_backup_tier() {
+        let ok = check_source(
+            "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\" }, { addr = \"127.0.0.1:2\", backup = true, priority = 10 }, { addr = \"127.0.0.1:3\", backup = true }]\n",
+        );
+        assert!(ok.is_valid(), "errors: {:?}", ok.errors);
+
+        let too_high = check_source(
+            "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\", backup = true, priority = 256 }]\n",
+        );
+        assert_eq!(
+            too_high.errors[0].field.as_deref(),
+            Some("backend.api.servers[0].priority"),
+            "errors: {:?}",
+            too_high.errors
+        );
+
+        let outside = check_source(
+            "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\", priority = 1 }]\n",
+        );
+        assert_eq!(
+            outside.errors[0].field.as_deref(),
+            Some("backend.api.servers[0].priority"),
+            "a silent no-op on a primary is refused: {:?}",
+            outside.errors
+        );
+    }
+
+    #[test]
+    fn all_backups_balances_the_pool_and_refuses_a_contradiction() {
+        // `option allbackups` (B8) on a real pool: every backup serves, so
+        // `priority` has nothing to order and the backend has a pool to
+        // balance. Weights are the spreading mechanism here.
+        let ok = check_source(
+            "schema_version = 1\n[backend.api]\nall_backups = true\nservers = [{ addr = \"127.0.0.1:1\", backup = true, weight = 2 }, { addr = \"127.0.0.1:2\", backup = true }]\n",
+        );
+        assert!(ok.is_valid(), "errors: {:?}", ok.errors);
+
+        let ladder = check_source(
+            "schema_version = 1\n[backend.api]\nall_backups = true\nservers = [{ addr = \"127.0.0.1:1\", backup = true, priority = 10 }, { addr = \"127.0.0.1:2\", backup = true }]\n",
+        );
+        assert_eq!(
+            ladder.errors[0].field.as_deref(),
+            Some("backend.api.servers[0].priority"),
+            "a ladder that cannot run is refused, not ignored: {:?}",
+            ladder.errors
+        );
+        assert!(
+            ladder.errors[0].cause.contains("all_backups"),
+            "the error names the option it contradicts: {:?}",
+            ladder.errors[0]
+        );
+
+        let no_backup = check_source(
+            "schema_version = 1\n[backend.api]\nall_backups = true\nservers = [{ addr = \"127.0.0.1:1\" }, { addr = \"127.0.0.1:2\" }]\n",
+        );
+        assert_eq!(
+            no_backup.errors[0].field.as_deref(),
+            Some("backend.api.all_backups"),
+            "an option with no backup to balance is refused: {:?}",
+            no_backup.errors
+        );
+
+        // The single-server form has no backup slot either.
+        let single = check_source(
+            "schema_version = 1\n[backend.api]\nall_backups = true\nserver = \"127.0.0.1:1\"\n",
+        );
+        assert_eq!(
+            single.errors[0].field.as_deref(),
+            Some("backend.api.all_backups"),
+            "`server` cannot back a pool: {:?}",
+            single.errors
+        );
+    }
+
+    #[test]
+    fn backup_servers_parse_and_validate_without_weakening_the_list() {
+        let ok = check_source(
+            "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\" }, { addr = \"127.0.0.1:2\", backup = true }, { addr = \"127.0.0.1:3\", weight = 2, backup = true }]\n",
+        );
+        assert!(ok.is_valid(), "errors: {:?}", ok.errors);
+
+        let bad = parse_str(
+            "schema_version = 1\n[backend.api]\nservers = [{ addr = \"127.0.0.1:1\", backup = \"yes\" }]\n",
+            &std::path::PathBuf::from("eqproxy.toml"),
+        )
+        .expect_err("a non-boolean backup must be rejected at parse time");
+        assert_eq!(
+            bad.field.as_deref(),
+            Some("backend.api.servers[0].backup"),
+            "the error names the offending key: {bad:?}"
+        );
     }
 
     #[test]
@@ -2865,6 +3245,254 @@ server = "127.0.0.1:9000"
                 .errors
                 .iter()
                 .any(|e| e.cause.contains("at least"))
+        );
+    }
+
+    #[test]
+    fn access_log_path_and_format_are_gated() {
+        let empty = check_source("schema_version = 1\n[access_log]\npath = \"   \"\n");
+        assert!(
+            empty
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("access_log.path")),
+            "{:?}",
+            empty.errors
+        );
+        let control = check_source("schema_version = 1\n[access_log]\npath = \"a\\nb\"\n");
+        assert!(
+            control
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("access_log.path")),
+            "a newline in the destination is refused: {:?}",
+            control.errors
+        );
+        let ok = check_source(
+            r#"
+            schema_version = 1
+            [access_log]
+            format = "combined"
+            path = "access.log"
+            [listener.web]
+            listen = "127.0.0.1:0"
+            backend = "api"
+            [backend.api]
+            server = "127.0.0.1:9000"
+            "#,
+        );
+        assert!(ok.is_valid(), "{:?}", ok.errors);
+    }
+
+    /// Unix socket (ADR-0021, B-H14): the path replaces `listen`, and the
+    /// TCP-only knob is refused instead of being silently ignored.
+    #[test]
+    fn admin_unix_socket_replaces_the_tcp_listen() {
+        let base = "schema_version = 1\n\
+                    [listener.web]\n\
+                    listen = \"127.0.0.1:8080\"\n\
+                    backend = \"api\"\n\
+                    [backend.api]\n\
+                    server = \"127.0.0.1:9000\"\n";
+        let unix = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(unix.is_valid(), "{:?}", unix.errors);
+
+        // Relative paths are legal: the CLI resolves them against the file,
+        // like every other path the document names.
+        let relative = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"run/admin.sock\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(relative.is_valid(), "{:?}", relative.errors);
+
+        let neither = check_source(&format!("{base}[admin]\ntoken = \"0123456789abcdef\"\n"));
+        assert!(
+            neither
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("exactly one of listen")),
+            "a plane with no endpoint must be rejected: {:?}",
+            neither.errors
+        );
+
+        let both = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(
+            both.errors.iter().any(|e| e.cause.contains("not both")),
+            "two endpoints are ambiguous: {:?}",
+            both.errors
+        );
+
+        let remote = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nallow_remote = true\n"
+        ));
+        assert!(
+            remote
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.allow_remote")),
+            "allow_remote has no meaning for a Unix socket: {:?}",
+            remote.errors
+        );
+
+        let empty = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"\"\ntoken = \"0123456789abcdef\"\n"
+        ));
+        assert!(
+            empty
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("must not be empty")),
+            "{:?}",
+            empty.errors
+        );
+
+        // Group-shared socket and peer-uid allowlist (ADR-0022): the mode
+        // and gid form a pair, and Unix-only knobs need a Unix socket.
+        let group = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_mode = \"0660\"\nunix_socket_gid = 20\nunix_socket_allow_uids = [501, 502]\n"
+        ));
+        assert!(group.is_valid(), "{:?}", group.errors);
+
+        let group_without_gid = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_mode = \"0660\"\n"
+        ));
+        assert!(
+            group_without_gid
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.unix_socket_gid")),
+            "{:?}",
+            group_without_gid.errors
+        );
+
+        let gid_with_owner_only = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_gid = 20\n"
+        ));
+        assert!(
+            gid_with_owner_only
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.unix_socket_gid")),
+            "a 0600 socket must not carry a group owner: {:?}",
+            gid_with_owner_only.errors
+        );
+
+        let broad = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_mode = \"0666\"\nunix_socket_gid = 20\n"
+        ));
+        assert!(
+            broad
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("not a supported socket mode")),
+            "{:?}",
+            broad.errors
+        );
+
+        let duplicate = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_allow_uids = [501, 501]\n"
+        ));
+        assert!(
+            duplicate
+                .errors
+                .iter()
+                .any(|e| e.cause.contains("more than once")),
+            "{:?}",
+            duplicate.errors
+        );
+
+        let without_socket = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\nunix_socket_allow_uids = [501]\n"
+        ));
+        assert!(
+            without_socket
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.unix_socket_allow_uids")),
+            "a TCP plane must not silently ignore a uid list: {:?}",
+            without_socket.errors
+        );
+    }
+
+    /// Named POSIX ACL users (ADR-0023): Linux-only, tied to the `0660` group
+    /// class whose bits are the ACL mask, deduplicated and bounded.
+    #[test]
+    fn admin_socket_acl_uids_require_group_mode_and_linux() {
+        let base = "schema_version = 1\n\
+                    [listener.web]\n\
+                    listen = \"127.0.0.1:8080\"\n\
+                    backend = \"api\"\n\
+                    [backend.api]\n\
+                    server = \"127.0.0.1:9000\"\n";
+        let accepted = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_mode = \"0660\"\nunix_socket_gid = 20\nunix_socket_acl_uids = [501, 502]\n"
+        ));
+        if cfg!(target_os = "linux") {
+            assert!(accepted.is_valid(), "{:?}", accepted.errors);
+        } else {
+            assert!(
+                accepted
+                    .errors
+                    .iter()
+                    .any(|e| e.cause.contains("Linux only")),
+                "a POSIX ACL cannot be installed off Linux; it must be rejected, not ignored: {:?}",
+                accepted.errors
+            );
+        }
+
+        // The ACL mask is the mode's group class: owner-only cannot carry a
+        // named user without silently becoming group-readable.
+        let owner_only = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_acl_uids = [501]\n"
+        ));
+        assert!(
+            owner_only.errors.iter().any(|e| {
+                e.field.as_deref() == Some("admin.unix_socket_acl_uids")
+                    && e.cause.contains("ACL mask")
+            }),
+            "{:?}",
+            owner_only.errors
+        );
+
+        let duplicate = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_mode = \"0660\"\nunix_socket_gid = 20\nunix_socket_acl_uids = [501, 501]\n"
+        ));
+        assert!(
+            duplicate.errors.iter().any(|e| {
+                e.field.as_deref() == Some("admin.unix_socket_acl_uids")
+                    && e.cause.contains("more than once")
+            }),
+            "{:?}",
+            duplicate.errors
+        );
+
+        let many: Vec<String> = (0..65).map(|index| (5_000 + index).to_string()).collect();
+        let too_many = check_source(&format!(
+            "{base}[admin]\nunix_socket = \"/run/eqproxy/admin.sock\"\ntoken = \"0123456789abcdef\"\nunix_socket_mode = \"0660\"\nunix_socket_gid = 20\nunix_socket_acl_uids = [{}]\n",
+            many.join(", ")
+        ));
+        assert!(
+            too_many.errors.iter().any(|e| {
+                e.field.as_deref() == Some("admin.unix_socket_acl_uids")
+                    && e.cause.contains("at most 64")
+            }),
+            "{:?}",
+            too_many.errors
+        );
+
+        let without_socket = check_source(&format!(
+            "{base}[admin]\nlisten = \"127.0.0.1:9001\"\ntoken = \"0123456789abcdef\"\nunix_socket_acl_uids = [501]\n"
+        ));
+        assert!(
+            without_socket
+                .errors
+                .iter()
+                .any(|e| e.field.as_deref() == Some("admin.unix_socket_acl_uids")),
+            "a TCP plane must not silently ignore an ACL list: {:?}",
+            without_socket.errors
         );
     }
 }

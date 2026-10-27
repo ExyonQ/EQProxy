@@ -26,7 +26,9 @@ use eqproxy_core::Metrics;
 use eqproxy_core::shutdown;
 use eqproxy_net::proxy::ForwardedMode;
 use eqproxy_net::tls::{self, TlsVersion};
-use eqproxy_net::{BoundProxy, ProxyMode, ResolvedBackend, ResolvedListener, bind};
+use eqproxy_net::{
+    BoundProxy, ProxyMode, ResolvedBackend, ResolvedListener, ResolvedServer, ServerAddr, bind,
+};
 
 const WAIT: Duration = Duration::from_secs(10);
 const CERT: &[u8] = include_bytes!("fixtures/cert.pem");
@@ -464,6 +466,94 @@ async fn grpc_concurrent_streams_share_one_backend_session() {
         1,
         "the two streams must share one backend HTTP/2 session"
     );
+    stop_proxy(handle, serve).await;
+}
+
+/// B8 over gRPC: the pass-through uses the same selection. A primary owns the
+/// tier, the backup origin receives the streams only when every primary is
+/// down, and the recovered primary takes them back. The two origins are told
+/// apart by what each one saw.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_backup_serves_grpc_streams_when_every_primary_is_down() {
+    let primary = start_grpc_origin().await;
+    let backup = start_grpc_origin().await;
+    let backend = Arc::new(
+        ResolvedBackend::new(
+            "api",
+            vec![
+                ResolvedServer {
+                    addr: ServerAddr::Ip(primary.addr),
+                    weight: 1,
+                    backup: false,
+                    priority: 0,
+                },
+                ResolvedServer {
+                    addr: ServerAddr::Ip(backup.addr),
+                    weight: 1,
+                    backup: true,
+                    priority: 0,
+                },
+            ],
+            1,
+            1,
+        )
+        .with_tls(backend_tls(&["h2"])),
+    );
+    let (addr, _metrics, handle, serve) =
+        start_proxy(http_listener(primary.addr).with_backend(Arc::clone(&backend))).await;
+    let mut client = h2_connect(addr).await;
+
+    // One stream: one frame in, its echo out, half close, status trailers.
+    async fn call(client: &mut h2::client::SendRequest<Bytes>, message: &'static [u8]) -> Vec<u8> {
+        let (response, mut send) = grpc_open(client, "/pkg.Service/Echo").await;
+        send_all(&mut send, &frame(message))
+            .await
+            .expect("request message");
+        let response = tokio::time::timeout(WAIT, response)
+            .await
+            .expect("headers in time")
+            .expect("headers");
+        let mut recv = response.into_body();
+        let mut buffer = Vec::new();
+        let echo = read_message(&mut recv, &mut buffer).await;
+        send.send_data(Bytes::new(), true).expect("half close");
+        drain(&mut recv).await;
+        let trailers = tokio::time::timeout(WAIT, recv.trailers())
+            .await
+            .expect("trailers in time")
+            .expect("trailers")
+            .expect("trailing headers");
+        assert_eq!(trailers["grpc-status"], "0");
+        echo
+    }
+
+    // A primary owns the tier.
+    assert_eq!(call(&mut client, b"one").await, b"one");
+    assert_eq!(seen(&primary).len(), 1);
+    assert!(seen(&backup).is_empty());
+
+    // Every primary down: the backup origin serves the stream.
+    backend.balancer.report_fail(primary.addr);
+    assert_eq!(call(&mut client, b"two").await, b"two");
+    assert_eq!(
+        seen(&backup).len(),
+        1,
+        "the backup must serve the gRPC stream"
+    );
+    assert_eq!(
+        seen(&primary).len(),
+        1,
+        "a primary marked down receives nothing"
+    );
+
+    // The recovered primary takes it back.
+    backend.balancer.report_ok(primary.addr);
+    assert_eq!(call(&mut client, b"three").await, b"three");
+    assert_eq!(seen(&primary).len(), 2);
     stop_proxy(handle, serve).await;
 }
 

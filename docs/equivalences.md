@@ -6,7 +6,7 @@ una lista de deseos: cada fila apunta al **test que la respalda** en este
 repositorio, y las diferencias de semántica están declaradas, no escondidas
 bajo la misma palabra.
 
-Nada de esto necesita WASM (v0.9): los tres se resuelven con configuración
+Nada de esto necesita WASM (v0.8.5): los tres se resuelven con configuración
 tipada dentro del dataplane.
 
 ## 1. CORS
@@ -89,7 +89,7 @@ Tests: `eqproxy-net/tests/e2e_rules.rs`
 
 ## 4. Lo que queda fuera (y por qué)
 
-Estos filtros necesitan WASM (v0.9) o un servicio externo; no hay atajo
+Estos filtros necesitan WASM (v0.8.5) o un servicio externo; no hay atajo
 honesto con configuración:
 
 | Filtro | Motivo |
@@ -98,7 +98,7 @@ honesto con configuración:
 | `fault` (abort/delay inyectados) | WASM |
 | `jwt_authn`, `oauth2` | WASM (o `ext_authz` con un servicio propio) |
 | `grpc_web`, `grpc_json_transcoder` | WASM |
-| `tap`, `gzip`, `decompressor` | WASM (en v0.9) |
+| `tap`, `gzip`, `decompressor` | WASM (en v0.8.5) |
 
 `ext_authz` por gRPC y el servicio global de rate limit también esperan a
 WASM/HTTP/2: hoy solo existe la variante HTTP de `ext_authz` y el bucket

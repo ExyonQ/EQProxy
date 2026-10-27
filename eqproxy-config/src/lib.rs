@@ -14,8 +14,8 @@ use std::path::Path;
 
 pub use error::{ConfigError, Location};
 pub use schema::{
-    BackendConfig, Config, ListenerConfig, ListenerMode, MAX_CONFIG_BYTES, MAX_SECTIONS,
-    SCHEMA_VERSION,
+    AccessLogConfig, AccessLogFormat, BackendConfig, Config, ListenerConfig, ListenerMode,
+    MAX_CONFIG_BYTES, MAX_SECTIONS, SCHEMA_VERSION,
 };
 pub use validate::CheckResult;
 

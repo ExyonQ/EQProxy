@@ -1,0 +1,659 @@
+   Compiling eqproxy-net v0.7.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-net)
+   Compiling eqproxy-config v0.7.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-config)
+   Compiling eqproxy-cli v0.7.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-cli)
+   Compiling eqproxy-core v0.7.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 26.52s
+     Running unittests src/main.rs (target/debug/deps/eqproxy-49f37f3ccb1a8a45)
+
+running 14 tests
+test tests::doctor_report_counts_and_verdict ... ok
+test tests::fd_needed_matches_the_spec_budget ... ok
+test tests::history_header_round_trips_origin_and_body ... ok
+test tests::explain_report_shows_leastconn_and_slow_start ... ok
+test tests::doctor_fd_line_names_limit_and_formula ... ok
+test tests::explain_report_details_what_each_timeout_fires ... ok
+test tests::explain_report_labels_simulation_and_decision ... ok
+test tests::history_names_sequence_and_sort ... ok
+test tests::select_listener_errors_name_candidates ... ok
+test tests::select_listener_prefers_the_only_one ... ok
+test tests::plan_report_inventories_listeners_backends_and_servers ... ok
+test tests::atomic_write_replaces_whole_content ... ok
+test tests::diff_report_is_empty_for_identical_configs ... ok
+test tests::diff_report_names_changed_weight_and_added_listener ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_e2e.rs (target/debug/deps/cli_e2e-b24a77260c901ff4)
+
+running 70 tests
+test await_log_line_times_out_with_the_log - should panic ... ok
+test diff_refuses_when_a_side_is_invalid ... ok
+test diff_reports_no_differences_for_identical_configs ... ok
+test diff_reports_changed_servers_and_added_listener ... ok
+test apply_reads_piped_stdin_once ... ok
+test apply_stores_first_configuration_with_inventory ... ok
+test doctor_reports_missing_config_actionably ... ok
+test config_validate_rejects_duplicate_and_invalid_sni_names ... ok
+test doctor_without_config_checks_the_environment ... ok
+test doctor_fails_on_an_occupied_port ... ok
+test apply_is_idempotent_for_identical_bytes ... ok
+test apply_reports_diff_and_keeps_backup ... ok
+test doctor_passes_for_a_free_port ... ok
+test config_schema_publishes_the_generated_json_schema ... ok
+test explain_simulates_routing_with_no_side_effects ... ok
+test reap_on_drop_leaves_no_live_child ... ok
+test explain_fails_actionably_on_bad_input ... ok
+test plan_loads_real_tls_material ... ok
+test plan_fails_actionably_on_bad_input ... ok
+test plan_inventories_what_run_would_activate ... ok
+test explain_piped_into_head_does_not_panic ... ok
+test apply_gate_leaves_state_untouched ... ok
+test rollback_without_history_fails_explicitly ... ok
+test rollback_restores_previous_current ... ok
+test rollback_walks_back_one_apply_at_a_time ... ok
+test run_compresses_brotli_and_prefers_it_over_gzip ... ok
+test run_auth_basic_and_subrequest_gate_requests ... ok
+test run_compresses_gzip_and_respects_every_refusal_case ... ok
+test run_canary_split_routes_by_weight_with_header_and_cookie_overrides ... ok
+test run_hash_policy_and_request_mirror_end_to_end ... ok
+test run_admin_plane_enforces_group_mode_and_uid_allowlist ... ok
+test run_http_mode_proxies_requests_and_rejects_smuggling ... ok
+test run_refuses_to_start_when_the_access_log_cannot_be_opened ... ok
+test run_admin_plane_listens_on_a_unix_socket_and_removes_it_on_shutdown ... ok
+test run_leastconn_sends_new_requests_to_the_idle_server ... ok
+test run_proxies_traffic_and_shuts_down_gracefully_on_sigint ... ok
+test run_serves_brotli_over_h2c_to_a_real_client ... ok
+test run_rule_actions_rewrite_redirect_and_direct_response ... ok
+test run_routes_by_rules_first_match_wins_with_default_fallback ... ok
+test run_serves_gzip_over_h2c_to_a_real_client ... ok
+test run_admin_plane_drains_a_server_with_the_write_token ... ok
+test run_serves_http2_to_real_clients_over_tls_and_cleartext ... ok
+test run_writes_combined_lines_when_configured ... ok
+test run_admin_plane_serves_status_and_metrics_with_a_bearer_token ... ok
+test run_hostname_backend_resolves_with_the_os_resolver ... ok
+test unimplemented_commands_fail_explicitly_with_exit_2 ... ok
+test validate_accepts_a_good_config ... ok
+test validate_accepts_h2_alpn_on_a_backend ... ok
+test validate_accepts_h2_alpn_on_an_http_listener ... ok
+test validate_accepts_phase2b_config_with_tls_servers_and_health_checks ... ok
+test sighup_reloads_the_config_under_traffic ... ok
+test run_writes_one_json_access_line_per_request_under_traffic ... ok
+test validate_maps_leastconn_aliases_and_bounds_slow_start ... ok
+test validate_names_rule_fields_actionably ... ok
+test validate_rejects_https_auth_url_naming_the_gap ... ok
+test validate_rejects_invalid_affinity_mode ... ok
+test validate_and_explain_report_the_compression_settings ... ok
+test validate_rejects_server_and_servers_together ... ok
+test validate_rejects_misconfigured_splits_maps_and_missing_files ... ok
+test validate_reports_file_line_field_cause_example ... ok
+test validate_reports_missing_cert_file_with_actionable_error ... ok
+test validate_reports_syntax_errors_with_line ... ok
+test validate_names_rule_action_fields_actionably ... ok
+test run_admin_plane_applies_backend_config_under_traffic ... ok
+test run_with_tls_termination_proxies_real_traffic ... ok
+test run_with_sni_serves_the_certificate_of_the_requested_name ... ok
+test run_http_check_interops_with_keep_alive_origin ... ok
+test run_slow_start_ramps_the_recovered_server_up ... ok
+test run_startup_with_broken_dns_serves_immediately_with_explicit_503 ... ok
+test run_hot_maps_swap_under_traffic_without_config_reload ... ok
+
+test result: ok. 70 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.56s
+
+     Running tests/differential.rs (target/debug/deps/differential-46514144fcc8bc85)
+
+running 1 test
+test differential_shared_semantics_corpus ... ignored, differential harness: needs Docker + reference images; run: cargo test -p eqproxy-cli --test differential -- --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/migration.rs (target/debug/deps/migration-a8895a5f96bad5ed)
+
+running 1 test
+test migration_matrix_same_routing_as_the_originals ... ignored, migration matrix: needs Docker + reference images; run: cargo test -p eqproxy-cli --test migration -- --ignored --nocapture
+
+test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/eqproxy_config-1dbc2636b23d7946)
+
+running 55 tests
+test tests::example_for_gives_field_specific_examples ... ok
+test error::tests::display_includes_file_line_field_cause_example ... ok
+test duration::tests::rejects_invalid_forms_with_named_input ... ok
+test duration::tests::parses_all_accepted_forms ... ok
+test tests::find_line_reports_first_match ... ok
+test tests::offset_location_maps_offsets_to_line_and_column ... ok
+test tests::offset_location_handles_line_boundaries ... ok
+test tests::oversized_source_is_rejected_with_actionable_error ... ok
+test tests::parse_str_returns_config_on_valid_toml ... ok
+test tests::a_table_typo_is_reported_with_its_section_path ... ok
+test tests::listener_table_accepts_a_full_section_and_requires_its_keys ... ok
+test tests::schema_defaults_match_the_documented_values ... ok
+test tests::load_enforces_the_size_budget_on_files ... ok
+test tests::backend_table_accepts_the_body_and_the_whole_section ... ok
+test validate::tests::backend_h2_alpn_is_accepted_for_an_http_listener ... ok
+test validate::tests::alpn_lists_reject_empty_and_duplicate_protocols ... ok
+test validate::tests::access_log_path_and_format_are_gated ... ok
+test validate::tests::backend_h2_alpn_is_allowed_for_a_tcp_tunnel ... ok
+test validate::tests::bad_listen_address_is_reported ... ok
+test validate::tests::dangerous_configs_produce_warnings_not_errors ... ok
+test validate::tests::health_check_values_must_be_positive ... ok
+test validate::tests::hostname_servers_parse_and_validate_actionably ... ok
+test validate::tests::http_listener_accepts_h2_alpn_because_it_terminates_it ... ok
+test validate::tests::admin_plane_is_loopback_with_one_secret ... ok
+test validate::tests::http_listener_accepts_http1_alpn_and_no_alpn ... ok
+test validate::tests::http_check_errors_name_field_and_rule ... ok
+test validate::tests::hash_policy_errors_name_the_field_the_cause_and_a_fix ... ok
+test validate::tests::map_sections_validate_sources_budgets_and_reload_window ... ok
+test validate::tests::maxconn_descriptor_warning_fires_only_above_65535 ... ok
+test validate::tests::map_conditions_need_an_existing_map_and_valid_shape ... ok
+test validate::tests::missing_backend_is_reported_with_line_field_cause_example ... ok
+test validate::tests::non_loopback_listener_without_tls_warns_but_with_tls_does_not ... ok
+test validate::tests::queue_and_retries_rules ... ok
+test validate::tests::proxy_receive_forwarded_and_local_response_rules ... ok
+test validate::tests::admin_unix_socket_replaces_the_tcp_listen ... ok
+test validate::tests::schema_version_policy_accepts_known_rejects_newer ... ok
+test validate::tests::server_and_servers_are_exclusive ... ok
+test validate::tests::auth_rules_name_the_field_and_the_fix ... ok
+test validate::tests::sni_names_accept_dns_and_single_label_wildcards_only ... ok
+test validate::tests::quic_requires_tls_http_mode_and_no_proxy_header ... ok
+test validate::tests::request_mirror_errors_name_the_field_the_cause_and_a_fix ... ok
+test validate::tests::tcp_listener_keeps_h2_alpn_for_byte_tunnels ... ok
+test validate::tests::split_is_an_exclusive_action_and_forwards ... ok
+test validate::tests::servers_list_is_validated_for_emptiness_addresses_weights_and_dupes ... ok
+test validate::tests::valid_config_has_no_errors ... ok
+test validate::tests::wrong_schema_version_is_reported ... ok
+test validate::tests::zero_timeouts_and_maxconn_are_reported ... ok
+test validate::tests::hash_policy_and_request_mirror_accept_the_supported_forms ... ok
+test validate::tests::v05_full_config_is_valid ... ok
+test validate::tests::split_targets_are_validated_with_actionable_fields ... ok
+test validate::tests::budget_counts_listeners_and_backends_by_their_sum ... ok
+test validate::tests::too_many_sections_are_rejected_with_budget_reason ... ok
+test validate::tests::sections_at_the_budget_are_accepted ... ok
+test tests::source_at_the_limit_is_accepted ... ok
+test tests::load_accepts_a_file_at_the_size_limit ... ok
+
+test result: ok. 55 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/schema.rs (target/debug/deps/schema-96f1e3bacff6fd91)
+
+running 4 tests
+test the_repository_schema_is_the_generated_one ... ok
+test the_schema_names_every_rule_action ... ok
+test the_schema_refuses_unknown_keys_and_a_numeric_duration ... ok
+test the_schema_describes_every_key_of_the_documented_example ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/lib.rs (target/debug/deps/eqproxy_core-c05e9ac78e15eebe)
+
+running 49 tests
+test auth::tests::users_parse_rejects_broken_entries_by_name ... ok
+test compression::tests::q_values_decide_like_rfc_9110 ... ok
+test expectation::tests::allowlist_rejects_empty_and_matches_any ... ok
+test auth::tests::users_parse_rejects_unsupported_schemes_with_the_fix ... ok
+test auth::tests::basic_credentials_parse_strictly ... ok
+test auth::tests::auth_url_parsing_names_the_fix ... ok
+test compression::tests::media_types_match_families_exact_and_any ... ok
+test compression::tests::brotli_wins_ties_and_q_values_order_the_choice ... ok
+test expectation::tests::bad_blocks_name_the_rule ... ok
+test expectation::tests::bad_grammars_name_the_rule ... ok
+test expectation::tests::cidr_matching_is_exact_per_family ... ok
+test expectation::tests::single_codes_ranges_and_lists_match ... ok
+test maps::tests::bad_keys_and_values_name_the_line_and_the_fix ... ok
+test maps::tests::hash_fingerprints_the_source_bytes ... ok
+test maps::tests::hot_map_swaps_atomically_and_describes ... ok
+test maps::tests::duplicate_keys_error_names_both_lines ... ok
+test maps::tests::inline_entries_validate_shapes_and_defaults ... ok
+test maps::tests::map_key_parse_names_the_valid_sources ... ok
+test maps::tests::map_key_selects_from_request_facts ... ok
+test maps::tests::parses_lines_comments_bare_keys_and_default ... ok
+test metrics::tests::acquire_respects_maxconn ... ok
+test metrics::tests::release_never_underflows ... ok
+test maps::tests::update_bytes_keeps_the_default_and_keeps_last_good_on_error ... ok
+test metrics::tests::snapshot_and_display_reflect_counters ... ok
+test expectation::tests::regex_matcher_checks_syntax_and_matches ... ok
+test rules::tests::compile_rejects_ambiguous_and_empty_rules_with_named_fields ... ok
+test rules::tests::cookie_compile_rejects_bad_names_and_three_kinds ... ok
+test rules::tests::cookie_conditions_match_and_explain ... ok
+test rules::tests::cookie_pairs_follow_rfc6265_parsing ... ok
+test rules::tests::explain_names_the_first_failing_condition ... ok
+test rules::tests::header_value_placeholders_render_per_request ... ok
+test rules::tests::header_value_rejects_unknown_placeholders_and_control_chars ... ok
+test rules::tests::host_exact_ignores_case_and_port ... ok
+test rules::tests::host_key_and_path_of_normalize ... ok
+test rules::tests::location_placeholders_render_per_request ... ok
+test rules::tests::map_compile_rejects_ambiguous_keys_and_unknown_sources ... ok
+test rules::tests::location_rejects_unknown_placeholders_and_controls ... ok
+test rules::tests::map_condition_matches_presence_and_equals_with_named_reasons ... ok
+test rules::tests::prefix_rewrite_is_literal_and_query_preserving ... ok
+test rules::tests::methods_headers_and_ip_conditions_and_with_the_rest ... ok
+test rules::tests::matches_agrees_with_explain_with_cookies_and_maps ... ok
+test rules::tests::host_prefix_and_regex ... ok
+test shutdown::tests::trigger_releases_all_waiters ... ok
+test rules::tests::path_matching_is_literal_and_case_sensitive ... ok
+test shutdown::tests::wait_returns_immediately_if_already_triggered ... ok
+test rules::tests::matches_agrees_with_explain_on_a_generated_cross_product ... ok
+test auth::tests::users_verify_htpasswd_entries ... ok
+test auth::tests::apr1_vectors_match_openssl ... ok
+test maps::tests::entry_budget_is_enforced ... ok
+
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.58s
+
+     Running tests/rules_fuzz_corpus.rs (target/debug/deps/rules_fuzz_corpus-e5b9f4b1601b5c31)
+
+running 4 tests
+test known_bad_specs_name_their_field ... ok
+test compile_never_panics_and_rejections_are_actionable ... ok
+test host_verdict_is_invariant_under_case_and_port_suffix ... ok
+test matches_and_explain_never_disagree_over_generated_traffic ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+     Running unittests src/lib.rs (target/debug/deps/eqproxy_net-4b7f7e7f7dc80e1d)
+
+running 136 tests
+test access::tests::utc_calendar_matches_known_instants ... ok
+test admin::tests::config_routes_accept_only_one_name_segment ... ok
+test access::tests::absent_values_are_dashes_in_combined ... ok
+test access::tests::combined_is_one_line_and_escapes_injection ... ok
+test admin::tests::malformed_requests_are_refused ... ok
+test admin::tests::anonymous_writes_are_401_and_audited ... ok
+test admin::tests::every_route_requires_the_bearer_token ... ok
+test admin::tests::only_get_and_the_state_put_are_served ... ok
+test admin::tests::token_comparison_is_exact ... ok
+test access::tests::json_is_one_line_with_the_documented_fields ... ok
+test admin::tests::unknown_backend_or_server_never_changes_anything ... ok
+test admin::tests::config_write_requires_the_write_role_and_a_conditional_request ... ok
+test admin::tests::unknown_routes_are_404_once_authenticated ... ok
+test admin::tests::without_a_write_token_every_write_is_disabled ... ok
+test auth::tests::subrequest_head_copies_client_headers_and_names_the_original ... ok
+test admin::tests::write_body_and_browser_requests_are_validated ... ok
+test auth::tests::deny_headers_drop_control_characters ... ok
+test backend_h2::tests::connect_and_hostless_requests_are_refused_not_guessed ... ok
+test access::tests::a_stopped_writer_counts_dropped_lines ... ok
+test admin::tests::metrics_are_prometheus_text_with_bounded_cardinality ... ok
+test admin::tests::read_token_cannot_write_and_the_write_token_can ... ok
+test balancer::tests::drained_server_is_never_picked_but_others_are ... ok
+test balancer::tests::all_drained_means_no_candidate ... ok
+test balancer::tests::empty_or_repeated_resolutions_keep_the_last_known_state ... ok
+test balancer::tests::fall_and_rise_thresholds_gate_transitions ... ok
+test balancer::tests::drain_removes_a_server_from_new_picks_and_ready_returns_it ... ok
+test admin::tests::status_reports_live_servers_and_the_live_counters ... ok
+test backend_h2::tests::a_chunked_body_carries_no_length_and_no_body_ends_the_stream ... ok
+test backend_h2::tests::an_absolute_form_target_keeps_its_own_authority ... ok
+test balancer::tests::pick_except_skips_excluded_servers ... ok
+test balancer::tests::modes_are_per_backend_and_survive_a_rebuilt_balancer ... ok
+test balancer::tests::named_servers_start_unresolved_and_pick_nothing ... ok
+test balancer::tests::leastconn_prefers_the_server_with_the_fewest_active_exchanges ... ok
+test balancer::tests::leastconn_weights_share_load_by_conns_over_weight ... ok
+test balancer::tests::leastconn_ties_rotate_smoothly ... ok
+test backend_h2::tests::h1_only_headers_never_cross_to_h2 ... ok
+test balancer::tests::pick_respects_weights_over_full_cycles ... ok
+test balancer::tests::pick_returns_none_when_all_servers_are_down_or_drained ... ok
+test balancer::tests::pinned_tracked_picks_honor_affinity_and_hold_a_slot ... ok
+test balancer::tests::pick_rotates_deterministically_with_equal_weights ... ok
+test balancer::tests::re_resolution_swaps_the_address_and_resets_health ... ok
+test balancer::tests::servers_view_reports_target_health_mode_and_in_flight ... ok
+test balancer::tests::slow_start_zero_keeps_full_weights_after_recovery ... ok
+test balancer::tests::tracked_picks_take_and_release_the_slot ... ok
+test balancer::tests::slow_start_ramps_the_recovered_server_up ... ok
+test balancer::tests::unresolved_slots_never_shadow_resolved_ones ... ok
+test compression::tests::eligibility_names_every_refusal ... ok
+test compression::tests::brotli_is_selected_only_when_enabled_and_accepted ... ok
+test compression::tests::the_rewritten_head_says_what_the_body_is ... ok
+test dns::tests::zero_interval_resolves_once_and_stops ... ok
+test access::tests::the_writer_flushes_the_queued_lines_on_shutdown ... ok
+test grpc::tests::grpc_content_types_are_recognized_and_grpc_web_is_not ... ok
+test grpc::tests::outbound_request_carries_te_trailers_and_no_h1_framing ... ok
+test grpc::tests::outbound_request_keeps_a_declared_length_only ... ok
+test grpc::tests::outbound_request_refuses_a_missing_authority ... ok
+test compression::tests::the_encoder_selects_the_negotiated_coding ... ok
+test health::tests::chunked_framing_closes_against_a_keep_alive_origin ... ok
+test health::tests::close_delimited_body_is_still_read_to_eof ... ok
+test health::tests::content_length_closes_against_a_keep_alive_origin ... ok
+test health::tests::expectations_match_status_and_raw_body ... ok
+test auth::tests::basic_denies_without_credentials_and_allows_with_them ... ok
+test health::tests::head_check_never_waits_for_the_declared_body ... ok
+test compression::tests::the_encoder_roundtrips_and_sets_the_gzip_magic ... ok
+test http1::tests::ambiguous_response_framing_is_rejected ... ok
+test http1::tests::chunk_size_parsing_is_strict ... ok
+test http1::tests::content_length_and_chunked_bodies_parse ... ok
+test http1::tests::expect_100_continue_is_flagged_and_ignored_in_http10 ... ok
+test http1::tests::request_without_trailing_crlf_parses ... ok
+test http1::tests::response_framing_follows_rfc_9112 ... ok
+test http1::tests::response_status_out_of_range_is_rejected_as_502 ... ok
+test http1::tests::too_many_headers_is_431 ... ok
+test http1::tests::unsupported_expectation_is_rejected_with_417 ... ok
+test http1::tests::smuggling_corpus_is_rejected ... ok
+test http1::tests::valid_get_parses_with_no_body ... ok
+test http2::tests::body_without_length_becomes_chunked ... ok
+test http2::tests::declared_length_is_kept_and_frame_headers_are_rebuilt ... ok
+test http2::tests::get_builds_origin_form_with_authority_as_host ... ok
+test http2::tests::hop_by_hop_headers_never_cross_the_translation ... ok
+test http2::tests::only_origin_form_survives_the_translation ... ok
+test http2::tests::response_headers_keep_the_application_framing_it_can_carry ... ok
+test http2::tests::response_headers_lowercase_and_drop_hop_by_hop ... ok
+test http2::tests::the_preface_is_the_only_plaintext_signal ... ok
+test http3::tests::every_h3_protocol_error_code_stays_an_error ... ok
+test http3::tests::only_the_two_normal_close_codes_are_clean ... ok
+test http3::tests::the_real_error_line_carries_peer_phase_and_cause ... ok
+test http3::tests::timeouts_resets_and_local_aborts_stay_errors ... ok
+test mirror::tests::a_dead_shadow_backend_counts_a_failure_and_never_panics ... ok
+test health::tests::oversized_body_is_matched_truncated_at_the_budget ... ok
+test health::tests::http_check_over_real_sockets_follows_expectations ... ok
+test mirror::tests::sampling_uses_a_deterministic_percentage ... ok
+test pool::tests::connection_with_pending_bytes_is_dropped ... ok
+test pool::tests::idle_cap_drops_excess_at_the_floor ... ok
+test mirror::tests::head_body_and_counter_reach_a_real_socket ... ok
+test pool::tests::roundtrip_hands_back_a_clean_connection ... ok
+test pool::tests::servers_are_keyed_independently ... ok
+test compression::tests::the_encoder_bounds_expand_incompressible_input ... ok
+test proxy::tests::copy_dir_moves_bytes_and_propagates_eof ... ok
+test pool::tests::idle_cap_follows_the_peak_in_flight ... ok
+test proxy::tests::duplicate_explicit_addresses_are_detected_and_port_zero_is_exempt ... ok
+test proxy::tests::hash_policy_parses_the_documented_keys_and_rejects_the_rest ... ok
+test compression::tests::the_brotli_encoder_streams_a_decodable_body ... ok
+test proxy::tests::hashed_pick_is_sticky_weighted_and_consistent_under_removal ... ok
+test proxy::tests::split_shares_requests_by_exact_weight ... ok
+test proxy::tests::split_smoothly_interleaves_instead_of_bursting ... ok
+test proxy::tests::split_zero_weight_targets_are_never_picked ... ok
+test proxy::tests::swap_summary_renders_the_three_counts ... ok
+test proxy_proto::tests::encode_v1_formats_tcp4 ... ok
+test proxy_proto::tests::encode_v1_mixed_families_produce_unknown ... ok
+test proxy_proto::tests::encode_v1_formats_tcp6 ... ok
+test proxy_proto::tests::encode_v2_formats_tcp4_tcp6_and_local ... ok
+test proxy_proto::tests::parse_v1_claims_the_source_address ... ok
+test proxy_proto::tests::parse_v1_rejects_malformed_lines ... ok
+test proxy_proto::tests::parse_v2_claims_the_source_and_ignores_tlv_padding ... ok
+test proxy_proto::tests::read_proxy_header_detects_both_versions_without_consuming_payload ... ok
+test proxy_proto::tests::read_v1_is_strict_about_origins_and_format ... ok
+test proxy_proto::tests::write_v1_writes_exact_header ... ok
+test tls::tests::client_config_rejects_invalid_server_name ... ok
+test tls::tests::server_config_accepts_valid_pem_and_alpn ... ok
+test tls::tests::server_name_defaults_to_server_ip ... ok
+test tls::tests::server_config_rejects_garbage_with_actionable_error ... ok
+test tls::tests::sni_configuration_keeps_the_default_when_no_entries ... ok
+test tls::tests::sni_name_patterns_follow_rfc6125_single_label_wildcards ... ok
+test compression::tests::the_brotli_encoder_bounds_expand_incompressible_input ... ok
+test ws::tests::a_target_that_is_not_a_path_is_refused ... ok
+test ws::tests::base64_matches_the_rfc_vector ... ok
+test ws::tests::head_adds_the_upgrade_and_drops_what_it_must ... ok
+test ws::tests::the_generated_key_is_sixteen_bytes_of_base64 ... ok
+test tls::tests::sni_configuration_rejects_duplicate_names_and_empty_entries ... ok
+test tls::tests::sni_resolver_prefers_exact_then_longest_wildcard_then_default ... ok
+test pool::tests::idle_cap_never_exceeds_the_ceiling ... ok
+test dns::tests::startup_resolves_immediately_then_re_resolves_at_the_interval ... ok
+test proxy::tests::copy_dir_times_out_when_reader_is_silent ... ok
+test pool::tests::stale_entries_are_never_handed_out ... ok
+test maps::tests::watcher_keeps_last_good_data_when_the_file_disappears ... ok
+test dns::tests::hung_dns_fails_the_attempt_but_keeps_the_last_known_address ... ok
+test health::tests::check_task_marks_server_down_and_up_again ... ok
+
+test result: ok. 136 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.31s
+
+     Running tests/e2e_admin.rs (target/debug/deps/e2e_admin-c6c143afc791c269)
+
+running 12 tests
+test draining_every_server_yields_an_explicit_503 ... ok
+test admin_unix_socket_refuses_live_sockets_and_replaces_stale_ones ... ok
+test admin_unix_socket_group_mode_and_uid_allowlist ... ok
+test status_reports_topology_and_live_counters ... ok
+test without_a_write_token_the_state_route_stays_read_only ... ok
+test the_dataplane_keeps_serving_when_the_admin_task_dies ... ok
+test metrics_export_is_prometheus_with_a_fixed_series_count ... ok
+test admin_unix_socket_serves_the_same_routes_and_is_owner_only ... ok
+test malformed_and_oversized_heads_are_refused_without_killing_the_plane ... ok
+test the_token_gates_every_route ... ok
+test write_roles_and_bodies_are_enforced_over_the_wire ... ok
+test drain_skips_new_requests_and_lets_the_in_flight_one_finish ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.68s
+
+     Running tests/e2e_backend_h2.rs (target/debug/deps/e2e_backend_h2-deceb77b7721395a)
+
+running 13 tests
+test a_backend_that_cannot_negotiate_h2_is_an_explicit_502 ... ok
+test connect_through_an_h2_backend_is_refused_not_half_forwarded ... ok
+test h1_client_reaches_an_h2_backend_through_a_real_h2_session ... ok
+test concurrent_exchanges_multiplex_one_backend_session ... ok
+test consecutive_exchanges_share_one_backend_session ... ok
+test a_stream_the_peer_refuses_is_replayed_once_on_a_fresh_session ... ok
+test head_keeps_its_declared_length_and_the_session_stays_usable ... ok
+test a_tcp_listener_relays_bytes_even_when_the_backend_negotiates_h2 ... ok
+test a_dead_session_is_replaced_by_a_fresh_one ... ok
+test a_goaway_drains_in_flight_streams_and_the_next_exchange_dials_a_fresh_one ... ok
+test an_idle_session_is_closed_and_the_next_exchange_dials_again ... ok
+test h2_client_reaches_an_h2_backend_end_to_end ... ok
+test trailers_and_chunked_bodies_cross_in_both_directions ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.06s
+
+     Running tests/e2e_balancer.rs (target/debug/deps/e2e_balancer-454a4b36ff8e1e8a)
+
+running 3 tests
+test leastconn_weights_share_in_flight_load_by_conns_over_weight ... ok
+test leastconn_routes_new_exchanges_to_the_least_loaded_server ... ok
+test slow_start_ramps_the_recovered_server_up ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.45s
+
+     Running tests/e2e_dns.rs (target/debug/deps/e2e_dns-462ce57a17124790)
+
+running 2 tests
+test re_resolution_swaps_the_backend_address_in_hot ... ok
+test hung_dns_serves_explicit_503_never_blocks ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.27s
+
+     Running tests/e2e_grpc.rs (target/debug/deps/e2e_grpc-30c20b262c6c8a6c)
+
+running 8 tests
+test grpc_dead_backend_is_an_explicit_502 ... ok
+test grpc_without_an_h2_backend_keeps_the_h1_translation ... ok
+test grpc_concurrent_streams_share_one_backend_session ... ok
+test grpc_forwarded_headers_cross_the_pass_through ... ok
+test grpc_bidi_answers_before_the_client_half_closes ... ok
+test grpc_large_messages_cross_flow_control ... ok
+test grpc_silent_stream_is_cut_by_the_idle_timeout ... ok
+test grpc_max_stream_duration_ends_with_deadline_status ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.35s
+
+     Running tests/e2e_http1.rs (target/debug/deps/e2e_http1-e3096655a79d2728)
+
+running 18 tests
+test http1_chunked_body_streams_end_to_end ... ok
+test access_log_records_parsed_and_unparsed_requests ... ok
+test http1_response_without_framing_is_eof_delimited ... ok
+test connect_opens_a_raw_tunnel_on_2xx ... ok
+test http1_client_abort_cancels_upstream_promptly ... ok
+test http1_post_body_streams_end_to_end ... ok
+test http1_get_roundtrip_and_keepalive ... ok
+test expect_100_continue_releases_client_and_streams_body ... ok
+test http1_smuggling_corpus_is_rejected_before_backend ... ok
+test upgrade_handshake_opens_a_bidirectional_tunnel ... ok
+test http1_client_header_timeout_returns_408_and_counts ... ok
+test backend_redundant_100_is_consumed_exactly_once ... ok
+test http1_max_stream_duration_cuts_the_exchange_with_504 ... ok
+test http1_server_header_timeout_returns_504 ... ok
+test unsupported_expectation_is_rejected_with_417 ... ok
+test oversent_backend_bytes_are_never_forwarded_or_pooled ... ok
+test interim_1xx_is_forwarded_and_never_desyncs_keepalive ... ok
+test keepalive_wait_is_bounded_by_idle_timeout_not_the_header_one ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.07s
+
+     Running tests/e2e_http2.rs (target/debug/deps/e2e_http2-affe1092394f60df)
+
+running 8 tests
+test h2_decodes_chunked_responses_and_keeps_trailers ... ok
+test h2c_multiplexes_streams_that_must_advance_together ... ok
+test tls_alpn_h2_terminates_a_real_http2_connection ... ok
+test pool_sizing_keeps_a_400_stream_burst_without_churn ... ok
+test access_log_marks_h2_requests_and_their_status ... ok
+test h2_request_without_content_length_goes_upstream_as_chunked ... ok
+test h2_truncated_backend_body_resets_the_stream ... ok
+test h2_dead_backend_answers_502_and_a_redirect_answers_locally ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.03s
+
+     Running tests/e2e_http3.rs (target/debug/deps/e2e_http3-6758e46d79969387)
+
+running 10 tests
+test http3_maxconn_refuses_a_second_quic_connection ... ok
+test http3_get_is_terminated_and_relayed_to_the_h1_origin ... ok
+test http3_chunked_response_and_trailers_cross_the_translation ... ok
+test http3_connect_is_refused_and_a_dead_backend_is_an_explicit_502 ... ok
+test http3_requests_get_the_h1_engine_decisions_rules_and_compression ... ok
+test http3_reload_rejects_a_tls_change_and_can_turn_quic_off ... ok
+test an_h3_no_error_close_is_counted_clean ... ok
+test a_normal_quic_close_is_counted_clean_and_never_an_error ... ok
+test a_protocol_error_close_is_counted_and_the_proxy_keeps_serving ... ok
+test http3_request_body_without_length_streams_as_chunked_upstream ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+
+     Running tests/e2e_phase2b.rs (target/debug/deps/e2e_phase2b-3aaff0b81d46fe53)
+
+running 13 tests
+test proxy_protocol_v1 ... ok
+test proxy_protocol_v2 ... ok
+test drained_server_is_skipped ... ok
+test balancer_roundrobin ... ok
+test balancer_weights ... ok
+test alpn_negotiation ... ok
+test client_garbage_handshake_is_counted_as_tls_failure ... ok
+test tls_backend_verification_failure_is_counted_and_rejected ... ok
+test tls_termination_e2e ... ok
+test all_servers_down_closes_connection_in_tcp_mode ... ok
+test all_servers_down_returns_503_in_http_mode ... ok
+test healthchecks_e2e ... ok
+test tls_backend_e2e ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.04s
+
+     Running tests/e2e_pool.rs (target/debug/deps/e2e_pool-19d9cf945a792d42)
+
+running 4 tests
+test server_close_is_not_reused ... ok
+test close_request_is_never_pooled ... ok
+test keep_alive_reuses_a_single_backend_connection ... ok
+test framing_error_is_never_reused ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running tests/e2e_reload.rs (target/debug/deps/e2e_reload-a4000e0aa7020581)
+
+running 4 tests
+test duplicate_addresses_are_rejected_without_touching_the_running_config ... ok
+test hot_swap_changes_new_routing_and_drains_established_connections ... ok
+test apply_adds_removes_and_rebinds_listeners ... ok
+test supervisor_counts_reloads_and_rejects_fail_closed ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/e2e_resilience.rs (target/debug/deps/e2e_resilience-540b888251be9a8f)
+
+running 15 tests
+test forwarded_headers_append_and_replace ... ok
+test passive_detection_marks_5xx_server_down ... ok
+test proxy_receive_accepts_the_v2_header ... ok
+test proxy_receive_forwards_the_claimed_peer ... ok
+test hot_reload_swaps_tls_material_on_the_kept_socket ... ok
+test local_response_serves_the_configured_body ... ok
+test non_idempotent_post_is_never_retried_without_opt_in ... ok
+test non_idempotent_opt_in_allows_post_retry ... ok
+test proxy_receive_rejects_invalid_header ... ok
+test proxy_receive_rejects_non_allowlisted_origin ... ok
+test mtls_requires_a_certificate_issued_by_the_client_ca ... ok
+test retry_saves_idempotent_get_from_dead_server ... ok
+test http_expect_check_marks_5xx_server_down ... ok
+test full_queue_rejects_explicitly_and_waiters_time_out ... ok
+test http_check_interops_with_keep_alive_origins ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+
+     Running tests/e2e_rules.rs (target/debug/deps/e2e_rules-4f8a72c6cfecd238)
+
+running 19 tests
+test header_actions_apply_to_request_and_response ... ok
+test cors_preflight_is_local_and_responses_carry_headers ... ok
+test action_order_and_fallback_are_unchanged ... ok
+test first_matching_rule_wins_over_later_ones ... ok
+test keep_alive_routes_each_exchange_independently ... ok
+test auth_basic_rejects_missing_or_wrong_credentials_explicitly ... ok
+test redirect_action_answers_locally_with_rendered_location ... ok
+test rewrite_action_rewrites_target_and_host_for_the_backend ... ok
+test map_condition_consults_hot_data_and_swaps_in_hot ... ok
+test canary_by_cookie_and_header_overrides_route_to_the_canary ... ok
+test near_misses_never_route ... ok
+test auth_subrequest_allows_on_2xx_and_fails_closed ... ok
+test affinity_cookie_and_source_pin_clients_to_a_server ... ok
+test rules_route_by_path_host_method_header_and_ip ... ok
+test split_traffic_shares_requests_by_weight_across_backends ... ok
+test hash_policy_keeps_a_key_on_its_target_and_only_remaps_owned_keys ... ok
+test request_mirror_copies_the_request_and_never_changes_the_client_answer ... ok
+test rate_limit_rejects_over_the_limit_explicitly ... ok
+test direct_response_answers_locally_and_keeps_keep_alive ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.01s
+
+     Running tests/e2e_sni.rs (target/debug/deps/e2e_sni-b67e5e11bdcb5991)
+
+running 2 tests
+test sni_selects_the_certificate_and_keeps_the_default_for_unknown_names ... ok
+test sni_set_swaps_in_hot_with_the_certificate_reload ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/e2e_tcp.rs (target/debug/deps/e2e_tcp-96559f684eb8fa67)
+
+running 6 tests
+test bind_is_all_or_nothing ... ok
+test echo_roundtrip_through_proxy_updates_metrics ... ok
+test idle_timeout_closes_silent_connection ... ok
+test connect_timeout_fails_fast_and_counts ... ok
+test maxconn_rejects_excess_connections_explicitly ... ok
+test graceful_shutdown_finishes_inflight_and_stops_accepting ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.01s
+
+     Running tests/e2e_ws_h2.rs (target/debug/deps/e2e_ws_h2-14768039b61ca952)
+
+running 6 tests
+test ws_classic_connect_keeps_its_501 ... ok
+test ws_unknown_protocol_is_refused_with_501 ... ok
+test ws_route_denial_answers_before_any_backend_contact ... ok
+test ws_refused_handshake_is_relayed_as_a_normal_response ... ok
+test ws_extended_connect_tunnels_bytes_both_ways ... ok
+test ws_silent_tunnel_is_cut_by_the_idle_timeout ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.27s
+
+     Running tests/framing_fuzz_corpus.rs (target/debug/deps/framing_fuzz_corpus-73c578056446c308)
+
+running 3 tests
+test known_attack_seeds_are_rejected_with_documented_status ... ok
+test request_parser_never_panics_and_rejects_explicitly ... ok
+test response_parser_never_panics_and_maps_to_502 ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+   Doc-tests eqproxy_config
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests eqproxy_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests eqproxy_net
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

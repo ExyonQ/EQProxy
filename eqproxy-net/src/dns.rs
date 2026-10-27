@@ -212,6 +212,8 @@ mod tests {
                     port,
                 },
                 weight: 1,
+                backup: false,
+                priority: 0,
             }],
             1,
             1,

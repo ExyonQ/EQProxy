@@ -31,12 +31,23 @@ listeners until `SIGINT`.
 
 ## Before opening a PR
 
-Run exactly what CI runs, with the same flags:
+Run the three build gates CI runs on every push, with the same flags:
 
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
+```
+
+CI also runs the admin-socket ACL journey on native Linux runners
+(`.github/scripts/admin-unix-acl-e2e.sh`, amd64 and arm64). It needs root, `setpriv`
+and POSIX ACLs, so it is not part of the loop above; run it on Linux before a
+change that touches the admin plane:
+
+```bash
+cargo build --release --locked -p eqproxy-cli
+sudo env EQPROXY_BIN="$PWD/target/release/eqproxy" \
+  bash .github/scripts/admin-unix-acl-e2e.sh
 ```
 
 Then exercise the behaviour you changed the way a user would: start the
@@ -147,6 +158,13 @@ authored by the contributor alone.
 - Evidence goes under `docs/evidence/` with the commands, the artifact under
   test (binary or image digest) and the raw data. A conclusion without raw
   data is not evidence.
+- A test cited in `docs/evidence/` must exist in the Rust tree of the same
+  commit. CI and the release pipeline run
+  `.github/scripts/check-evidence-test-citations.py`, which refuses a
+  test-shaped name the tree does not define; a name kept on purpose as
+  history is declared with its reason in
+  `.github/scripts/evidence-test-citations-allow.txt` (run the script locally
+  to see the verdict).
 - `docs/` publishes documentation (`.md`) and the recorded data only, never
   code. The harnesses that produced the measurements live outside the
   repository in the maintainer's tree (`scripts/evidence/<campaign>/`), and

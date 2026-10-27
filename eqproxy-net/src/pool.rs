@@ -165,6 +165,21 @@ impl Pool {
         self.lock().get(addr).map_or(0, |pool| pool.idle.len())
     }
 
+    /// Closes and drops every idle connection held for `addr` (v0.8,
+    /// ADR-0028): the server is being taken out for a patch window, so
+    /// nothing of ours may stay parked on it. The observed peak is kept —
+    /// the adaptive cap must not restart from the floor after a maintenance
+    /// cycle. Returns how many connections were closed; closing again is a
+    /// no-op that reports zero.
+    pub fn close_idle(&self, addr: &SocketAddr) -> usize {
+        let mut inner = self.lock();
+        inner.get_mut(addr).map_or(0, |pool| {
+            let closed = pool.idle.len();
+            pool.idle.clear();
+            closed
+        })
+    }
+
     /// Total idle connections held (diagnostics).
     #[must_use]
     pub fn idle_total(&self) -> usize {
@@ -320,6 +335,37 @@ mod tests {
             0,
             "a connection holding unread bytes must never be pooled"
         );
+    }
+
+    #[test]
+    fn close_idle_drops_what_is_parked_and_keeps_the_peak() {
+        let pool = Pool::with_defaults();
+        let now = Instant::now();
+        pool.note_in_flight(addr(), 7);
+        for _ in 0..3 {
+            let (read, write, _far) = pair();
+            pool.checkin(addr(), read, write, now);
+        }
+        assert_eq!(pool.idle_count(&addr()), 3);
+        assert_eq!(pool.close_idle(&addr()), 3, "it reports what it closed");
+        assert_eq!(pool.idle_count(&addr()), 0);
+        assert_eq!(
+            pool.peak_in_flight(&addr()),
+            7,
+            "the adaptive cap keeps the peak: no cliff after a patch window"
+        );
+        assert_eq!(
+            pool.close_idle(&addr()),
+            0,
+            "closing again is a no-op that reports zero"
+        );
+        // Another server's parked connections are untouched.
+        let other: SocketAddr = "127.0.0.1:9001".parse().expect("addr");
+        let (read, write, _far) = pair();
+        pool.note_in_flight(other, 1);
+        pool.checkin(other, read, write, now);
+        pool.close_idle(&addr());
+        assert_eq!(pool.idle_count(&other), 1);
     }
 
     #[test]

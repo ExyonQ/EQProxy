@@ -12,11 +12,22 @@ schema_version = 1
 # Drain window on shutdown (SIGINT): live connections may finish.
 shutdown_grace = "10s"
 
+# Metrics (D1/D5, CE4). The label-free family is always exported; the
+# per-server and per-route breakdown is opt-in and bounded by `max_series`,
+# which counts series across both families. A series that does not fit is
+# refused and counted in eqproxy_metrics_detail_dropped_total — never
+# silently admitted. `detailed` is hot (SIGHUP); `max_series` is fixed at
+# startup and a reload that changes it warns.
+#[metrics]
+#detailed = false      # per-server/per-route counters, off by default
+#max_series = 128      # series budget, 1..=4096 (default 128)
+
 # Administration plane (v0.8, D6; ADR-0017/0018/0019): its own listener and
 # task, never the public address. Absent = off. Every route needs the bearer
 # token; without it the answer is 401 and nothing about the plane is
 # disclosed. Routes: GET /api/v1/status (topology, revision and counters as
-# JSON), GET /metrics (Prometheus text, fixed series set), and — only with a
+# JSON), GET /metrics (Prometheus text: fixed family plus the opt-in detail
+# above), and — only with a
 # write token — PUT /api/v1/backends/{backend}/servers/{target}/state
 # (`ready`/`drain`), PUT /api/v1/backends/{name} and
 # PUT /api/v1/listeners/{name}. The table PUTs replace that TOML table, are
@@ -25,6 +36,22 @@ shutdown_grace = "10s"
 # only: SIGHUP re-reads this file and replaces them.
 #[admin]
 #listen = "127.0.0.1:9001"     # IP:PORT; loopback unless allow_remote
+#unix_socket = "/run/eqproxy/admin.sock"  # alternative to listen (ADR-0021):
+#                              # socket mode 0600, relative to this file; the
+#                              # token is still required on every route
+#unix_socket_mode = "0660"    # opt-in group access (ADR-0022); only 0600 or
+#                              # 0660 is accepted
+#unix_socket_gid = 20         # numeric gid, required with 0660 (names are
+#                              # not resolved: no NSS in this crate)
+#unix_socket_allow_uids = [501, 502]  # optional peer-uid allowlist checked
+#                              # via SO_PEERCRED/getpeereid before HTTP; empty
+#                              # = any uid the mode lets connect. Mode, group
+#                              # and list reload on SIGHUP against the bound
+#                              # socket; the path and the tokens do not
+#unix_socket_acl_uids = [501]  # named users granted rw by the socket's POSIX
+#                              # access ACL (ADR-0023), in addition to the gid;
+#                              # Linux only, needs "0660" + gid, and replaces or
+#                              # removes the entries on SIGHUP
 #token_file = "/etc/eqproxy/admin.token"   # read token: one of token/token_file
 #                                          # (≥ 16 bytes; newline trimmed)
 #token = "0123456789abcdef"    # inline alternative: travels with the file
@@ -34,6 +61,25 @@ shutdown_grace = "10s"
 #                                                      # is read-only
 #allow_remote = false          # a non-loopback bind sends the tokens in the
 #                              # clear (no TLS on the plane in this slice)
+#panel = true                 # web panel (ADR-0029) on this plane: GET /panel
+#                              # renders the live topology and the actions
+#                              # (ready/drain/maintenance, table writes,
+#                              # certificate reload) as plain HTML forms, no
+#                              # script. The token is exchanged once at login
+#                              # for an HttpOnly session cookie scoped to
+#                              # /panel plus a CSRF token per form; the read
+#                              # token opens a read-only panel. Absent = off and
+#                              # every /panel path is a 404
+
+# Structured access log (v0.8, ADR-0020): one line per HTTP request that
+# reaches the dataplane engine (HTTP/1.1, each HTTP/2 stream, each HTTP/3
+# request). Absent = off. `path` is relative to this file and absent means
+# stdout. Destination and format are fixed at startup (SIGHUP warns and keeps
+# the running sink). The query string is never logged; a line dropped under
+# backpressure is counted as access_log_dropped.
+#[access_log]
+#format = "json"             # "json" (default) or "combined" (nginx shape, UTC)
+#path = "/var/log/eqproxy/access.log"
 
 [listener.web]
 listen = "127.0.0.1:8080"   # IP:PORT (port 0 = ephemeral)
@@ -69,7 +115,10 @@ max_stream_duration = "0s"
 # HTTP/3 over QUIC (B-H2): optional, and only with TLS + mode = "http".
 # Serves h3 on the same IP:PORT over UDP (ALPN "h3" is automatic; the
 # certificate, SNI entries and client CA are the same as the TCP listener).
-# A change to the TLS material of a live QUIC listener needs a restart.
+# Certificates of a live listener — QUIC included — are renewed in place:
+# write the new files where this section points and call
+# `POST /api/v1/certificates/reload` on the admin plane (ADR-0025). ALPN,
+# client_ca and min_version still need a restart on a QUIC listener.
 #quic = true
 
 # TLS termination (A11): optional. Without this section the listener is plain TCP.
@@ -242,6 +291,13 @@ server = "127.0.0.1:9000"
 #servers = [
 #  { addr = "10.0.0.1:9000", weight = 3 },   # weight 0..=256; 0 = drained
 #  { addr = "10.0.0.2:9000", weight = 1 },
+#  { addr = "10.0.0.3:9000", weight = 1, backup = true },  # B8: only when no
+#                               # primary is eligible (checked while unused)
+#  { addr = "10.0.0.4:9000", weight = 1, backup = true, priority = 10 },
+#                               # B8 failover ladder: higher priority serves
+#                               # first; one rung at a time (0..=255, backup
+#                               # only — on a primary it is a config error,
+#                               # and refused together with `all_backups`)
 #  { addr = "api.internal:9000", weight = 1 },  # resolved in the background
 #]
 #balance = "roundrobin"        # or "leastconn" (B-H5/B-N12/B-E6; aliases:
@@ -250,6 +306,16 @@ server = "127.0.0.1:9000"
 #slow_start = "30s"            # B14: after UP (startup/recovery) the effective
 #                               # weight ramps 0..weight over the window
 #                               # ("0s" = off; maximum "1h")
+#all_backups = true            # B8 `option allbackups`: when no primary is
+#                               # eligible, EVERY operational backup serves and
+#                               # balance + weights spread the load across the
+#                               # pool, instead of one backup rung at a time.
+#                               # The reference states there is no priority
+#                               # order between the backups then, so pairing it
+#                               # with `priority` — or using it with no
+#                               # `backup = true` slot to balance — is a
+#                               # configuration error, not a no-op.
+#                               # Default false (one rung at a time).
 #resolve_interval = "30s"      # B-H13/B-N18/B-E15: re-resolve HOSTNAME:PORT
 #                               # servers at this rate and swap addresses in
 #                               # hot ("0s" = resolve once at startup;

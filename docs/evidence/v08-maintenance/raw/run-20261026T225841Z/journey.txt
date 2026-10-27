@@ -1,0 +1,41 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+version: eqproxy 0.7.0
+sha256: 4ae7a125c9a2cafc67259d0f5e5f2c45d9fe4ff1312913b9bb714bf6c872f98b  /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+dataplane 127.0.0.1:51572 · admin 127.0.0.1:51573
+primary 127.0.0.1:51570 · spare 127.0.0.1:51571
+
+phase 1: the primary serves and the proxy parks a connection on it
+PASS the tier answers through the proxy: (200, 'spare')
+PASS the proxy parked a keep-alive connection on the primary: {'open': 1, 'served': 1}
+PASS the slot starts ready and undrained: {'addr': '127.0.0.1:51570', 'resolved': '127.0.0.1:51570', 'weight': 1, 'backup': False, 'priority': 0, 'state': 'ready', 'healthy': True, 'active': 0, 'drained': False}
+
+phase 2: `maintenance` closes the idle connection at the transition
+PASS the state write is accepted: (200, '{"active":0,"backend":"api","changed":true,"drained":true,"healthy":true,"previous":"ready","server":"127.0.0.1:51570","state":"maintenance"}')
+PASS an idle maintenance slot is already finished: {'active': 0, 'backend': 'api', 'changed': True, 'drained': True, 'healthy': True, 'previous': 'ready', 'server': '127.0.0.1:51570', 'state': 'maintenance'}
+PASS the idle pooled connection is closed, not left parked: {'open': 0}
+PASS the client connection survives the window: (200, 'spare')
+
+phase 3: the slot takes no new exchange
+PASS the whole tier moves to the other server: ['spare', 'spare', 'spare', 'spare', 'spare', 'spare', 'spare', 'spare']
+PASS the maintenance slot serves nothing: {'served': 1, 'before': 1}
+PASS status reports the window: {'addr': '127.0.0.1:51570', 'resolved': '127.0.0.1:51570', 'weight': 1, 'backup': False, 'priority': 0, 'state': 'maintenance', 'healthy': True, 'active': 0, 'drained': True}
+PASS metrics count one maintenance slot: 1
+PASS metrics count no drain completion: 0
+
+phase 4: an in-flight exchange is never cut
+PASS one exchange is in flight: {'primary': {'addr': '127.0.0.1:51570', 'resolved': '127.0.0.1:51570', 'weight': 1, 'backup': False, 'priority': 0, 'state': 'maintenance', 'healthy': True, 'active': 0, 'drained': True}}
+  in flight on 127.0.0.1:51571
+PASS the window opens with the exchange still running: (200, {'active': 1, 'backend': 'api', 'changed': True, 'drained': False, 'healthy': True, 'previous': 'ready', 'server': '127.0.0.1:51571', 'state': 'maintenance'})
+PASS the client still got its answer: {'expected': 'spare', 'answers': {'spare': 200}}
+PASS the window opens when the last exchange ends: {'addr': '127.0.0.1:51571', 'resolved': '127.0.0.1:51571', 'weight': 1, 'backup': False, 'priority': 0, 'state': 'maintenance', 'healthy': True, 'active': 0, 'drained': True}
+PASS the finished exchange is not parked on the maintenance slot: {'open': 0}
+PASS the log names the window opening: ['AUDIT {"event":"admin_write","ts_unix":1793055522,"remote":"127.0.0.1:51590","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:51571/state","status":200,"backend":"api","server":"127.0.0.1:51571","from":"ready","to":"maintenance"}', 'INFO server ready for maintenance: backend=api target=127.0.0.1:51571 active=0']
+PASS no drain completion was invented: []
+
+phase 5: `ready` puts both servers back in rotation
+PASS ready is accepted on primary: (200, '{"active":0,"backend":"api","changed":true,"drained":false,"healthy":true,"previous":"maintenance","server":"127.0.0.1:51570","state":"ready"}')
+PASS ready is accepted on spare: (200, '{"active":0,"backend":"api","changed":true,"drained":false,"healthy":true,"previous":"maintenance","server":"127.0.0.1:51571","state":"ready"}')
+PASS the gauge goes back to zero: 0
+PASS the recovered slot serves again: {'label': 'spare', 'served': 13}
+
+ALL PASS

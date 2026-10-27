@@ -29,6 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Runs before every build: the evidence documents ship in the source
+      # tarball, so a citation of a test that does not exist must stop the
+      # pipeline here, not after the artifacts are published. The self-test
+      # proves the detector still detects before its verdict is trusted.
+      - name: Evidence citations point at tests that exist
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-evidence-test-citations.py --self-test
+          python3 .github/scripts/check-evidence-test-citations.py
+
       - name: Check version pin
         if: github.ref_type == 'tag'
         run: |
@@ -759,6 +769,46 @@ jobs:
           name: scout-reports
           path: scout/SCOUT-*.md
           if-no-files-found: error
+
+      # Admin plane (v0.8, B-H14; ADR-0022/ADR-0023): the socket's POSIX ACL,
+      # its mode, its group and the peer-uid allowlist are only worth
+      # anything if the kernel enforces them, so the binary of the candidate
+      # image is put in front of four real uids on **each** architecture —
+      # owner, a user admitted only by the ACL, a member of the socket group
+      # and an outsider — and the ACL is then emptied with a SIGHUP to prove
+      # the named user loses access without the mode changing.
+      # The journey asserts every observation and exits 1 on a mismatch (a
+      # control run naming the outsider fails it locally, so its green is not
+      # vacuous). `set -euo pipefail` stops the job right here: the promotion
+      # below never runs, so no tag can point at a digest whose admin socket
+      # admits the wrong users. The image runs as uid 65532 without `setpriv`
+      # or `getfacl`, so the binary is extracted and exercised in a Debian
+      # container of the same platform — the artifact under test is still the
+      # bytes of the scanned image, and their sha256 is printed.
+      - name: Admin socket ACL E2E on both architectures (B-H14)
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          image="ghcr.io/exyonq/eqproxy:${VERSION}-candidate"
+          fail() { printf 'release FAILED: %s\n' "$*" >&2; exit 1; }
+          log() { printf '==> %s\n' "$*"; }
+          for arch in amd64 arm64; do
+            docker pull -q --platform "linux/$arch" "$image" >/dev/null \
+              || fail "pull $image linux/$arch"
+            work="$(mktemp -d)"
+            container="$(docker create --platform "linux/$arch" "$image")"
+            docker cp "$container:/opt/eqproxy" "$work/eqproxy" >/dev/null \
+              || fail "extract /opt/eqproxy from $image linux/$arch"
+            docker rm "$container" >/dev/null
+            log "admin ACL E2E (linux/$arch): binary sha256 $(sha256sum "$work/eqproxy" | cut -d' ' -f1)"
+            docker run --rm --platform "linux/$arch" \
+              -v "$work/eqproxy:/opt/eqproxy:ro" \
+              -v "$GITHUB_WORKSPACE/.github/scripts/admin-unix-acl-e2e.sh:/journey.sh:ro" \
+              debian:bookworm-slim bash /journey.sh \
+              || fail "admin socket ACL journey on linux/$arch"
+            rm -rf "$work"
+          done
 
       # Promotion by digest: the tags point at the exact index Scout scanned
       # and the E2E journeys ran on. No rebuild happens here, so what was

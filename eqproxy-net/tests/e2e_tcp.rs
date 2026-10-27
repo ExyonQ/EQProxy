@@ -9,7 +9,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
 use eqproxy_core::{Metrics, shutdown};
-use eqproxy_net::{BoundProxy, ResolvedListener, bind};
+use eqproxy_net::{
+    BoundProxy, ResolvedBackend, ResolvedListener, ResolvedServer, ServerAddr, bind,
+};
 
 const WAIT: Duration = Duration::from_secs(5);
 
@@ -116,6 +118,104 @@ async fn echo_roundtrip_through_proxy_updates_metrics() {
     assert_eq!(snap.connect_failures, 0);
     assert_eq!(snap.bytes_client_to_backend, 4096);
     assert_eq!(snap.bytes_backend_to_client, 4096);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve finishes")
+        .expect("serve task without panic");
+}
+
+/// A TCP origin that announces its identity on accept: a tunnel has no HTTP
+/// label to tell servers apart, so the banner is what a test reads.
+async fn start_banner(label: &'static str) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind banner");
+    let addr = listener.local_addr().expect("addr banner");
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let _ = socket.write_all(format!("{label}\n").as_bytes()).await;
+                let mut buf = [0u8; 64];
+                let _ = socket.read(&mut buf).await;
+            });
+        }
+    });
+    addr
+}
+
+/// Opens one tunnel and reads the banner of the server behind it.
+async fn banner(proxy: SocketAddr) -> String {
+    let mut client = tokio::time::timeout(WAIT, TcpStream::connect(proxy))
+        .await
+        .expect("connect in time")
+        .expect("connect to proxy");
+    let mut label = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let got = tokio::time::timeout(WAIT, client.read(&mut byte))
+            .await
+            .expect("banner in time")
+            .expect("banner");
+        assert!(got > 0, "the server behind the tunnel must announce itself");
+        if byte[0] == b'\n' {
+            break;
+        }
+        label.push(byte[0]);
+    }
+    String::from_utf8(label).expect("utf8 banner")
+}
+
+/// B8 over TCP mode: a tunnel backend selects through the same function. The
+/// primary owns the tier, the `backup = true` server receives the tunnel only
+/// when every primary is down, and the recovered primary takes it back.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tcp_tunnel_fails_over_to_the_backup_server() {
+    let primary = start_banner("primary").await;
+    let backup = start_banner("backup").await;
+    let metrics = Arc::new(Metrics::default());
+    let backend = Arc::new(ResolvedBackend::new(
+        "api",
+        vec![
+            ResolvedServer {
+                addr: ServerAddr::Ip(primary),
+                weight: 1,
+                backup: false,
+                priority: 0,
+            },
+            ResolvedServer {
+                addr: ServerAddr::Ip(backup),
+                weight: 1,
+                backup: true,
+                priority: 0,
+            },
+        ],
+        1,
+        1,
+    ));
+    let cfg = listener_cfg(
+        "web",
+        "127.0.0.1:0".parse().expect("addr"),
+        primary,
+        64,
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+    )
+    .with_backend(Arc::clone(&backend));
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics), WAIT).await;
+
+    assert_eq!(banner(proxy_addr).await, "primary");
+    backend.balancer.report_fail(primary);
+    assert_eq!(
+        banner(proxy_addr).await,
+        "backup",
+        "the tunnel must reach the backup server"
+    );
+    backend.balancer.report_ok(primary);
+    assert_eq!(banner(proxy_addr).await, "primary");
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)

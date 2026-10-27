@@ -2,7 +2,7 @@
 #
 # Usage:
 #   docker buildx build --file docker/Dockerfile --platform linux/amd64,linux/arm64 \
-#     --tag ghcr.io/exyonq/eqproxy:0.7.0 --tag ghcr.io/exyonq/eqproxy:latest \
+#     --tag ghcr.io/exyonq/eqproxy:0.8.0 --tag ghcr.io/exyonq/eqproxy:latest \
 #     --provenance=mode=max --sbom=true --push .
 #
 # The binary runs with `docker run ghcr.io/exyonq/eqproxy --help`.

@@ -1,0 +1,14 @@
+# Test-shaped identifiers that docs/evidence cites without the Rust tree
+# defining them. Read by .github/scripts/check-evidence-test-citations.py.
+#
+# Format: `token` + two spaces (or a tab) + the reason it is not in the tree.
+# An entry that no document cites any more fails the gate: the list only
+# carries names with a documented history, never blanket exemptions.
+# `wait_for_unix_admin` and other helpers do not belong here — they exist in
+# the test files, and the gate only checks that the identifier exists.
+
+verify_live_native  shell function of the maintainer-local scripts/release.sh (absorbed into release.yml in v0.6.0), not a test
+mcp_submit_eval  the retired EvoForge eval tool (owner decision 2026-10-24), cited as a tool result, not a test
+http_mode_user  identifier of the validate.rs backend-ALPN rejection removed when h2 backends became supported (v0.7)
+one_pooled_h2_session_serves_consecutive_requests  old test name, renamed to consecutive_exchanges_share_one_backend_session when the h1 pipe stopped being pooled
+http3_reload_rejects_a_tls_change_and_can_turn_quic_off  v0.7 test name, superseded by the D7 reload journeys (http3_reload_applies_new_tls_on_the_same_socket)

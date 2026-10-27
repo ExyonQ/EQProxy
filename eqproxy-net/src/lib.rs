@@ -7,6 +7,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod access;
 pub mod admin;
 pub mod auth;
 pub mod backend_h2;
@@ -19,21 +20,31 @@ pub mod http2;
 pub mod http3;
 pub mod maps;
 pub mod mirror;
+pub mod panel;
 pub mod pool;
 pub mod proxy;
 pub mod proxy_proto;
 pub mod tls;
+pub mod unix_acl;
 pub mod ws;
 
 pub mod dns;
 
-pub use admin::{AdminHandle, AdminState, AdminTopology, ListenerInfo, ResolvedAdmin};
+pub use access::{
+    AccessEntry, AccessHandle, AccessLog, AccessLogFormat, AccessLogSettings, AccessRecord,
+    ClientProtocol,
+};
+pub use admin::{
+    AdminEndpoint, AdminHandle, AdminState, AdminTopology, ListenerInfo, ResolvedAdmin,
+    UnixSocketOptions,
+};
 pub use auth::{AuthOutcome, DenyResponse, check_basic};
 pub use balancer::{
     ActiveGuard, Balance, Balancer, ResolvedServer, ServerAddr, ServerMode, ServerModes, ServerView,
 };
 pub use dns::{DnsSettings, Resolving, SystemResolver};
 pub use health::HealthCheck;
+pub use panel::Panel;
 pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, IDLE_CEILING_PER_SERVER, IDLE_FLOOR_PER_SERVER, Pool};
 pub use proxy::{
     AffinityMode, BoundProxy, BoxRead, BoxWrite, HashKey, HashPolicy, MirrorPolicy, OutboundError,

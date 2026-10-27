@@ -7,7 +7,7 @@ authors.workspace = true
 description = "EQProxy dataplane: listeners, connections and bounded TCP proxy"
 
 [dependencies]
-eqproxy-core = { path = "../eqproxy-core", version = "0.7.0" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.8.0" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 # Admin plane (v0.8): status JSON and Prometheus text.
@@ -16,6 +16,9 @@ serde_json = { workspace = true }
 rustls = "0.23"
 tokio-rustls = "0.26"
 rustls-pki-types = "1"
+# Certificate identity (D7): `sha256:` fingerprints of the served leaf. Same
+# provider rustls already links (AWS-LC), so no new crate enters the graph.
+aws-lc-rs = "1"
 webpki-roots = "1"
 h2 = "0.4"
 http = "1"
@@ -33,8 +36,17 @@ quinn = { version = "0.11", default-features = false, features = [
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
 
+# POSIX ACLs on the admin socket (ADR-0023) are an extended attribute; the
+# Linux-only wrapper keeps the C library out (static musl image, no libacl).
+[target.'cfg(target_os = "linux")'.dependencies]
+xattr = "1"
+
 [dev-dependencies]
 base64 = { workspace = true }
+
+# The ACL test reads the attribute back; the library already links it on Linux.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+xattr = "1"
 
 [lints]
 workspace = true

@@ -7,7 +7,7 @@ authors.workspace = true
 description = "EQProxy configuration: typed TOML schema, semantic validation and actionable errors"
 
 [dependencies]
-eqproxy-core = { path = "../eqproxy-core", version = "0.7.0" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.8.0" }
 serde = { workspace = true }
 schemars = { workspace = true }
 serde_json = { workspace = true }

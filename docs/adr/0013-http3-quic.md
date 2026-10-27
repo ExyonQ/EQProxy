@@ -57,12 +57,16 @@ decisions and drift from them.
    endpoint before any accept loop runs (fail-closed: a bad QUIC/TLS config
    or a busy UDP port aborts startup with the other sockets closed). A hot
    reload keeps the endpoints of kept listeners, can turn QUIC on or off for
-   one listener, and rejects a **TLS material change** on a live endpoint
-   (`ProxyError::QuicTlsReload`): a QUIC endpoint freezes its certificates at
-   creation, and silently serving the old ones would diverge from the TCP
-   side. The comparison uses a digest of everything that changes what the
-   endpoint asserts (chains, keys, SNI entries, client CA, ALPN, minimum
-   version). Shutdown sends CONNECTION_CLOSE and stops accepting.
+   one listener, and rejects a change to the settings a live endpoint freezes
+   (`ProxyError::QuicTlsReload`). Shutdown sends CONNECTION_CLOSE and stops
+   accepting.
+
+   **Amended by [ADR-0025](0025-certificate-renewal-without-restart.md)
+   (2026-10-25):** the endpoint freezes its ALPN, client-CA verifier and
+   minimum TLS version, but **not** the certificate resolver, which it
+   consults on every handshake. A chain, key or SNI-name change is therefore
+   adopted in place and hot on HTTP/3; only a change to those three frozen
+   settings is still refused.
 
 5. **`maxconn` counts QUIC connections.** When a listener is full, the
    handshake is refused (`Incoming::refuse`) and `connections_rejected` is

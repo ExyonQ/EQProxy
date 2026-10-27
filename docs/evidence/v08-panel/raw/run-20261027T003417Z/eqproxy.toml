@@ -1,0 +1,23 @@
+schema_version = 1
+shutdown_grace = "1s"
+[admin]
+listen = "127.0.0.1:0"
+panel = true
+token = "8f2c4a1e6b9d30547a8c2e6f4b1d9038"
+write_token = "3b7e9c1a5d2f80462e9b3c7a4d1f6082"
+[listener.web]
+listen = "127.0.0.1:0"
+mode = "http"
+backend = "api"
+connect_timeout = "2s"
+[backend.api]
+balance = "roundrobin"
+server = "127.0.0.1:63939"
+[backend.api.health_check]
+type = "http"
+http_path = "/healthz"
+interval = "150ms"
+timeout = "100ms"
+fall = 1
+rise = 1
+expect_status = "200"

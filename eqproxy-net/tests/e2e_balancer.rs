@@ -252,10 +252,14 @@ async fn leastconn_routes_new_exchanges_to_the_least_loaded_server() {
                 ResolvedServer {
                     addr: a.addr.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: b.addr.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             3,
@@ -334,10 +338,14 @@ async fn leastconn_weights_share_in_flight_load_by_conns_over_weight() {
                 ResolvedServer {
                     addr: a.addr.into(),
                     weight: 2,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: b.addr.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             3,
@@ -416,10 +424,14 @@ async fn slow_start_ramps_the_recovered_server_up() {
                 ResolvedServer {
                     addr: a.addr.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: b.addr.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             1,

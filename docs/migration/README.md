@@ -100,6 +100,13 @@ on each, with no exclusions.
   `configuration-snippet` escape hatch, because Ingress cannot express method
   routing or local answers natively; the annotation is part of
   [ingress.yaml](ingress.yaml).
+- **Envoy driven by xDS is not migrated.** The Envoy file here is a static
+  bootstrap (`static_resources`), which is what the converter reads; EQProxy
+  has no xDS client and this matrix does not pretend otherwise. The equivalent
+  for runtime changes is the admin write API with the same validation and an
+  atomic swap (ADR-0019), not an xDS control plane; the optional adapter and
+  its constraints are recorded in
+  [ADR-0027](../adr/0027-xds-bridge-decision.md) (E2).
 - **TLS, SNI, WebSocket upgrade and HTTP/2** are outside this matrix (they are
   transport concerns covered by their own slices); all five run plain HTTP/1.1.
 - **Load balancing across several servers per pool** is out of scope here (one

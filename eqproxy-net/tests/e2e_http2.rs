@@ -24,7 +24,8 @@ use eqproxy_core::rules::{Rule, RuleSpec};
 use eqproxy_core::{Metrics, shutdown};
 use eqproxy_net::tls::{self, TlsVersion};
 use eqproxy_net::{
-    BoundProxy, ProxyMode, ResolvedHeaders, ResolvedListener, ResolvedRoute, RouteAction, bind,
+    BoundProxy, ProxyMode, ResolvedBackend, ResolvedHeaders, ResolvedListener, ResolvedRoute,
+    ResolvedServer, RouteAction, ServerAddr, bind,
 };
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -455,6 +456,65 @@ async fn h2_dead_backend_answers_502_and_a_redirect_answers_locally() {
     stop_proxy(handle, serve).await;
 }
 
+/// B8 over HTTP/2: the backup tier is the same selection function the h2
+/// engine uses. A primary owns the tier, the `backup = true` server serves
+/// only when every primary is down, and the recovered primary takes it back.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backup_serves_h2_requests_when_every_primary_is_down() {
+    let (primary, primary_seen) = start_recording_origin("primary").await;
+    let (backup, backup_seen) = start_recording_origin("backup").await;
+    let backend = Arc::new(ResolvedBackend::new(
+        "api",
+        vec![
+            ResolvedServer {
+                addr: ServerAddr::Ip(primary),
+                weight: 1,
+                backup: false,
+                priority: 0,
+            },
+            ResolvedServer {
+                addr: ServerAddr::Ip(backup),
+                weight: 1,
+                backup: true,
+                priority: 0,
+            },
+        ],
+        1,
+        1,
+    ));
+    let (addr, handle, serve) =
+        start_proxy(http_listener(primary).with_backend(Arc::clone(&backend))).await;
+    let mut client = h2_connect(addr).await;
+
+    let (status, _headers, body, _trailers) =
+        read_response(h2_get(&mut client, "/one").await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"primary", "a primary owns the tier");
+    assert_eq!(primary_seen.lock().expect("seen").len(), 1);
+    assert!(backup_seen.lock().expect("seen").is_empty());
+
+    // Every primary down: the backup tier takes the h2 stream.
+    backend.balancer.report_fail(primary);
+    let (status, _headers, body, _trailers) =
+        read_response(h2_get(&mut client, "/two").await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"backup", "the backup must serve the h2 exchange");
+    assert_eq!(backup_seen.lock().expect("seen").len(), 1);
+
+    // The recovered primary takes it back.
+    backend.balancer.report_ok(primary);
+    let (status, _headers, body, _trailers) =
+        read_response(h2_get(&mut client, "/three").await).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, b"primary");
+    drop(client);
+    stop_proxy(handle, serve).await;
+}
+
 #[cfg_attr(
     miri,
     ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
@@ -697,5 +757,40 @@ async fn pool_sizing_keeps_a_400_stream_burst_without_churn() {
     assert_eq!(origin_requests.load(Ordering::Relaxed), 800);
 
     drop(clients);
+    stop_proxy(handle, serve).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_log_marks_h2_requests_and_their_status() {
+    let origin = start_raw_origin(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n").await;
+    let metrics = Arc::new(Metrics::default());
+    let (log, mut entries) = eqproxy_net::AccessLog::channel(Arc::clone(&metrics));
+    let cfg = http_listener(origin).with_access(Arc::clone(&log));
+    let bound = bind(vec![cfg], Arc::clone(&metrics))
+        .await
+        .expect("bind proxy");
+    let addr = bound.local_addrs()[0].1;
+    let (handle, signal) = shutdown::channel();
+    let serve = tokio::spawn(async move {
+        bound.serve(signal, WAIT).await.expect("serve");
+    });
+
+    let mut client = h2_connect(addr).await;
+    let response = h2_get(&mut client, "/ping?x=1").await;
+    let (status, _headers, body, _trailers) = read_response(response).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(body.is_empty());
+
+    let entry = tokio::time::timeout(WAIT, entries.recv())
+        .await
+        .expect("entry in time")
+        .expect("entry");
+    assert_eq!(entry.protocol, eqproxy_net::ClientProtocol::Http2);
+    assert_eq!(entry.method, "GET");
+    assert_eq!(entry.path, "/ping");
+    assert_eq!(entry.status, 204);
+    assert_eq!(entry.backend.as_deref(), Some("api"));
+    assert_eq!(log.dropped(), 0);
+
     stop_proxy(handle, serve).await;
 }

@@ -129,7 +129,7 @@ either the `h2` crate or raw HTTP/1.1 bytes, never a mock:
 |---|---|
 | `h1_client_reaches_an_h2_backend_through_a_real_h2_session` | h1 POST reaches the origin as `HTTP_2` with `:authority` from `Host`, the body and `X-Custom` intact, `host`/`connection` absent, `x-origin` back to the client, `connect_failures = 0`. |
 | `h2_client_reaches_an_h2_backend_end_to_end` | h2 on the listener (`alpn = ["h2"]`) and h2 on the backend in the same exchange: HTTP/2 from end to end, body both ways. |
-| `one_pooled_h2_session_serves_consecutive_requests` | Two exchanges on one client connection produce **one** accepted backend TCP connection and two streams: the pool reuses the h2 session, and the second answer (418 + body) is intact. |
+| `consecutive_exchanges_share_one_backend_session` (renamed from `one_pooled_h2_session_serves_consecutive_requests`) | Two exchanges on one client connection produce **one** accepted backend TCP connection and two streams: the pool reuses the h2 session, and the second answer (418 + body) is intact. |
 | `trailers_and_chunked_bodies_cross_in_both_directions` | h2 client → h2 backend: request trailers arrive as trailing HEADERS, response trailers arrive as h2 trailers. Then an h1 chunked request with a trailer crosses too, and the h2 answer's trailer reaches the h1 client as an h1 trailer. |
 | `head_keeps_its_declared_length_and_the_session_stays_usable` | `HEAD` keeps `content-length: 5` with no body and the same h2 session still serves the next `GET` (no session lost, no bogus truncation). |
 | `connect_through_an_h2_backend_is_refused_not_half_forwarded` | `CONNECT` answers `502` and the origin sees **no stream**: no half-open tunnel. |

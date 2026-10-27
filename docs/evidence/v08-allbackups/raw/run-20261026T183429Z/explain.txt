@@ -1,0 +1,14 @@
+simulation: true (no requests issued, no state changed)
+request: GET / host=-
+listener "web": listen=127.0.0.1:0 mode=http maxconn=1024 tls=no
+route_decision: no rule matched -> default backend "api"
+backend "api": balance=roundrobin servers=3 tls=no proxy_protocol=none health_check=interval=200ms timeout=300ms fall=2 rise=2 affinity=none all_backups=true
+timeouts: connect=5s idle=60s client_header=5s server_header=30s max_stream=0ns
+timeout_on_fire: connect=502 after 5s; client_header=408(first exchange)/close after 5s; server_header=504 after 30s; idle=close after 60s
+queue: none (no server up -> 503 immediately)
+retries: none (one dial per exchange)
+server 127.0.0.1:54488 weight=1 state=UP(initial)
+server 127.0.0.1:54489 weight=2 state=UP(initial)
+server 127.0.0.1:54490 weight=1 state=UP(initial)
+decision: server 127.0.0.1:54488 reason="first weighted round-robin pick on a throwaway balancer (simulation)"
+

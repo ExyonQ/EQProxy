@@ -169,6 +169,25 @@ only under the documented separation rule.
   `slow_start = "30s"` (B14; `"0s"` = off, maximum `"1h"`) every
   transition to operational (startup or recovery after `rise`) ramps it
   linearly from ~0 to `weight` over the window. `weight` 0..=256.
+  **Backup servers (B8):** a slot declared `backup = true` forms a second
+  tier. While at least one primary is eligible (up, `ready`, weight > 0,
+  resolved, not excluded by a retry) only primaries are picked; backups are
+  picked only when that tier is empty, and primaries take the traffic back on
+  the next request after recovery — no timer, no state to reset. Inside the
+  backup tier the reference default is **one rung at a time**: only the first
+  operational backup serves ("only the first operational backup server is
+  used"), and **failover order** is the EQProxy extension `priority`
+  (0..=255, higher fails over first, ties keep configuration order; rejected
+  on a non-backup slot because it would be a silent no-op). A recovered
+  higher rung takes the traffic back on the next request. **`all_backups =
+  true`** is the reference's `option allbackups`: when no primary is eligible
+  every operational backup is a candidate, so the algorithm (`roundrobin` /
+  `leastconn`) and the weights spread load across the whole pool — and, as
+  the reference states, "there will not be any priority order between the
+  backup servers anymore". Pairing `all_backups` with a `priority` slot, or
+  enabling it in a backend with no `backup = true` slot to balance, is a
+  configuration error instead of a silent no-op. A backend whose slots are
+  all backups follows the same mode.
 - **Health checks (B11 TCP):** one task per backend with checks configured;
   `interval`/`timeout`/`fall`/`rise`. Servers start up; `fall` consecutive
   failures take a server down, `rise` consecutive successes bring it back.
@@ -223,32 +242,61 @@ without asserting undemonstrated causes.
 
 ## 9. Administration and web panel
 
-Designed (scope); implementation in Phase 6. The panel exposes: listener/backend
-state, server health, connections/queues/latencies, change history, diffs
-between configurations, validation before applying, certificate management,
-drain/maintenance, authorised request diagnostics, alerts and multi-instance
-management (desired vs applied revisions, drift).
+Implemented (v0.8) as a server-rendered client of the administration API
+([ADR-0029](docs/adr/0029-panel-sessions-and-csrf.md)), opt-in behind
+`[admin] panel = true`. It exposes today: listener/backend/server state with
+health, in-flight counts and `drained`, validation before applying (the API's
+own validation and `If-Match` revision), certificate management and
+drain/maintenance per server. Still pending from the design list below:
+change history, diffs between configurations, authorised request diagnostics,
+alerts, a live-updating topology view (the dashboard is rendered per request)
+and multi-instance management (desired vs applied revisions, drift).
 
 Panel security (detail in [THREAT_MODEL.md](THREAT_MODEL.md)):
 authentication, RBAC, write auditing, session and CSRF protection, strict
 separation between public endpoint and administration, minimal permissions,
 concurrency control on write operations (optimistic concurrency with revision),
 forbidden to expose secrets, documented data retention policy. **The panel is
-not a requirement to operate the proxy.**
+not a requirement to operate the proxy.** Implemented today: the bearer token
+is exchanged once for an in-memory session (`HttpOnly`, `SameSite=Strict`,
+`Path=/panel`) with a per-session CSRF token checked on every form; the role
+comes from the token that opened it (read reads, write writes) and every
+attempt writes its `AUDIT` line; sessions expire after 30 idle minutes, at
+most 16 are kept, and stopping the process ends them.
 
 Multi-instance: nothing that is not atomic is declared "atomic"; behaviour
 under network partitions and partial failures is documented.
 
-**Implemented so far (v0.8; [ADR-0017](docs/adr/0017-read-only-admin-plane.md),
-[ADR-0018](docs/adr/0018-first-write-path-server-state.md),
-[ADR-0019](docs/adr/0019-hot-config-writes-via-admin-api.md)):**
+**Implemented so far (v0.8; [ADR-0017](docs/adr/0017-read-only-admin-plane.md)
+to [ADR-0029](docs/adr/0029-panel-sessions-and-csrf.md), each cited where it
+applies):**
 an optional `[admin]` table opens a listener of its own with a bearer token
-(`token` or `token_file`, loopback unless `allow_remote = true`). It serves
+(`token` or `token_file`, loopback unless `allow_remote = true`). The endpoint
+is exactly one of `listen` (TCP) or `unix_socket` (a Unix domain socket,
+relative paths resolved against the configuration file; ADR-0021). The socket
+is mode `0600` by default or opt-in `0660` with a numeric `unix_socket_gid`,
+and an optional `unix_socket_allow_uids` list is checked against the kernel's
+peer credential (`SO_PEERCRED`/`getpeereid`) before any HTTP byte is read; a
+non-empty list refuses a peer without a reported uid, and the bearer token
+still gates the routes (ADR-0022). `unix_socket_acl_uids` names users in the
+file's POSIX access ACL (Linux), so they may `connect` without joining the
+group; the list requires `0660` + a gid, is bounded to 64 entries and is
+removed (attribute included) when it empties — the kernel, not the process,
+checks it before `accept` (ADR-0023). Mode, group, ACL and allowlist are hot: a
+`SIGHUP` applies them to the socket already bound, before the dataplane swap
+and restoring the previous policy if the swap is refused, so a rejected
+candidate neither widens the file nor the list; the endpoint and the tokens
+stay fixed at startup and a reload that changes them warns. It serves
 `GET /api/v1/status` (version, uptime, validated topology, per-server
-`ready`/`drain` state with health and in-flight count, and live counters as
-JSON), `GET /metrics` (the same counters as Prometheus text with a fixed
-series set) and one write, `PUT
-/api/v1/backends/{backend}/servers/{target}/state` (`ready` or `drain`).
+`ready`/`drain`/`maintenance` state with health, in-flight count and `drained` — the drain
+finished, ADR-0024 — and live counters as JSON), `GET /metrics` (the same
+counters as Prometheus text with a fixed series set, plus the label-free
+`eqproxy_backend_servers_draining` gauge and
+`eqproxy_backend_drains_completed_total` counter, and — only with
+`[metrics] detailed = true` — the budgeted per-server and per-route families,
+ADR-0026) and one write, `PUT
+/api/v1/backends/{backend}/servers/{target}/state` (`ready`, `drain` or
+`maintenance`).
 Writes need their own secret (`write_token`/`write_token_file`, distinct from
 the read one); without it the plane is read-only and every write is
 `403 write_disabled`. The write rejects `Origin` (no browser caller), needs
@@ -256,11 +304,58 @@ the read one); without it the plane is read-only and every write is
 `{state}` document, and emits one `AUDIT` line per attempt (role, peer,
 outcome, transition; never the secret). A drained server takes no new
 requests, finishes its in-flight exchanges, and the state survives a `SIGHUP`
-reload. Every other route is `404`, every other method `405`; bodies are
+reload. The exchange that ends a drain is logged once
+(`INFO server drained: backend=… target=… active=0`), with no timer and no
+poll: the event is written where the last in-flight guard drops. `maintenance`
+is the same removal plus closing the slot's idle material at the transition —
+the keep-alive pool and the backend HTTP/2 session leave the hub —, so nothing
+of the proxy's stays parked on a machine about to be patched; the line
+`INFO server ready for maintenance: backend=… target=… active=0` is written
+the same way, the label-free `eqproxy_backend_servers_maintenance` gauge counts
+the windows, and a maintenance window never moves
+`eqproxy_backend_drains_completed_total` ([ADR-0028](docs/adr/0028-maintenance-closes-the-idle-pool.md)).
+
+Per-server and per-route metrics ([ADR-0026](docs/adr/0026-opt-in-detail-metrics-budget.md),
+CE4) are opt-in and bounded by their own budget: `[metrics] detailed = true`
+(off by default) adds `eqproxy_server_requests_total` and
+`eqproxy_server_errors_total` (`backend`, `server` — the address that served
+the exchange) and `eqproxy_route_requests_total` (`listener`, `route` — only
+for a matched rule; traffic on the default backend has no invented label).
+`max_series` (default 128, 1..=4096) counts leaves across both families: a
+series that would exceed it is refused, the observation is counted in
+`eqproxy_metrics_detail_dropped_total`, and an existing series keeps counting,
+so the index never grows past the operator's number. Four label-free series
+describe the budget in every scrape — `eqproxy_metrics_detail_enabled`,
+`_series`, `_budget` and `_dropped_total` — so "no traffic", "detail off"
+and "budget refused it" are distinguishable. `GET /api/v1/status` carries the
+same rows under `metrics_detail`. `detailed` is hot (enabling starts an empty
+window; disabling drops it); `max_series` is fixed at startup and a reload
+that changes it warns and keeps the live budget. Detail follows
+`http_requests_proxied`: h1, h2 and h3 exchanges and gRPC streams; protocol
+switches (including WebSocket) are pending.
+
+Certificate renewal ([ADR-0025](docs/adr/0025-certificate-renewal-without-restart.md),
+D7) is one action: `POST /api/v1/certificates/reload` (write token, no
+`Origin`, no body) re-reads the configuration and its certificate files
+through the same single writer as `SIGHUP` and answers after the dataplane
+committed, with `listener`, `listen`, `fingerprint` (`sha256:<hex>` of the
+leaf actually served), `changed` and `quic` for every TLS listener. The
+material lives behind a resolver consulted on every handshake, so a renewal
+is an atomic swap: established connections are untouched, new h1/h2/h3
+handshakes get the new certificate, and no socket, port or QUIC endpoint is
+rebuilt. A candidate that fails validation (a PEM that does not parse, a key
+that does not match) answers `400`, moves `config_reload_failures`, logs the
+reason and leaves the previous certificate serving; ALPN, the mTLS client CA
+and the minimum TLS version still need a restart on a live HTTP/3 listener.
+`GET /api/v1/status` reports each listener's live `tls_fingerprint`.
+Every other route is `404`, every other method `405`; bodies are
 bounded (8 KiB head, 5 s exchange) and no secret appears in an answer or a
 log line. The plane is a separate socket and task: the dataplane keeps
 serving with it dead or unbound-by-config, and a configured plane that cannot
-bind fails startup.
+bind fails startup. On a Unix socket (ADR-0021) a live socket is never
+stolen, a stale one left by a crash is replaced, any other file at the path
+is preserved, and a clean shutdown removes only the inode this process
+created; the bearer token is still required on every route.
 
 Hot configuration (v0.8, ADR-0019) adds `PUT /api/v1/backends/{name}` and
 `PUT /api/v1/listeners/{name}`: the body is that TOML table (`application/toml`,
@@ -277,9 +372,25 @@ validation failure is `400`; neither changes the running generation. A
 listener kept by name and address keeps its socket, and established
 connections drain on the generation they were accepted with. The changes are
 runtime-only: the file remains the baseline and the next `SIGHUP` replaces
-them. `DELETE`, persistence/drift, `maintenance` (with idle-pool closure),
-durable auditing, a per-user RBAC/session model, certificate management, a
-live topology view and the panel UI remain pending.
+them. Still pending: `DELETE`, persistence/drift, a durable audit sink,
+identities beyond the read/write roles (a per-user model), a live-updating
+topology view and multi-instance drift. The panel UI
+([ADR-0029](docs/adr/0029-panel-sessions-and-csrf.md)), certificate
+management ([ADR-0025](docs/adr/0025-certificate-renewal-without-restart.md))
+and `maintenance` with its idle-pool closure
+([ADR-0028](docs/adr/0028-maintenance-closes-the-idle-pool.md)) landed in v0.8.
+
+Structured access log (v0.8, ADR-0020): an optional `[access_log]` writes one
+line per HTTP request answered by the dataplane engine — HTTP/1.1, each HTTP/2
+stream and each HTTP/3 request — to stdout or an append-only file, as JSON or
+the nginx combined shape. Each entry carries the listener, client, protocol,
+method, path without its query, host, status, duration, the chosen
+backend/server and the response byte count when it is exactly known; a head
+that never parsed is logged with `-` fields, and an exchange that ended before
+a response carries status 0. The sink is a bounded channel (4096 entries)
+drained by its own task: a full or failed sink drops lines and advances
+`access_log_dropped`, never delaying a request. Destination and format are
+fixed at startup; a `SIGHUP` that edits them warns and keeps the running sink.
 
 ## 10. Extensions (WASM)
 
@@ -346,8 +457,11 @@ the whole service), sanitizers/concurrency tools where appropriate.
      `reference-config` → lossless reference proxy parser → structured
      representation → translation → validation and generation → `eqproxy.toml`
      + conversion report).
-  3. **Server state DRAIN vs MAINT:** own explicit semantics, documented by
-     comparison with `set server ... state drain/maint`.
+  3. **Server state DRAIN vs MAINT:** own explicit semantics (`ready`,
+     `drain` and `maintenance`; the window also closes the slot's idle pool and
+     backend h2 session), documented by comparison with
+     `set server ... state drain/maint`
+     ([ADR-0028](docs/adr/0028-maintenance-closes-the-idle-pool.md)).
   4. **HTTP framing (Phase 2a):** EQProxy rejects every ambiguous message
      (CL+TE, duplicates, TE ≠ `chunked`, absolute-form, obs-fold) instead of
      normalizing it as the reference proxy may do in some cases;
@@ -370,7 +484,11 @@ the whole service), sanitizers/concurrency tools where appropriate.
      least-connections (`leastconn`; `active / effective weight`, ties
      smoothed by SWRR); slow start (B14) ramps the effective weight after
      every transition to operational; `weight = 0` means drained (never
-     picked, still health-checked).
+     picked, still health-checked); `backup = true` (B8) is a second tier,
+     consulted only while no primary is eligible, where `priority` orders the
+     rungs (higher first, one rung serving at a time) unless the backend sets
+     `all_backups = true`, which then balances the whole backup tier by weight
+     (`option allbackups`).
   7. **Health checks (Phase 2b/3):** TCP connect, or HTTP with `expect
      status|rstring`; check OK ≠ functional success (§8.8). HTTP checks
      complete at the HTTP message boundary (RFC 9112 §6, v0.6 fix), so a
@@ -499,6 +617,27 @@ the whole service), sanitizers/concurrency tools where appropriate.
       [docs/evidence/v07-http3.md](docs/evidence/v07-http3.md). WebSockets
       over h3, gRPC over h3, 0-RTT, connection migration and HTTP/3 to
       backends are out of this slice.
+
+  15. **Dynamic configuration and xDS (v0.8, ADR-0027):** EQProxy implements
+      no xDS — neither a control-plane client (CDS/EDS/LDS/RDS/SDS, SotW or
+      delta) nor an xDS server — because the equivalent is the runtime write
+      API: one TOML table per write, the same `eqproxy_config::check` and
+      resolution as startup, `If-Match` against a process-local `revision`, a
+      single writer shared with `SIGHUP`, and a fail-closed atomic swap after
+      which `200` is answered. The file remains the baseline and the next
+      `SIGHUP` replaces the runtime generation; nothing persists the applied
+      tables, and no second path with weaker checks exists (SPEC §9). This is a
+      deliberate **E2** difference, not an unimplemented feature: an Envoy
+      deployment driven exclusively by xDS is not migrated by the static
+      converter (it reads `static_resources`), and an optional xDS **client**
+      adapter that maps CDS/EDS/LDS/RDS onto the same candidate document — no
+      SDS, delta or ADS — would need its own ADR and mapping table. Test:
+      `run_admin_plane_applies_backend_config_under_traffic` (release binary,
+      backend created under live traffic, `elapsed_ms < 1000` on every apply,
+      a kept connection finishes on its accepted generation). Design in
+      [ADR-0027](docs/adr/0027-xds-bridge-decision.md); migration note in
+      [docs/migration/README.md](docs/migration/README.md).
+
 ## 14. Project state and evidence
 
 | Area | State | Evidence |
@@ -527,4 +666,5 @@ the whole service), sanitizers/concurrency tools where appropriate.
 | HTTP/2 backend multiplexing (B-H1/B-N1/B-I1/B-E2, v0.7 slice 3) | **Tested** (2026-10-22) | 3 new dataplane E2E journeys over real sockets: two in-flight exchanges that only complete when both streams are inside the origin (the second is answered on the **same** session: one accepted backend connection), a backend that hangs its session up being replaced by exactly one fresh session (the racing request gets `502` and delivers nothing), and a `tcp` listener relaying bytes unchanged although its backend negotiates `h2`. Plus the release-binary journey: 4 concurrent `curl` requests, each held 1.2 s by an independent hyper-h2 origin, all answer in 1.20–1.21 s (1.29 s wall) over **one** connection with streams 1/3/5/7, once with an h1 listener and once with an h2/TLS listener, and a kill/restart of the origin producing `200 → 502 → 200` with `opened=2 connect_failures=1`. Suite: **365 tests**, exit 0. Design in [ADR-0008](docs/adr/0008-http2-backend-multiplexing.md), evidence in [docs/evidence/v07-http2-multiplexing.md](docs/evidence/v07-http2-multiplexing.md) |
 | HTTP/2 to the backend (B-H1/B-N1/B-I1/B-E2, v0.7 slice 2) | **Tested** (2026-10-22) | 4 unit tests (h1-only headers never cross, chunked keeps no length, `CONNECT`/host-less refused, absolute-form keeps its authority) + 7 E2E over real sockets with a real h2 server over TLS: h1 client → h2 backend (backend sees HTTP/2, `:authority` from `Host`, headers/body intact), h2 client end to end, one pooled backend session serving consecutive requests, request and response trailers in both directions, `HEAD` keeping its declared length and the session usable, `CONNECT` refused without reaching the backend, and a backend that cannot negotiate h2 producing an explicit `502` with the handshake counted; plus 1 CLI E2E (`config validate` accepting `alpn = ["h2"]` on a backend) and a journey through the real release binary and real `curl` against an independent Python `h2` origin. Evidence in [docs/evidence/v07-http2-backend.md](docs/evidence/v07-http2-backend.md) |
 | HTTP/2 client termination (B-H1/B-N1/B-I1/B-E2, v0.7 slice 1) | **Tested** (2026-10-22) | 7 unit tests (origin-form translation, `:authority`→`host`, content-length vs chunked, hop-by-hop stripping, response-header filtering) + 6 E2E over real sockets with a real h2 client: h2c prior knowledge, three streams that only complete when they advance in parallel, a body without `content-length` reaching the origin as `chunked`, chunked response with trailers arriving as trailing HEADERS, truncated backend body resetting the stream, 502 on a dead backend and a rule `308` answered locally, TLS ALPN `h2`; plus 1 E2E through the real binary with real `curl` (`HTTP/2 200` over h2c and TLS, HTTP/1.1 still served on the same listener). Evidence in [docs/evidence/v07-http2.md](docs/evidence/v07-http2.md) |
+| v0.8 administration, hot configuration and observability (slices 1–11: B-H12/B-H14/B-N14/B-I14/B-I15/B-E1/B-E8, D6/D7, H2/H3/CE2/CE4, Q1/Q9/CE1/CE8(p)) | **Tested** (2026-10-25 to 2026-10-27) | An optional `[admin]` plane of its own (ADR-0017) on TCP or a Unix socket — mode/gid/peer-uid allowlist/POSIX ACL, all hot on `SIGHUP` (ADR-0021/0022/0023) —, per-server `ready`/`drain` (ADR-0018) and `maintenance`, which also closes the slot's idle h1 pool and backend h2 session (ADR-0028), hot backend/listener writes with `If-Match` and an atomic swap (ADR-0019), observable draining (ADR-0024), certificate renewal without a restart (ADR-0025), opt-in per-server/per-route metrics under an explicit budget (ADR-0026), the structured access log (ADR-0020) and the opt-in server-rendered panel with bearer sessions and CSRF (ADR-0029). Evidence: the `v08-*` pages under [docs/evidence/](docs/evidence/) (15 pages, several with journeys over the release binary), the route×role matrix in [docs/evidence/v08-endpoint-authorization.md](docs/evidence/v08-endpoint-authorization.md), and the suite: **558 tests in 30 targets, 0 failed** (`cargo test --workspace`, 2026-10-27) |
 | Non-blocking dynamic DNS (B-H13/B-N18/B-E15, CE7) | **Tested** (2026-10-19) | 8 tests: 4 balancer-slot unit + 3 resolver-loop unit (stub seam) + 2 dataplane E2E (hot re-resolution, hung DNS → immediate 503 + recovery) + 2 through the real binary with the OS resolver (broken `.invalid` name → listeners announced < 3 s + counted 503; `localhost` backend → traffic + periodic rounds in METRICS) |

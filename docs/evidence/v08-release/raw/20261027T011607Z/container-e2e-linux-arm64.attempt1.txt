@@ -1,0 +1,62 @@
+image:    eqproxy-release:0.8.0-arm64
+platform: linux/arm64
+version:  0.8.0
+run:      20261027T011607Z
+
+$ docker run --rm --platform linux/arm64 eqproxy-release:0.8.0-arm64 --version
+eqproxy 0.8.0
+PASS the image reports eqproxy 0.8.0
+$ printf <valid config> | docker run --rm -i --platform linux/arm64 eqproxy-release:0.8.0-arm64 config validate --config /dev/stdin
+config OK: 1 listener(s), 1 backend(s) in /dev/stdin
+PASS config validate accepts the document
+Error response from daemon: invalid pool request: Pool overlaps with other one on this address space
+docker: Error response from daemon: failed to set up container networking: network eqrel08-linux-arm64 not found
+
+Run 'docker run --help' for more information
+docker: Error response from daemon: failed to set up container networking: network eqrel08-linux-arm64 not found
+
+Run 'docker run --help' for more information
+docker: Error response from daemon: failed to set up container networking: network eqrel08-linux-arm64 not found
+
+Run 'docker run --help' for more information
+FAIL the proxy answers live traffic (last status '000')
+docker: Error response from daemon: failed to set up container networking: network eqrel08-linux-arm64 not found
+
+Run 'docker run --help' for more information
+FAIL the admin plane answers /api/v1/status (last status '000')
+FAIL status lists 172.24.0.10:80 ready (missing '172.24.0.10:80=ready')
+FAIL status lists 172.24.0.11:80 ready (missing '172.24.0.11:80=ready')
+status: revision= servers=unreadable
+FAIL an anonymous /panel answers the login page: expected '200', got '000'
+PASS the login page is the panel, not the API
+FAIL the panel login exchanges the token for a session: expected '303', got '000'
+FAIL the session cookie is HttpOnly (missing 'HttpOnly')
+FAIL the session cookie is SameSite=Strict (missing 'SameSite=Strict')
+FAIL the session cookie is scoped to /panel (missing 'Path=/panel')
+FAIL the write session reads the dashboard: expected '200', got '000'
+FAIL the dashboard lists the container servers (missing '172.24.0.10:80')
+FAIL the write token drains a container backend: expected '200', got '000'
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py", line 298, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+FAIL status publishes the drain of 172.24.0.10:80: expected 'drain', got ''
+FAIL the dataplane keeps serving from the remaining backend: expected '10', got '0'
+FAIL the write token returns the drained backend: expected '200', got '000'
+
+--- container log (linux/arm64) ---
+
+container E2E linux/arm64: 3 PASS, 15 FAIL
+CONTAINER E2E FAILED

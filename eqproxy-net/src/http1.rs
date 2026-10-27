@@ -38,6 +38,7 @@ use tokio::io::{
 
 use eqproxy_core::Metrics;
 
+use crate::balancer::ServerMode;
 use crate::compression;
 
 use crate::mirror;
@@ -1559,6 +1560,44 @@ fn append_response_headers(head: &[u8], lines: &[String]) -> Vec<u8> {
     join_head_lines(&split, head.len() + lines.len() * 32)
 }
 
+/// First value of a lower-cased request header, for the access log only.
+fn access_header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(header, _)| header == name)
+        .map(|(_, value)| value.as_str())
+}
+
+/// Request target without its query string (ADR-0020: tokens in a query are
+/// never copied to a log that leaves the host).
+fn access_path(target: &str) -> &str {
+    target.split('?').next().unwrap_or(target)
+}
+
+/// Logs a request that never parsed (408/431/4xx): method and path are `-`.
+fn log_unparsed(
+    cfg: &ResolvedListener,
+    peer: SocketAddr,
+    protocol: crate::access::ClientProtocol,
+    status: u16,
+) {
+    let Some(log) = cfg.access.as_ref() else {
+        return;
+    };
+    let mut record = crate::access::AccessRecord::new(
+        Arc::clone(log),
+        &cfg.name,
+        peer,
+        protocol,
+        "-",
+        "-",
+        "-",
+        None,
+        None,
+    );
+    record.status(status);
+}
+
 /// Serves a full HTTP/1.1 client connection (keep-alive included).
 ///
 /// Takes the client stream halves (plain TCP or already-accepted TLS) and the
@@ -1573,6 +1612,7 @@ pub async fn serve_http<CR, CW>(
     local: SocketAddr,
     cfg: &ResolvedListener,
     metrics: Arc<Metrics>,
+    protocol: crate::access::ClientProtocol,
 ) where
     CR: AsyncRead + Unpin,
     CW: AsyncWrite + Unpin,
@@ -1612,6 +1652,7 @@ pub async fn serve_http<CR, CW>(
             Err(HeadError::Timeout) => {
                 if first_exchange {
                     metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
+                    log_unparsed(cfg, peer, protocol, 408);
                     write_error(&mut client_write, 408, "request timeout").await;
                 } else {
                     // An idle keep-alive close is normal traffic: counted as
@@ -1624,6 +1665,7 @@ pub async fn serve_http<CR, CW>(
                 metrics
                     .http_requests_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                log_unparsed(cfg, peer, protocol, 431);
                 write_error(&mut client_write, 431, "request header fields too large").await;
                 return;
             }
@@ -1642,10 +1684,28 @@ pub async fn serve_http<CR, CW>(
                 metrics
                     .http_requests_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                log_unparsed(cfg, peer, protocol, reject.status);
                 write_error(&mut client_write, reject.status, reject.reason).await;
                 return;
             }
         };
+
+        // Access log (ADR-0020): one record per parsed request. Every terminal
+        // path below sets what it knows; dropping the record stamps the
+        // duration and sends the entry, so `return` and `continue` both log.
+        let mut access = cfg.access.as_ref().map(|log| {
+            crate::access::AccessRecord::new(
+                Arc::clone(log),
+                &cfg.name,
+                peer,
+                protocol,
+                &request.method,
+                access_path(&request.target),
+                &request.host,
+                access_header(&request.headers, "referer"),
+                access_header(&request.headers, "user-agent"),
+            )
+        });
 
         // --- Route the request (B-H3/B-H4): first matching rule wins,
         // the listener's default backend is the fallback. Selection runs
@@ -1665,7 +1725,9 @@ pub async fn serve_http<CR, CW>(
             peer: peer.ip(),
             maps: cfg.maps.as_ref(),
         };
-        let decision = cfg.decide(&facts);
+        // The rule name is kept so the exchange can be attributed to it when
+        // the opt-in detail registry is on (CE4).
+        let (decision, route_name) = cfg.decide_routed(&facts);
         // Rate limit (B-N8/B-I7/B-E16): a token bucket per client IP and
         // rule, in-memory (no network in the hot path, Q6). Over the
         // limit the request is rejected explicitly (429 + counter) and
@@ -1674,6 +1736,9 @@ pub async fn serve_http<CR, CW>(
             && !limiter.try_acquire(peer.ip())
         {
             metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+            if let Some(record) = access.as_mut() {
+                record.status(429);
+            }
             write_error(&mut client_write, 429, "too many requests").await;
             return;
         }
@@ -1694,11 +1759,19 @@ pub async fn serve_http<CR, CW>(
                 crate::auth::AuthOutcome::Allow => {}
                 crate::auth::AuthOutcome::Deny(deny) => {
                     metrics.auth_denied.fetch_add(1, Ordering::Relaxed);
+                    if let Some(record) = access.as_mut() {
+                        record.status(deny.status);
+                        record.bytes(u64::try_from(deny.body.len()).unwrap_or(u64::MAX));
+                    }
                     write_deny(&mut client_write, &deny).await;
                     return;
                 }
                 crate::auth::AuthOutcome::Error(deny) => {
                     metrics.auth_service_errors.fetch_add(1, Ordering::Relaxed);
+                    if let Some(record) = access.as_mut() {
+                        record.status(deny.status);
+                        record.bytes(u64::try_from(deny.body.len()).unwrap_or(u64::MAX));
+                    }
                     write_deny(&mut client_write, &deny).await;
                     return;
                 }
@@ -1754,6 +1827,10 @@ pub async fn serve_http<CR, CW>(
                 if let Some(cors) = headers.and_then(|actions| actions.cors.as_ref()) {
                     extra_headers.extend(cors_response_lines(cors, false));
                 }
+                if let Some(record) = access.as_mut() {
+                    record.status(status);
+                    record.bytes(0);
+                }
                 write_rule_response(
                     &mut client_write,
                     status,
@@ -1798,6 +1875,10 @@ pub async fn serve_http<CR, CW>(
                     .unwrap_or_default();
                 if let Some(cors) = headers.and_then(|actions| actions.cors.as_ref()) {
                     extra_headers.extend(cors_response_lines(cors, false));
+                }
+                if let Some(record) = access.as_mut() {
+                    record.status(status);
+                    record.bytes(u64::try_from(body.len()).unwrap_or(u64::MAX));
                 }
                 write_rule_response(
                     &mut client_write,
@@ -1852,6 +1933,10 @@ pub async fn serve_http<CR, CW>(
                     })
                     .unwrap_or_default(),
             );
+            if let Some(record) = access.as_mut() {
+                record.status(204);
+                record.bytes(0);
+            }
             write_rule_response(
                 &mut client_write,
                 204,
@@ -1891,9 +1976,12 @@ pub async fn serve_http<CR, CW>(
                 .then(|| cookie_value(&request.headers, &affinity.cookie))
                 .flatten()
         });
-        // `_active` (B-H5 leastconn) holds the in-flight slot from the
-        // pick to the end of this exchange (released on drop).
-        let (conn, _active) = match checkout_or_connect(
+        // `active` (B-H5 leastconn) holds the in-flight slot from the pick
+        // to the end of this exchange (released on drop). Its mode tells the
+        // completion path whether the slot may still pool a connection
+        // (ADR-0028: after a `maintenance` declaration the pool must hold
+        // nothing for the server).
+        let (conn, active) = match checkout_or_connect(
             cfg,
             backend,
             peer,
@@ -1907,20 +1995,40 @@ pub async fn serve_http<CR, CW>(
             Ok(picked) => picked,
             Err(OutboundError::NoServer) => {
                 // All servers down/drained (B11): explicit 503 (C9 custom).
+                if let Some(record) = access.as_mut() {
+                    record.status(
+                        cfg.local_response
+                            .as_ref()
+                            .map_or(503, |local| local.status),
+                    );
+                }
                 write_no_server(&mut client_write, cfg, &metrics, 503, "service unavailable").await;
                 return;
             }
             Err(OutboundError::QueueFull) | Err(OutboundError::QueueTimeout) => {
                 // B-H7: bounded queue rejected explicitly (never silent).
+                if let Some(record) = access.as_mut() {
+                    record.status(
+                        cfg.local_response
+                            .as_ref()
+                            .map_or(503, |local| local.status),
+                    );
+                }
                 write_no_server(&mut client_write, cfg, &metrics, 503, "service unavailable").await;
                 return;
             }
             Err(OutboundError::Connect) => {
+                if let Some(record) = access.as_mut() {
+                    record.status(502);
+                }
                 write_error(&mut client_write, 502, "bad gateway").await;
                 return;
             }
         };
         let served_addr = conn.addr;
+        if let Some(record) = access.as_mut() {
+            record.backend(&backend.name, served_addr);
+        }
         // An HTTP/2 exchange owns one stream: its pipe is single-use and is
         // dropped here, never checked back in (the h2 session is shared
         // underneath instead).
@@ -1949,6 +2057,9 @@ pub async fn serve_http<CR, CW>(
                 .await
                 .is_err()
         {
+            if let Some(record) = access.as_mut() {
+                record.status(502);
+            }
             write_error(&mut client_write, 502, "bad gateway").await;
             return;
         }
@@ -2037,6 +2148,9 @@ pub async fn serve_http<CR, CW>(
             // max_stream_duration fired mid-request: the forwarded
             // exchange is over (504 + close, never a silent hang).
             Err(()) => {
+                if let Some(record) = access.as_mut() {
+                    record.status(504);
+                }
                 write_error(&mut client_write, 504, "gateway timeout").await;
                 return;
             }
@@ -2047,6 +2161,9 @@ pub async fn serve_http<CR, CW>(
                 metrics
                     .http_requests_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(record) = access.as_mut() {
+                    record.status(reject.status);
+                }
                 write_error(&mut client_write, reject.status, reject.reason).await;
                 return;
             }
@@ -2054,6 +2171,9 @@ pub async fn serve_http<CR, CW>(
                 metrics
                     .http_requests_rejected
                     .fetch_add(1, Ordering::Relaxed);
+                if let Some(record) = access.as_mut() {
+                    record.status(400);
+                }
                 write_error(&mut client_write, 400, "truncated request body").await;
                 return;
             }
@@ -2111,10 +2231,16 @@ pub async fn serve_http<CR, CW>(
                 Ok(pair) => pair,
                 Err(HeadError::Timeout) => {
                     metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
+                    if let Some(record) = access.as_mut() {
+                        record.status(504);
+                    }
                     write_error(&mut client_write, 504, "gateway timeout").await;
                     return;
                 }
                 Err(_) => {
+                    if let Some(record) = access.as_mut() {
+                        record.status(502);
+                    }
                     write_error(&mut client_write, 502, "bad gateway").await;
                     return;
                 }
@@ -2132,6 +2258,9 @@ pub async fn serve_http<CR, CW>(
                         "WARN [{}] invalid response head from {} (peer {peer}): {} — refusing with {}",
                         cfg.name, conn.addr, reject.reason, reject.status
                     );
+                    if let Some(record) = access.as_mut() {
+                        record.status(reject.status);
+                    }
                     write_error(&mut client_write, reject.status, reject.reason).await;
                     return;
                 }
@@ -2149,6 +2278,9 @@ pub async fn serve_http<CR, CW>(
                     "WARN [{}] backend {} offered a protocol switch (101); refused (peer {peer})",
                     cfg.name, conn.addr
                 );
+                if let Some(record) = access.as_mut() {
+                    record.status(502);
+                }
                 write_error(&mut client_write, 502, "bad gateway").await;
                 return;
             }
@@ -2158,6 +2290,9 @@ pub async fn serve_http<CR, CW>(
                     "WARN [{}] backend {} sent more than {MAX_INTERIM_RESPONSES} interim responses; refused (peer {peer})",
                     cfg.name, conn.addr
                 );
+                if let Some(record) = access.as_mut() {
+                    record.status(502);
+                }
                 write_error(&mut client_write, 502, "bad gateway").await;
                 return;
             }
@@ -2176,6 +2311,10 @@ pub async fn serve_http<CR, CW>(
                 return;
             }
         };
+
+        if let Some(record) = access.as_mut() {
+            record.status(response.status);
+        }
 
         // A7/A8 upgrade tunnel: the client asked (Upgrade or CONNECT) and
         // the backend accepted (101 / 2xx). The switch head is forwarded
@@ -2278,6 +2417,19 @@ pub async fn serve_http<CR, CW>(
                     .fetch_add(1, Ordering::Relaxed),
             };
         }
+        if let Some(record) = access.as_mut() {
+            // Only an uncompressed, declared length is the client's byte
+            // count; chunked, until-EOF and compressed bodies are unknown and
+            // stay absent rather than lying.
+            let bytes = match (encoding, response.framing) {
+                (None, BodyFraming::None) => Some(0),
+                (None, BodyFraming::ContentLength(len)) => Some(len),
+                _ => None,
+            };
+            if let Some(bytes) = bytes {
+                record.bytes(bytes);
+            }
+        }
         let mut from_backend = Prefixed {
             prefix: carry,
             pos: 0,
@@ -2346,6 +2498,9 @@ pub async fn serve_http<CR, CW>(
             // (504 before the head; a truncated stream after it).
             Err(()) => {
                 if !head_forwarded {
+                    if let Some(record) = access.as_mut() {
+                        record.status(504);
+                    }
                     write_error(&mut client_write, 504, "gateway timeout").await;
                 }
                 return;
@@ -2355,6 +2510,9 @@ pub async fn serve_http<CR, CW>(
             Ok(()) => {}
             // Before the response head a clean 502/500 still fits.
             Err(CopyError::Framing(reject)) if !head_forwarded => {
+                if let Some(record) = access.as_mut() {
+                    record.status(reject.status);
+                }
                 write_error(&mut client_write, reject.status, reject.reason).await;
                 return;
             }
@@ -2364,6 +2522,18 @@ pub async fn serve_http<CR, CW>(
         metrics
             .http_requests_proxied
             .fetch_add(1, Ordering::Relaxed);
+        // Opt-in detail (CE4): the exchange is attributed to the server that
+        // served it and to the rule that matched (if any). Disabled, this is
+        // one relaxed load and no allocation.
+        if metrics.detail.enabled() {
+            let failed = response.status >= 500;
+            metrics
+                .detail
+                .record_server(&backend.name, &served_addr.to_string(), failed);
+            if let Some(route) = route_name {
+                metrics.detail.record_route(&cfg.name, route, failed);
+            }
+        }
         // Passive detection (B-N10): with `passive = true`, real-traffic
         // verdicts feed the fall/rise machine — 5xx = failure (the
         // "500 → DOWN" acceptance criterion), anything else = success.
@@ -2386,11 +2556,15 @@ pub async fn serve_http<CR, CW>(
         // keep-alive in HTTP/1.0). The client's hop-by-hop header reaches
         // the backend verbatim, so the backend will close too: pooling it
         // would hand the next exchange a dead connection.
+        // ... and never pool a connection to a server taken out for a patch
+        // window (ADR-0028): the exchange that ends there would otherwise
+        // re-park it after the maintenance declaration closed the pool.
         if poolable
             && !request.wants_close
             && !response.wants_close
             && clean_boundary
             && backend_alive
+            && active.mode() != ServerMode::Maintenance
         {
             // Clean exchange and server on keep-alive: the connection returns
             // to the pool message-aligned (A16). Every error path

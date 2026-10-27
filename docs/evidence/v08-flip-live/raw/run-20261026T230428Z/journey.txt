@@ -1,0 +1,39 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+version: eqproxy 0.7.0
+sha256: c532bd1ca34d9dfc1705a23321c9f99a3a646e639a56867ed5e36a62cb8cb328  /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+dataplane 127.0.0.1:59444 · admin 127.0.0.1:59445
+servers {'a': '127.0.0.1:59441', 'h': '127.0.0.1:59442', 'l': '127.0.0.1:59443'}
+
+phase 1: the running document has one primary, no pool
+PASS the primary owns the tier: ['a', 'a', 'a', 'a', 'a', 'a']
+PASS the live document reports one server and no pool: {'all_backups': False, 'servers': [{'addr': '127.0.0.1:59441', 'resolved': '127.0.0.1:59441', 'weight': 1, 'backup': False, 'priority': 0, 'state': 'ready', 'healthy': True, 'active': 0, 'drained': False}]}
+PASS the starting revision is read: v1
+
+phase 2: the whole pool document is written under load
+PASS the commit is accepted: (200, '{"certificates":[],"elapsed_ms":0,"listeners":[{"listen":"127.0.0.1:59444","name":"web"}],"revision":"v2","summary":"listeners kept=1 added=0 removed=0"}')
+PASS the commit is one revision: v2
+PASS the commit is measured under a second: 0
+PASS no client request failed across the flip: {'failed': 0, 'ok': 758}
+PASS clients kept being served: {'ok': 758, 'labels': {'a': 758}}
+PASS the live document is the pool now: {'all_backups': True, 'servers': [{'addr': '127.0.0.1:59441', 'resolved': '127.0.0.1:59441', 'weight': 1, 'backup': False, 'priority': 0, 'state': 'ready', 'healthy': True, 'active': 1, 'drained': False}, {'addr': '127.0.0.1:59442', 'resolved': '127.0.0.1:59442', 'weight': 2, 'backup': True, 'priority': 0, 'state': 'ready', 'healthy': True, 'active': 0, 'drained': False}, {'addr': '127.0.0.1:59443', 'resolved': '127.0.0.1:59443', 'weight': 1, 'backup': True, 'priority': 0, 'state': 'ready', 'healthy': True, 'active': 0, 'drained': False}]}
+
+phase 3: the primary fails and the fresh pool takes over
+PASS the pool serves: (200, 'l')
+PASS the pool splits 2:1 by weight: {'h': 20, 'l': 10}
+
+phase 4: a contradicting candidate changes nothing
+PASS the contradiction is refused: (400, '{"error":"invalid_config","message":"configuration error in /Volumes/Lexar/Cursor/EQProxy/docs/evidence/v08-flip-live/raw/run-20261026T230428Z/eqproxy.toml — field `backend.api.servers[1].priority`: all_backups = true balances every backup at once: no failover ladder is left for `priority` to order\\n  example: drop `priority` (keep it only when one backup serves at a time)"}')
+PASS the refusal is the validator's: {"error":"invalid_config","message":"configuration error in /Volumes/Lexar/Cursor/EQProxy/docs/evidence/v08-flip-live/raw/run-20261026T230428Z/eqproxy.toml — field `backend.api.servers[1].priority`: all_backups = true balances every backup at once: no failover ladder is left for `priority` to order\n  example: drop `priority` (keep it only when one backup serves at a time)"}
+PASS the revision did not advance: v2
+PASS the running pool still serves: (200, 'h')
+
+phase 5: the single-primary document retires the pool
+PASS the retirement is accepted: (200, '{"certificates":[],"elapsed_ms":0,"listeners":[{"listen":"127.0.0.1:59444","name":"web"}],"revision":"v3","summary":"listeners kept=1 added=0 removed=0"}')
+PASS it is the next revision: v3
+PASS the primary owns the tier again: (200, 'a')
+PASS every request goes to the primary: ['a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a', 'a']
+PASS the retired members see no more traffic: {'served': 103, 'before': 103}
+PASS the clients never failed across any flip: {'failed': 0, 'ok': 984}
+PASS the load really ran: {'ok': 984, 'labels': {'a': 915, 'h': 47, 'l': 22}}
+
+ALL PASS

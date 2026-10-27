@@ -1,0 +1,88 @@
+image:    eqproxy-release:0.8.0-amd64
+platform: linux/amd64
+version:  0.8.0
+run:      20261027T011435Z
+
+$ docker run --rm --platform linux/amd64 eqproxy-release:0.8.0-amd64 --version
+eqproxy 0.8.0
+PASS the image reports eqproxy 0.8.0
+$ printf <valid config> | docker run --rm -i --platform linux/amd64 eqproxy-release:0.8.0-amd64 config validate --config /dev/stdin
+config OK: 1 listener(s), 1 backend(s) in /dev/stdin
+PASS config validate accepts the document
+Unable to find image 'nginx:alpine' locally
+alpine: Pulling from library/nginx
+cbe54b031f3e: Pulling fs layer
+d3531b7a4f21: Pulling fs layer
+567a969e0221: Pulling fs layer
+1408044c7403: Pulling fs layer
+c2fefbef5314: Pulling fs layer
+f523b340a6c0: Pulling fs layer
+7b9d02243238: Pulling fs layer
+dbb1ef19121a: Pulling fs layer
+2d759c5f2f47: Download complete
+dbb1ef19121a: Download complete
+db5a6d6bb46f: Download complete
+567a969e0221: Download complete
+7b9d02243238: Download complete
+f523b340a6c0: Download complete
+c2fefbef5314: Download complete
+1408044c7403: Download complete
+d3531b7a4f21: Download complete
+d3531b7a4f21: Pull complete
+1408044c7403: Pull complete
+7b9d02243238: Pull complete
+f523b340a6c0: Pull complete
+dbb1ef19121a: Pull complete
+567a969e0221: Pull complete
+c2fefbef5314: Pull complete
+cbe54b031f3e: Download complete
+cbe54b031f3e: Pull complete
+Digest: sha256:a3554c0d0b48177b1413c26e01f695334428020d9df01243fbae3e11cfd17417
+Status: Downloaded newer image for nginx:alpine
+WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+PASS the proxy answers live traffic over HTTP: 200
+PASS the backend nginx page came through the proxy
+PASS the exchange really reached an HTTP backend
+WARNING: The requested image's platform (linux/amd64) does not match the detected host platform (linux/arm64/v8) and no specific platform was requested
+FAIL the admin plane answers /api/v1/status (last status '000')
+warning: admin.allow_remote = true: the admin plane listens beyond loopback and this slice has no TLS; the bearer token travels in the clear
+warning: listener "web" listens on 0.0.0.0:18082 without TLS: expose it only on trusted networks or enable [listener.web.tls]
+error: admin.token is 14 bytes; use at least 16
+FAIL status lists 172.23.0.10:80 ready (missing '172.23.0.10:80=ready')
+FAIL status lists 172.23.0.11:80 ready (missing '172.23.0.11:80=ready')
+status: revision= servers=unreadable
+FAIL an anonymous /panel answers the login page: expected '200', got '000'
+cat: /tmp/eqrel08-anon.html: No such file or directory
+FAIL the login page is the panel, not the API (missing 'Sign in')
+FAIL the panel login exchanges the token for a session: expected '303', got '000'
+FAIL the session cookie is HttpOnly (missing 'HttpOnly')
+FAIL the session cookie is SameSite=Strict (missing 'SameSite=Strict')
+FAIL the session cookie is scoped to /panel (missing 'Path=/panel')
+FAIL the write session reads the dashboard: expected '200', got '000'
+cat: /tmp/eqrel08-dash.html: No such file or directory
+FAIL the dashboard lists the container servers (missing '172.23.0.10:80')
+FAIL the write token drains a container backend: expected '200', got '000'
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py", line 298, in load
+    return loads(fp.read(),
+        cls=cls, object_hook=object_hook,
+        parse_float=parse_float, parse_int=parse_int,
+        parse_constant=parse_constant, object_pairs_hook=object_pairs_hook, **kw)
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/__init__.py", line 352, in loads
+    return _default_decoder.decode(s)
+           ~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py", line 345, in decode
+    obj, end = self.raw_decode(s, idx=_w(s, 0).end())
+               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.13/3.13.13_1/Frameworks/Python.framework/Versions/3.13/lib/python3.13/json/decoder.py", line 363, in raw_decode
+    raise JSONDecodeError("Expecting value", s, err.value) from None
+json.decoder.JSONDecodeError: Expecting value: line 1 column 1 (char 0)
+FAIL status publishes the drain of 172.23.0.10:80: expected 'drain', got ''
+FAIL the dataplane keeps serving from the remaining backend: expected '10', got '0'
+FAIL the write token returns the drained backend: expected '200', got '000'
+
+--- container log (linux/amd64) ---
+
+container E2E linux/amd64: 5 PASS, 15 FAIL
+CONTAINER E2E FAILED

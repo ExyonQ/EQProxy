@@ -1,0 +1,23 @@
+schema_version = 1
+shutdown_grace = "2s"
+
+[admin]
+listen = "127.0.0.1:18182"
+token = "0123456789abcdef"
+
+[access_log]
+format = "json"
+path = "/Volumes/Lexar/Cursor/EQProxy/docs/evidence/v08-access-log/raw/access.jsonl"
+
+[listener.web]
+listen = "127.0.0.1:18181"
+backend = "api"
+mode = "http"
+maxconn = 128
+connect_timeout = "2s"
+idle_timeout = "10s"
+client_header_timeout = "2s"
+server_header_timeout = "5s"
+
+[backend.api]
+server = "127.0.0.1:18180"

@@ -1,0 +1,36 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+version: eqproxy 0.7.0
+sha256: 4f15f531f4fbb13f1800151f4f124a79bfa38f5703f2393d6d7cc7b807a45adb  /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+[roundrobin] dataplane 127.0.0.1:54491 · admin 127.0.0.1:54492
+
+[roundrobin] phase 1: primary healthy, pool cold
+PASS the primary owns the tier: {'primary': 40}
+PASS config explain names the pool policy: ['simulation: true (no requests issued, no state changed)']
+PASS read plane answers status: 200
+PASS status publishes the live pool policy and the weights: {'all_backups': True, 'slots': {'127.0.0.1:54488': (1, False, 0), '127.0.0.1:54489': (2, True, 0), '127.0.0.1:54490': (1, True, 0)}}
+
+[roundrobin] phase 2: the primary dies, the whole pool serves
+PASS the pool takes over: {'backup-low': 1}
+PASS the pool splits the load 2:1 by weight: {'backup-high': 20, 'backup-low': 10}
+
+[roundrobin] phase 3: one pool member dies
+PASS the survivor takes the whole tier: {'backup-low': 1}
+PASS the dead member leaves rotation: {'backup-low': 20}
+
+[roundrobin] phase 4: the member recovers
+PASS the recovered member rejoins the pool: {'backup-low': 1}
+PASS the pool balances again with the recovered member's share: {'backup-high': 14, 'backup-low': 7}
+
+[roundrobin] phase 5: the primary recovers
+PASS the primary outranks the whole pool: {'primary': 1}
+PASS the pool is cold again: {'primary': 30}
+
+[roundrobin] phase 6: everything dies
+PASS all-down answers an explicit 503: (503, '')
+
+leastconn leg: the same pool under the other algorithm
+[leastconn] dataplane 127.0.0.1:54900 · admin 127.0.0.1:54901
+PASS [leastconn] the pool serves once the primary is gone: {'backup-low': 1}
+PASS [leastconn] the pool splits the load 2:1 by weight: {'backup-high': 20, 'backup-low': 10}
+
+ALL PASS

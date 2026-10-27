@@ -4,6 +4,17 @@
   "description": "Full EQProxy configuration.",
   "type": "object",
   "properties": {
+    "access_log": {
+      "description": "Structured access log (v0.8, ADR-0020). Absent = off.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AccessLogConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "admin": {
       "description": "Administration plane (v0.8): read-only API and metrics. Absent = off.",
       "anyOf": [
@@ -37,7 +48,7 @@
       }
     },
     "metrics": {
-      "description": "Metrics options (D1/D5): detailed counters are opt-in (CE4).",
+      "description": "Metrics options (D1/D5): per-server and per-route counters are\nopt-in and bounded by their own series budget (CE4).",
       "$ref": "#/$defs/MetricsConfig"
     },
     "schema_version": {
@@ -57,18 +68,61 @@
     "schema_version"
   ],
   "$defs": {
+    "AccessLogConfig": {
+      "description": "Structured access log (v0.8, ADR-0020): one line per request, off by\ndefault. The sink is opened once at startup; changing it needs a restart.",
+      "type": "object",
+      "properties": {
+        "format": {
+          "description": "Line format (default `json`).",
+          "$ref": "#/$defs/AccessLogFormat"
+        },
+        "path": {
+          "description": "Destination file, opened in append mode. Absent = stdout.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "AccessLogFormat": {
+      "description": "Line format of the access log (ADR-0020).",
+      "oneOf": [
+        {
+          "description": "One JSON object per request (stable field names).",
+          "type": "string",
+          "const": "json"
+        },
+        {
+          "description": "nginx combined shape, UTC timestamps.",
+          "type": "string",
+          "const": "combined"
+        }
+      ]
+    },
     "AdminConfig": {
-      "description": "Administration plane (v0.8, D6): read-only API and metrics on its own\nlistener, never on the proxy's public address (SPEC §9). Absent = off.",
+      "description": "Administration plane (v0.8, D6): the status/metrics API, the write routes\nand the optional web panel on their own listener, never on the proxy's\npublic address (SPEC §9). Absent = off.",
       "type": "object",
       "properties": {
         "allow_remote": {
-          "description": "Allow binding a non-loopback address (default false): the admin\nplane has no TLS in this slice, so a remote bind sends the bearer\ntoken in the clear.",
+          "description": "Allow binding a non-loopback TCP address (default false): the admin\nplane has no TLS in this slice, so a remote bind sends the bearer\ntoken in the clear. Meaningless with `unix_socket` (rejected).",
           "type": "boolean",
           "default": false
         },
         "listen": {
-          "description": "Listen `IP:PORT` for the admin plane. Loopback unless `allow_remote`.",
-          "type": "string"
+          "description": "Listen `IP:PORT` for the admin plane. Loopback unless `allow_remote`.\nExactly one of `listen` and `unix_socket` is required.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "panel": {
+          "description": "Serve the web panel (`GET /panel`, ADR-0029) on this plane. Off by\ndefault; with it off every `/panel` path is a `404`. The panel is a\nclient of the routes below: it opens a session with the read token\n(read-only panel) or the write token (full panel) and needs no other\nsecret.",
+          "type": "boolean",
+          "default": false
         },
         "token": {
           "description": "Bearer token required on every request. Prefer [`token_file`](Self::token_file):\na token in the TOML travels wherever the file is copied.",
@@ -80,6 +134,52 @@
         },
         "token_file": {
           "description": "File holding the bearer token (one trailing newline trimmed).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "unix_socket": {
+          "description": "Unix domain socket path (ADR-0021). The socket is created with mode\n`0600`, so the filesystem is the access boundary in front of the\nbearer token. Exactly one of `listen` and `unix_socket` is required.\nA relative path is resolved against the configuration file.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "unix_socket_acl_uids": {
+          "description": "Named users granted `rw` on the socket file through its POSIX access\nACL (ADR-0023), **in addition to** the owning group; the kernel checks\nit at `connect`, before this process sees the peer. Linux only (the\nentries live in `system.posix_acl_access`), and only with\n`unix_socket_mode = \"0660\"` plus `unix_socket_gid`, because the mode's\ngroup class is the ACL mask. Empty = no ACL is installed. At most 64\nentries.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "unix_socket_allow_uids": {
+          "description": "Peer uids allowed to use the socket (ADR-0022), checked against the\nkernel's `SO_PEERCRED`/`getpeereid` answer before any HTTP byte is\nread. Empty = any uid the filesystem lets connect. A peer whose uid\nis unavailable is refused when the list is not empty. The bearer\ntoken is still required afterwards.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0
+          }
+        },
+        "unix_socket_gid": {
+          "description": "Numeric gid that owns the socket, required with mode `0660` and\nrefused with `0600`. Group *names* are not resolved: that needs NSS,\nwhich this crate does not call (`unsafe_code = forbid`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "unix_socket_mode": {
+          "description": "Socket mode: `\"0600\"` (default, owner only) or `\"0660\"` (owner and\ngroup; ADR-0022). No other mode is accepted.",
           "type": [
             "string",
             "null"
@@ -103,10 +203,7 @@
           "default": null
         }
       },
-      "additionalProperties": false,
-      "required": [
-        "listen"
-      ]
+      "additionalProperties": false
     },
     "AffinityConfig": {
       "description": "Session affinity of a backend (B-H8/B-N13/B-I8).",
@@ -193,6 +290,11 @@
               "type": "null"
             }
           ]
+        },
+        "all_backups": {
+          "description": "Balance across **all** backups instead of one rung at a time\n(`option allbackups`, B8): when no primary server is eligible, every\noperational backup is a candidate and the configured algorithm\nspreads load across them by weight. `false` (the reference default)\nkeeps one backup at a time, ordered by `priority`. The reference\nstates that with this option there is no priority order among the\nbackups, so combining it with `priority` is refused in\n[`crate::check`] instead of silently ignoring the ladder.",
+          "type": "boolean",
+          "default": false
         },
         "balance": {
           "description": "Balancing algorithm (Phase 2b: `\"roundrobin\"`).",
@@ -857,13 +959,20 @@
       "additionalProperties": false
     },
     "MetricsConfig": {
-      "description": "Metrics options (D1): cardinality stays bounded; detailed per-server\ncounters are opt-in (CE4).",
+      "description": "Metrics options (D1): cardinality stays bounded; detailed per-server and\nper-route counters are opt-in (CE4).",
       "type": "object",
       "properties": {
         "detailed": {
-          "description": "Per-server counters (bounded by [`MAX_SECTIONS`]).",
+          "description": "Per-server and per-route counters: off by default.",
           "type": "boolean",
           "default": false
+        },
+        "max_series": {
+          "description": "Hard ceiling of the labelled export (per server + per route), 1 to\n[`MAX_METRICS_SERIES`]. A series that does not fit is refused and\ncounted in `eqproxy_metrics_detail_dropped_total`.",
+          "type": "integer",
+          "format": "uint",
+          "default": 128,
+          "minimum": 0
         }
       },
       "additionalProperties": false
@@ -1214,12 +1323,25 @@
       "additionalProperties": false
     },
     "ServerConfig": {
-      "description": "One backend server with its weight (B7).",
+      "description": "One backend server with its weight and its rotation class (B7/B8).",
       "type": "object",
       "properties": {
         "addr": {
           "description": "Server `IP:PORT` or `HOSTNAME:PORT` address (B-H13/B-N18/B-E15:\nhostnames are resolved in the background, never on the request\npath; listeners serve from the first moment whatever DNS does).",
           "type": "string"
+        },
+        "backup": {
+          "description": "Backup server (B8): never selected while any primary server is\neligible, and used when none is. It keeps being health-checked while\nunused, so the first request after a primary fails does not have to\nwait for a probe to discover it is alive.",
+          "type": "boolean",
+          "default": false
+        },
+        "priority": {
+          "description": "Failover order among backup servers (EQProxy extension, 0..=255):\nhigher first, ties follow configuration order. Only the first\noperational rung serves at a time, so a recovered higher rung takes\nthe traffic back. Rejected unless `backup = true`, and ignored by the\nreference, which has no such keyword (HAProxy 3.4 `server`).",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "maximum": 255,
+          "minimum": 0
         },
         "weight": {
           "description": "Balancing weight (0 = drained: never selected, still health-checked).",

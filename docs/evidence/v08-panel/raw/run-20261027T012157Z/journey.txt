@@ -1,0 +1,49 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+version: eqproxy 0.8.0
+sha256: d337f474b7942587964d2b29e7048d5030c7f5bb72e1895e4efe2500894465e1  /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+raw run: /Volumes/Lexar/Cursor/EQProxy/docs/evidence/v08-panel/raw/run-20261027T012157Z
+dataplane 127.0.0.1:56313 · admin 127.0.0.1:56314 · origins a=56311 b=56312
+PASS an anonymous GET /panel answers the login page: 200
+PASS the login form is the page's action: 
+PASS the page carries the no-script policy and is not cached: {'csp': "default-src 'none'; style-src 'self'; fo", 'cc': 'no-store'}
+PASS the dashboard is not served anonymously: 
+PASS no secret appears on the login page: 
+PASS an unknown /panel path is 404: 404
+PASS a wrong token is refused with 401: 401
+PASS the page names the refusal: 
+PASS a foreign Origin on login is 403: 403
+PASS the read token opens a session: 303
+PASS the session cookie is HttpOnly, SameSite=Strict and scoped to /panel: eqproxy_session=3cad5b2917b25d98af1be162b0c496d2c7cebfa48893661860f054
+PASS login never echoes the token: 
+PASS the read session reads the dashboard: 200
+PASS the page marks the session read-only: 
+PASS the read session is offered no write surface: 
+PASS a write from the read session is refused: 403
+PASS the write token opens a session: 303
+PASS the write session renders the dashboard: 200
+PASS the page offers the three states, the editors and the certificate reload: 
+PASS the page carries a CSRF token and the live revision: v1
+PASS no secret appears on the dashboard: 
+PASS a form with a wrong CSRF token is 403 csrf_required: 403
+PASS a cross-site form POST is 403: 403
+PASS a form without a session is sent back to the login page: 303
+PASS before the write the origin is the only server: a
+PASS the panel applies the table with a 303: 303
+PASS the browser is sent back to the page with the outcome: /panel?applied=1
+PASS the running revision moved and lists both servers: {'revision': 'v2', 'slots': ['127.0.0.1:56311', '127.0.0.1:56312']}
+PASS the dataplane really serves the new server: ['a', 'b']
+PASS the original server still serves: {'a': 4, 'b': 2}
+PASS the panel drains the server with a 303: 303
+PASS the redirect names the applied state: /panel?applied=drain
+PASS status publishes the drain: [('127.0.0.1:56311', 'ready'), ('127.0.0.1:56312', 'drain')]
+PASS the drained server takes no new request: {'answers': ['a'], 'served_b': 2, 'before': 2}
+PASS the panel returns the server with a 303: 303
+PASS the server rejoins rotation: ['a', 'b']
+PASS the certificate form is applied with a 303: 303
+PASS the certificate reload reports success on the page: /panel?applied=1
+PASS every panel write leaves its AUDIT line: {'lines': 11, 'routes': ['/panel/backends/api', '/panel/certificates/reload', '/panel/login', '/panel/servers/api/127.0.0.1:56312/state', '/panel/servers/{backend}/{target}/state']}
+PASS no secret reaches the process log: 
+PASS without the panel the route is behind the token like any other: 401
+PASS with a valid token the panel is a 404 when it is off: 404
+
+ALL PASS

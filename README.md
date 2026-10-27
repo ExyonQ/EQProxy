@@ -6,9 +6,11 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: v0.7.0 (2026-10-24) — modern protocols: HTTP/2 termination and
-> upstream h2, end-to-end gRPC, WebSockets over HTTP/2, HTTP/3 over QUIC and
-> gzip/Brotli compression, each with published raw evidence.**
+> **Status: v0.8.0 (2026-10-27) — operable at scale: an administration HTTP
+> API with roles, audit and a server-rendered web panel, hot configuration
+> without a control plane, per-server failover (`priority` ladders,
+> `allbackups` pools, `drain`/`maintenance`) and opt-in metrics, each with
+> published raw evidence.**
 > A real TCP and HTTP/1.1 proxy (crates
 > `eqproxy-core/config/net/cli`) with **typed routing rules per listener** —
 > host/path/method/header/cookie/map/IP
@@ -29,9 +31,24 @@ diagnostics, configuration, administration, extensibility and security.
 > by SNI (exact name, then wildcard, then the listener default), and the `eqproxy`
 > CLI (`validate`, `explain` with per-rule trace and `timeout_on_fire`,
 > `schema` — the public JSON Schema for editor completion, `diff`, `plan`,
-> offline `apply`/`rollback`, `doctor`), with **460 tests**
-> green plus two Docker-gated harnesses (evidence from the v0.6 gate, not
-> re-run for v0.7.0):
+> offline `apply`/`rollback`, `doctor`), backup server tiers (`backup = true`)
+> with a `priority` failover ladder and optional backup pooling
+> (`all_backups = true`, HAProxy's `option allbackups`), and an
+> **administration plane of its own**
+> ([ADR-0017](docs/adr/0017-read-only-admin-plane.md)): a bearer-gated
+> `GET /api/v1/status` + `GET /metrics`, hot backend/listener writes under
+> `If-Match` ([ADR-0019](docs/adr/0019-hot-config-writes-via-admin-api.md)),
+> per-server `drain`/`maintenance`
+> ([ADR-0018](docs/adr/0018-first-write-path-server-state.md),
+> [ADR-0028](docs/adr/0028-maintenance-closes-the-idle-pool.md)), certificate
+> renewal without a restart
+> ([ADR-0025](docs/adr/0025-certificate-renewal-without-restart.md)) and an
+> **opt-in server-rendered panel** with bearer sessions, a per-session CSRF
+> token and a write audit line, no JavaScript
+> ([ADR-0029](docs/adr/0029-panel-sessions-and-csrf.md)), with **558 tests**
+> across 30 targets green
+> (`cargo test --workspace`, 2026-10-27) plus two Docker-gated
+> harnesses (evidence from the v0.6 gate, not re-run since):
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against
 > HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy
 > v1.34.2, and the [migration matrix](docs/migration/README.md) **65/65
@@ -90,7 +107,14 @@ diagnostics, configuration, administration, extensibility and security.
 > covers gRPC, [ADR-0012](docs/adr/0012-websockets-over-h2.md) covers
 > WebSockets over h2 and [ADR-0013](docs/adr/0013-http3-quic.md) covers
 > HTTP/3 over QUIC).
-> Release v0.7.0 (binaries for darwin/linux amd64+arm64 and multi-arch
+> The v0.8 administration surface has its own pages:
+> [authorization matrix](docs/evidence/v08-endpoint-authorization.md),
+> [hot configuration](docs/evidence/v08-admin-config-hot-apply.md),
+> [panel](docs/evidence/v08-panel.md),
+> [maintenance window](docs/evidence/v08-maintenance.md),
+> [priority ladder](docs/evidence/v08-priority.md) and
+> [backup pool](docs/evidence/v08-allbackups.md).
+> Release v0.8.0 (binaries for darwin/linux amd64+arm64 and multi-arch
 > image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5): the v0.6 HTTP/1.1 scenarios S-H1-04 (10 listeners, 100 backends,
 > 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms) and S-H1-05
@@ -105,15 +129,18 @@ diagnostics, configuration, administration, extensibility and security.
 > [offload](docs/evidence/v07-h3-profile.md),
 > [close fix](docs/evidence/v07-h3-close.md)).
 >
-> **Scope honesty:** v0.7.0 is not declared production ready (Phase 9 gate
-> pending). Its gate is met: 11/11 boxes of the v0.7 roadmap, the 24-hour
-> gRPC bidi soak **PASS** (2026-10-23: 86 400 s, 4 267 messages, 0 broken
-> streams, 0 failed probes) and HTTP/3 interop with two independent clients
-> (`aioquic` 1.2.0 and `quic-go` 0.64.1). HTTP/3 stays **experimental**:
+> **Scope honesty:** v0.8.0 is not declared production ready (Phase 9 gate
+> pending). Its gate is met: 14/14 boxes of the v0.8 roadmap — the
+> route×role authorization matrix with the dataplane serving when the admin
+> task dies, a backend applied under traffic in under a second, and the
+> metrics budget refusing what exceeds it. The latest 24-hour soak remains
+> the v0.7 gRPC bidi run **PASS** (2026-10-23: 86 400 s, 4 267 messages, 0 broken
+> streams, 0 failed probes), and HTTP/3 interop with two independent clients
+> (`aioquic` 1.2.0 and `quic-go` 0.64.1) is unchanged. HTTP/3 stays **experimental**:
 > browsers and `curl` over h3 are unverified and the QUIC adversarial tests
 > of THREAT_MODEL T19 are not executed. Outside this version by design and
 > listed in the [CHANGELOG](CHANGELOG.md): the reference filters that only
-> exist as WASM (v0.9, so ecosystem extension stays WASM-only) and maps
+> exist as WASM (v0.8.5, so ecosystem extension stays WASM-only) and maps
 > consumed through `equals` matching only.
 > The v0.6 24h soak gate **passed** on
 > netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
@@ -129,10 +156,10 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.7.0
+## Install from release v0.8.0
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.7.0).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.8.0).
 
 Every release carries **four prebuilt binaries**: `eqproxy-darwin-arm64`,
 `eqproxy-darwin-amd64`, `eqproxy-linux-arm64` and `eqproxy-linux-amd64`. The
@@ -150,8 +177,8 @@ Building from them is `cargo build --release --locked` with nothing else.
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64   (static, musl)
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.7.0/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.7.0/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.8.0/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.8.0/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # Linux: sha256sum -c --ignore-missing SHA256SUMS.txt
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 --version
@@ -172,9 +199,9 @@ EOF
 Docker (linux/amd64 + linux/arm64, Wolfi base), same digests on both registries:
 
 ```bash
-docker pull exyonq/eqproxy:0.7.0           # Docker Hub (docs + examples on the repo page)
-docker pull ghcr.io/exyonq/eqproxy:0.7.0   # GitHub Container Registry
-docker run --rm exyonq/eqproxy:0.7.0 --version
+docker pull exyonq/eqproxy:0.8.0           # Docker Hub (docs + examples on the repo page)
+docker pull ghcr.io/exyonq/eqproxy:0.8.0   # GitHub Container Registry
+docker run --rm exyonq/eqproxy:0.8.0 --version
 ```
 
 ## Documentation

@@ -1132,6 +1132,147 @@ async fn an_idle_session_is_closed_and_the_next_exchange_dials_again() {
     stop_proxy(handle, serve).await;
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn maintenance_closes_the_idle_backend_session_at_once() {
+    // ADR-0028: a server taken out for a patch window keeps nothing of ours.
+    // The h2 session is closed by the maintenance transition, not left to
+    // the idle monitor (which would hold it for the whole window).
+    let origin = start_h2_origin(&["h2"]).await;
+    let metrics = Arc::new(Metrics::default());
+    let backend =
+        Arc::new(ResolvedBackend::single("api", origin.addr).with_tls(backend_tls(&["h2"])));
+    let hub = backend
+        .h2
+        .clone()
+        .expect("a backend that negotiates h2 keeps a session hub");
+    let (proxy, handle, serve) = start_proxy(
+        h2_listener_with_idle(origin.addr, Duration::from_secs(30))
+            .with_backend(Arc::clone(&backend)),
+        Arc::clone(&metrics),
+    )
+    .await;
+
+    // One exchange, then idle: the session is parked in the hub.
+    let first = one_exchange(
+        proxy,
+        b"GET /echo HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(first.status, 200, "head: {}", first.head);
+    assert_eq!(origin.connections.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        origin.closed.load(Ordering::Relaxed),
+        0,
+        "the session is alive and idle: its 30 s window has not passed"
+    );
+
+    // The maintenance transition closes it at once.
+    assert!(hub.close_idle(origin.addr), "there was a session to close");
+    let ended = tokio::time::timeout(WAIT, async {
+        while origin.closed.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "an idle session closed for maintenance must end at once, not on the idle window"
+    );
+    assert!(
+        !hub.close_idle(origin.addr),
+        "closing again reports there was nothing left"
+    );
+    assert_eq!(
+        metrics.snapshot().h2_sessions_idle_closed,
+        0,
+        "this close is administrative: the idle monitor did not count it"
+    );
+
+    // The next exchange has no session to reuse: a fresh one is dialed.
+    let again = one_exchange(
+        proxy,
+        b"GET /echo HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(again.status, 200, "head: {}", again.head);
+    assert_eq!(
+        origin.connections.load(Ordering::Relaxed),
+        2,
+        "a session closed for maintenance is replaced by a fresh one"
+    );
+    stop_proxy(handle, serve).await;
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn maintenance_cuts_the_session_loose_when_its_last_stream_ends() {
+    // With an exchange still in flight the session is not cut; when the last
+    // stream ends, the connection goes with it (ADR-0028), so `active == 0`
+    // on a maintenance slot really means the box holds nothing of ours.
+    let origin = start_h2_origin(&["h2"]).await;
+    let metrics = Arc::new(Metrics::default());
+    let backend =
+        Arc::new(ResolvedBackend::single("api", origin.addr).with_tls(backend_tls(&["h2"])));
+    let hub = backend
+        .h2
+        .clone()
+        .expect("a backend that negotiates h2 keeps a session hub");
+    let (proxy, handle, serve) = start_proxy(
+        h2_listener_with_idle(origin.addr, Duration::from_secs(30))
+            .with_backend(Arc::clone(&backend)),
+        Arc::clone(&metrics),
+    )
+    .await;
+
+    // The origin holds the exchange 500 ms (`/slow`).
+    let inflight = tokio::spawn(one_exchange(
+        proxy,
+        b"GET /slow HTTP/1.1\r\nHost: api.test\r\nConnection: close\r\n\r\n",
+    ));
+    // The stream is inside the origin (recorded before the 500 ms sleep).
+    let reached = tokio::time::timeout(WAIT, async {
+        while seen_requests(&origin).is_empty() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "the exchange must reach the origin");
+    assert_eq!(origin.connections.load(Ordering::Relaxed), 1);
+
+    assert!(hub.close_idle(origin.addr), "there was a session to close");
+    assert_eq!(
+        origin.closed.load(Ordering::Relaxed),
+        0,
+        "an in-flight stream is never cut by a maintenance transition"
+    );
+
+    let answer = tokio::time::timeout(WAIT, inflight)
+        .await
+        .expect("the in-flight exchange must finish")
+        .expect("join");
+    assert_eq!(answer.status, 200, "head: {}", answer.head);
+    assert_eq!(answer.body, b"slow-done");
+
+    let ended = tokio::time::timeout(WAIT, async {
+        while origin.closed.load(Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        ended.is_ok(),
+        "the session must end with its last exchange: nothing stays parked on a maintenance slot"
+    );
+    stop_proxy(handle, serve).await;
+}
+
 /// Origin that announces a graceful GOAWAY while its first stream is still
 /// being answered: the stream must finish on the old session and the next
 /// exchange must land on a new one.

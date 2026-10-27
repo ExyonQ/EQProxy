@@ -32,6 +32,11 @@ pub const MAX_QUEUE: u32 = 10_000;
 /// Resource budget (v0.6): maximum routing rules per listener.
 pub const MAX_RULES: usize = 256;
 
+/// Resource budget (CE4): maximum opt-in detail series (per server and per
+/// route). The registry refuses anything past it and counts the refusal, so
+/// this number is the hard ceiling of the labelled export.
+pub const MAX_METRICS_SERIES: usize = 4096;
+
 /// Resource budget (B-N9): maximum Basic users per rule.
 pub const MAX_AUTH_USERS: usize = 1024;
 
@@ -41,6 +46,11 @@ pub const MAX_RETRIES: u32 = 5;
 /// Minimum bearer-token length of the admin plane (v0.8): a short token is
 /// brute-forceable by anyone who can reach the port.
 pub const MIN_ADMIN_TOKEN_BYTES: usize = 16;
+
+/// Named users allowed in one admin socket ACL (ADR-0023). The attribute the
+/// kernel stores is `4 + 8 * (4 + n)` bytes, so 64 entries stay at 548 bytes,
+/// far below the 64 KiB extended-attribute limit.
+pub const MAX_ADMIN_ACL_UIDS: usize = 64;
 
 fn default_maxconn() -> u32 {
     1024
@@ -116,6 +126,11 @@ fn default_content_type() -> String {
 
 /// Maximum weight per server (HAProxy `weight` range, cfg 3.4 "server").
 pub const MAX_SERVER_WEIGHT: u32 = 256;
+
+/// Upper bound of `backup` failover order (`priority`), inclusive. EQProxy
+/// extension: HAProxy 3.4 has no numeric priority on `server` lines, so the
+/// ladder is ours and the range is deliberately a byte.
+pub const MAX_SERVER_PRIORITY: u32 = 255;
 
 /// Resource budget (B-I11): maximum targets of one `split` action.
 pub const MAX_SPLIT_TARGETS: usize = 32;
@@ -295,7 +310,7 @@ pub fn parse_server_target(raw: &str) -> Result<ServerTarget, String> {
     })
 }
 
-/// One backend server with its weight (B7).
+/// One backend server with its weight and its rotation class (B7/B8).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ServerConfig {
@@ -306,6 +321,30 @@ pub struct ServerConfig {
     /// Balancing weight (0 = drained: never selected, still health-checked).
     #[serde(default = "default_weight")]
     pub weight: u32,
+    /// Backup server (B8): never selected while any primary server is
+    /// eligible, and used when none is. It keeps being health-checked while
+    /// unused, so the first request after a primary fails does not have to
+    /// wait for a probe to discover it is alive.
+    #[serde(default)]
+    pub backup: bool,
+    /// Failover order among backup servers (EQProxy extension, 0..=255):
+    /// higher first, ties follow configuration order. Only the first
+    /// operational rung serves at a time, so a recovered higher rung takes
+    /// the traffic back. Rejected unless `backup = true`, and ignored by the
+    /// reference, which has no such keyword (HAProxy 3.4 `server`).
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 255))]
+    pub priority: u32,
+}
+
+/// One entry of a backend's server list, as declared (`server` or
+/// `servers`), with everything the resolver and `config diff` need.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerEntry<'a> {
+    pub addr: &'a str,
+    pub weight: u32,
+    pub backup: bool,
+    pub priority: u32,
 }
 
 /// Active TCP health check (B11 TCP): `fall` consecutive failures drop the
@@ -398,23 +437,99 @@ pub struct LocalResponseConfig {
     pub body: String,
 }
 
-/// Metrics options (D1): cardinality stays bounded; detailed per-server
-/// counters are opt-in (CE4).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
+/// Metrics options (D1): cardinality stays bounded; detailed per-server and
+/// per-route counters are opt-in (CE4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MetricsConfig {
-    /// Per-server counters (bounded by [`MAX_SECTIONS`]).
+    /// Per-server and per-route counters: off by default.
     #[serde(default)]
     pub detailed: bool,
+    /// Hard ceiling of the labelled export (per server + per route), 1 to
+    /// [`MAX_METRICS_SERIES`]. A series that does not fit is refused and
+    /// counted in `eqproxy_metrics_detail_dropped_total`.
+    #[serde(default = "default_metrics_series")]
+    pub max_series: usize,
 }
 
-/// Administration plane (v0.8, D6): read-only API and metrics on its own
-/// listener, never on the proxy's public address (SPEC §9). Absent = off.
+fn default_metrics_series() -> usize {
+    eqproxy_core::metrics::DEFAULT_DETAIL_BUDGET
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            detailed: false,
+            max_series: default_metrics_series(),
+        }
+    }
+}
+
+/// Line format of the access log (ADR-0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum AccessLogFormat {
+    /// One JSON object per request (stable field names).
+    #[default]
+    Json,
+    /// nginx combined shape, UTC timestamps.
+    Combined,
+}
+
+/// Structured access log (v0.8, ADR-0020): one line per request, off by
+/// default. The sink is opened once at startup; changing it needs a restart.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AccessLogConfig {
+    /// Destination file, opened in append mode. Absent = stdout.
+    #[serde(default)]
+    pub path: Option<PathBuf>,
+    /// Line format (default `json`).
+    #[serde(default)]
+    pub format: AccessLogFormat,
+}
+
+/// Administration plane (v0.8, D6): the status/metrics API, the write routes
+/// and the optional web panel on their own listener, never on the proxy's
+/// public address (SPEC §9). Absent = off.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminConfig {
     /// Listen `IP:PORT` for the admin plane. Loopback unless `allow_remote`.
-    pub listen: String,
+    /// Exactly one of `listen` and `unix_socket` is required.
+    #[serde(default)]
+    pub listen: Option<String>,
+    /// Unix domain socket path (ADR-0021). The socket is created with mode
+    /// `0600`, so the filesystem is the access boundary in front of the
+    /// bearer token. Exactly one of `listen` and `unix_socket` is required.
+    /// A relative path is resolved against the configuration file.
+    #[serde(default)]
+    pub unix_socket: Option<PathBuf>,
+    /// Socket mode: `"0600"` (default, owner only) or `"0660"` (owner and
+    /// group; ADR-0022). No other mode is accepted.
+    #[serde(default)]
+    pub unix_socket_mode: Option<String>,
+    /// Numeric gid that owns the socket, required with mode `0660` and
+    /// refused with `0600`. Group *names* are not resolved: that needs NSS,
+    /// which this crate does not call (`unsafe_code = forbid`).
+    #[serde(default)]
+    pub unix_socket_gid: Option<u32>,
+    /// Peer uids allowed to use the socket (ADR-0022), checked against the
+    /// kernel's `SO_PEERCRED`/`getpeereid` answer before any HTTP byte is
+    /// read. Empty = any uid the filesystem lets connect. A peer whose uid
+    /// is unavailable is refused when the list is not empty. The bearer
+    /// token is still required afterwards.
+    #[serde(default)]
+    pub unix_socket_allow_uids: Vec<u32>,
+    /// Named users granted `rw` on the socket file through its POSIX access
+    /// ACL (ADR-0023), **in addition to** the owning group; the kernel checks
+    /// it at `connect`, before this process sees the peer. Linux only (the
+    /// entries live in `system.posix_acl_access`), and only with
+    /// `unix_socket_mode = "0660"` plus `unix_socket_gid`, because the mode's
+    /// group class is the ACL mask. Empty = no ACL is installed. At most 64
+    /// entries.
+    #[serde(default)]
+    pub unix_socket_acl_uids: Vec<u32>,
     /// Bearer token required on every request. Prefer [`token_file`](Self::token_file):
     /// a token in the TOML travels wherever the file is copied.
     #[serde(default)]
@@ -430,11 +545,18 @@ pub struct AdminConfig {
     /// File holding the write token (one trailing newline trimmed).
     #[serde(default)]
     pub write_token_file: Option<PathBuf>,
-    /// Allow binding a non-loopback address (default false): the admin
+    /// Allow binding a non-loopback TCP address (default false): the admin
     /// plane has no TLS in this slice, so a remote bind sends the bearer
-    /// token in the clear.
+    /// token in the clear. Meaningless with `unix_socket` (rejected).
     #[serde(default)]
     pub allow_remote: bool,
+    /// Serve the web panel (`GET /panel`, ADR-0029) on this plane. Off by
+    /// default; with it off every `/panel` path is a `404`. The panel is a
+    /// client of the routes below: it opens a session with the read token
+    /// (read-only panel) or the write token (full panel) and needs no other
+    /// secret.
+    #[serde(default)]
+    pub panel: bool,
 }
 
 /// One header condition of a routing rule (exactly one of `exact`,
@@ -837,12 +959,16 @@ pub struct Config {
     #[serde(default = "default_shutdown_grace", with = "duration")]
     #[schemars(with = "String")]
     pub shutdown_grace: Duration,
-    /// Metrics options (D1/D5): detailed counters are opt-in (CE4).
+    /// Metrics options (D1/D5): per-server and per-route counters are
+    /// opt-in and bounded by their own series budget (CE4).
     #[serde(default)]
     pub metrics: MetricsConfig,
     /// Administration plane (v0.8): read-only API and metrics. Absent = off.
     #[serde(default)]
     pub admin: Option<AdminConfig>,
+    /// Structured access log (v0.8, ADR-0020). Absent = off.
+    #[serde(default)]
+    pub access_log: Option<AccessLogConfig>,
 }
 
 /// A frontend: where to listen and which backend to send to.
@@ -1005,6 +1131,16 @@ pub struct BackendConfig {
     /// Balancing algorithm (Phase 2b: `"roundrobin"`).
     #[serde(default)]
     pub balance: BalanceAlgorithm,
+    /// Balance across **all** backups instead of one rung at a time
+    /// (`option allbackups`, B8): when no primary server is eligible, every
+    /// operational backup is a candidate and the configured algorithm
+    /// spreads load across them by weight. `false` (the reference default)
+    /// keeps one backup at a time, ordered by `priority`. The reference
+    /// states that with this option there is no priority order among the
+    /// backups, so combining it with `priority` is refused in
+    /// [`crate::check`] instead of silently ignoring the ladder.
+    #[serde(default)]
+    pub all_backups: bool,
     /// PROXY protocol v1 send to the servers (A9).
     #[serde(default)]
     pub proxy_protocol: ProxyProtocolMode,
@@ -1052,12 +1188,22 @@ pub struct BackendConfig {
 impl BackendConfig {
     /// Declared (address, weight) pairs, via `server` or `servers`.
     #[must_use]
-    pub fn server_entries(&self) -> Vec<(&str, u32)> {
+    pub fn server_entries(&self) -> Vec<ServerEntry<'_>> {
         match (&self.server, &self.servers) {
-            (Some(addr), _) => vec![(addr.as_str(), 1)],
+            (Some(addr), _) => vec![ServerEntry {
+                addr: addr.as_str(),
+                weight: 1,
+                backup: false,
+                priority: 0,
+            }],
             (None, Some(servers)) => servers
                 .iter()
-                .map(|s| (s.addr.as_str(), s.weight))
+                .map(|s| ServerEntry {
+                    addr: s.addr.as_str(),
+                    weight: s.weight,
+                    backup: s.backup,
+                    priority: s.priority,
+                })
                 .collect(),
             (None, None) => Vec::new(),
         }

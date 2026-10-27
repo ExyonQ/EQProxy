@@ -1,0 +1,108 @@
+{
+  "version": "0.7.0",
+  "uptime_seconds": 0,
+  "revision": "v2",
+  "listeners": [
+    {
+      "name": "web",
+      "listen": "127.0.0.1:64729",
+      "mode": "http",
+      "backend": "api",
+      "maxconn": 1024,
+      "tls_fingerprint": null
+    }
+  ],
+  "backends": [
+    {
+      "name": "api",
+      "balance": "round_robin",
+      "all_backups": false,
+      "health_check": true,
+      "servers": [
+        {
+          "addr": "127.0.0.1:64727",
+          "resolved": "127.0.0.1:64727",
+          "weight": 1,
+          "backup": false,
+          "priority": 0,
+          "state": "ready",
+          "healthy": true,
+          "active": 0,
+          "drained": false
+        },
+        {
+          "addr": "127.0.0.1:64728",
+          "resolved": "127.0.0.1:64728",
+          "weight": 1,
+          "backup": false,
+          "priority": 0,
+          "state": "drain",
+          "healthy": true,
+          "active": 0,
+          "drained": true
+        }
+      ]
+    }
+  ],
+  "metrics_detail": {
+    "enabled": false,
+    "budget": 128,
+    "series": 0,
+    "dropped": 0,
+    "rows": []
+  },
+  "counters": {
+    "connections_accepted": 4,
+    "connections_rejected": 0,
+    "connections_active": 0,
+    "connections_completed": 4,
+    "connect_failures": 0,
+    "idle_timeouts": 0,
+    "bytes_client_to_backend": 0,
+    "bytes_backend_to_client": 4,
+    "http_requests_proxied": 4,
+    "http_requests_rejected": 0,
+    "access_log_dropped": 0,
+    "rate_limited": 0,
+    "auth_denied": 0,
+    "auth_service_errors": 0,
+    "header_timeouts": 0,
+    "tls_handshake_failures": 0,
+    "no_available_server": 0,
+    "backend_connections_reused": 0,
+    "backend_connections_opened": 4,
+    "backend_connections_discarded": 0,
+    "config_reloads": 1,
+    "config_reload_failures": 0,
+    "config_reload_duration_us": 8,
+    "queue_full": 0,
+    "queue_timeout": 0,
+    "retry_attempts": 0,
+    "proxy_protocol_denied": 0,
+    "proxy_protocol_invalid": 0,
+    "local_responses_served": 0,
+    "redirects_served": 0,
+    "direct_responses_served": 0,
+    "dns_resolutions_ok": 0,
+    "dns_resolution_failures": 0,
+    "dns_address_updates": 0,
+    "map_reloads": 0,
+    "map_reload_failures": 0,
+    "requests_mirrored": 0,
+    "mirror_failures": 0,
+    "mirror_skipped": 0,
+    "h2_sessions_idle_closed": 0,
+    "h2_goaway_received": 0,
+    "h2_refused_retried": 0,
+    "grpc_streams": 0,
+    "grpc_stream_errors": 0,
+    "ws_tunnels": 0,
+    "ws_failures": 0,
+    "compression_gzip_responses": 0,
+    "compression_brotli_responses": 0,
+    "compression_bytes_in": 0,
+    "compression_bytes_out": 0,
+    "h3_clean_closes": 0,
+    "h3_connection_errors": 0
+  }
+}

@@ -1,0 +1,6 @@
+image: eqproxy:b-h14-acl
+sha256:b326c7558ba5114fecaf90f74853d20ea86ac3ca828835944ab2064b92db7981
+command: docker scout cves --only-severity critical,high --format sarif eqproxy:b-h14-acl
+exit: 0
+critical+high findings: 0 (sarif runs[].results empty)
+indexed packages: 36

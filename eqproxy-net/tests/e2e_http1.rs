@@ -1248,3 +1248,73 @@ async fn oversent_backend_bytes_are_never_forwarded_or_pooled() {
         .expect("serve finishes")
         .expect("serve task without panic");
 }
+
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn access_log_records_parsed_and_unparsed_requests() {
+    let backend = start_http_backend().await;
+    let metrics = Arc::new(Metrics::default());
+    let (log, mut entries) = eqproxy_net::AccessLog::channel(Arc::clone(&metrics));
+    let cfg = http_listener_cfg(
+        "127.0.0.1:0".parse().expect("addr"),
+        backend,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+    .with_access(Arc::clone(&log));
+    let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;
+
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect");
+    client
+        .write_all(
+            b"GET /hello?token=secret HTTP/1.1\r\nHost: example.test\r\nUser-Agent: curl/8.7\r\n\r\n",
+        )
+        .await
+        .expect("write");
+    let response = read_one_response(&mut client).await;
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response:?}");
+
+    let entry = tokio::time::timeout(WAIT, entries.recv())
+        .await
+        .expect("entry in time")
+        .expect("entry");
+    assert_eq!(entry.listener, "web");
+    assert_eq!(entry.protocol, eqproxy_net::ClientProtocol::Http1);
+    assert_eq!(entry.method, "GET");
+    assert_eq!(entry.path, "/hello", "the query string is never logged");
+    assert_eq!(entry.host, "example.test");
+    assert_eq!(entry.status, 200);
+    assert_eq!(entry.backend.as_deref(), Some("api"));
+    assert_eq!(entry.server, Some(backend));
+    assert_eq!(entry.user_agent.as_deref(), Some("curl/8.7"));
+    assert_eq!(entry.bytes, Some(0));
+    assert!(
+        !format!("{entry:?}").contains("secret"),
+        "no query in the entry"
+    );
+
+    // A request whose head never parses is still one line, with `-` fields.
+    client
+        .write_all(b"BROKEN\r\n\r\n")
+        .await
+        .expect("write broken");
+    let _ = read_one_response(&mut client).await;
+    let rejected = tokio::time::timeout(WAIT, entries.recv())
+        .await
+        .expect("rejected entry in time")
+        .expect("rejected entry");
+    assert_eq!(rejected.status, 400);
+    assert_eq!(rejected.method, "-");
+    assert_eq!(rejected.path, "-");
+    assert_eq!(rejected.backend, None);
+    assert_eq!(log.dropped(), 0);
+
+    handle.trigger();
+    tokio::time::timeout(WAIT, serve)
+        .await
+        .expect("serve stops")
+        .expect("serve");
+}

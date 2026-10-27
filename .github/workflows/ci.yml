@@ -29,3 +29,83 @@ jobs:
 
       - name: Tests
         run: cargo test --workspace
+
+  # The evidence documents are part of the published repository and of the
+  # source tarball, so a test citation that points at nothing ships with the
+  # release. This gate reads the Rust tree of the same commit and refuses a
+  # citation of a test-shaped identifier that the tree does not define; the
+  # self-test first proves the detector itself still detects. Historical names
+  # are declared, with their reason, in
+  # .github/scripts/evidence-test-citations-allow.txt.
+  evidence-test-citations:
+    name: Evidence test citations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Self-test the citation detector
+        run: python3 .github/scripts/check-evidence-test-citations.py --self-test
+
+      - name: Check docs/evidence test citations
+        run: python3 .github/scripts/check-evidence-test-citations.py
+
+  # Admin plane (v0.8, B-H14; ADR-0022/ADR-0023) on **native** runners.
+  #
+  # The release gate (.github/workflows/release.yml) runs this same journey
+  # against the bytes of the scanned image, but its arm64 leg runs under QEMU
+  # on an amd64 runner. Here each leg builds the binary for the runner's own
+  # architecture and runs it on that architecture: `ubuntu-24.04-arm` is a
+  # real arm64 host (free for public repositories), so nothing about the
+  # kernel-level contract — POSIX ACL support on the filesystem, connect(2)
+  # enforcement, SO_PEERCRED, getdents on /proc/<pid>/fd — can be masked by a
+  # syscall translator, and neither leg pays QEMU's translation cost.
+  #
+  # The journey is the published one (.github/scripts/admin-unix-acl-e2e.sh),
+  # the very file the release job mounts: one source, so a PR cannot be green
+  # on a journey the release does not actually run. The step below asserts the
+  # runner's own architecture before invoking the journey, so a leg that
+  # silently fell back to emulation fails instead of passing slowly.
+  admin-unix-acl:
+    name: Admin socket ACL E2E (native ${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            machine: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the binary for this runner
+        run: cargo build --release --locked -p eqproxy-cli
+
+      - name: Admin socket ACL E2E (B-H14)
+        run: |
+          set -euo pipefail
+          test -x target/release/eqproxy
+          host_machine="$(uname -m)"
+          if [ "$host_machine" != "${{ matrix.machine }}" ]; then
+            printf 'FAIL declared %s but the runner is %s: not a native leg\n' \
+              "${{ matrix.arch }}" "$host_machine" >&2
+            exit 1
+          fi
+          printf '==> admin ACL E2E (native %s, %s): sha256 %s, %s\n' \
+            "${{ matrix.arch }}" "$host_machine" \
+            "$(sha256sum target/release/eqproxy | cut -d' ' -f1)" \
+            "$(file -b target/release/eqproxy)"
+          # The journey installs its own clients, writes under /srv, /etc and
+          # /var/log, and uses setpriv to become uid 1000 / gid 2000, so it
+          # runs as root. It exits 1 if any observation differs.
+          sudo env EQPROXY_BIN="$PWD/target/release/eqproxy" \
+            bash .github/scripts/admin-unix-acl-e2e.sh

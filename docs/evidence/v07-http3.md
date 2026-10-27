@@ -57,6 +57,17 @@ Design: [ADR-0013](../adr/0013-http3-quic.md).
   flag changes, and **rejects a TLS material change on a live endpoint**
   (`QuicTlsReload`) because a quinn endpoint freezes its TLS at creation;
   shutdown triggers CONNECTION_CLOSE and joins the h3 accept task.
+
+> **v0.8 update (D7, ADR-0025, 2026-10-25):** this page describes v0.7, where
+> a certificate change on a live QUIC listener was refused. D7 moved the
+> material behind a resolver consulted per handshake, so the reload now
+> **rebuilds the endpoint on the socket it already holds and applies the new
+> certificate in place**; only ALPN, the mTLS client CA and the minimum TLS
+> version still answer `QuicTlsReload`. The reload test is now
+> `http3_reload_applies_new_tls_on_the_same_socket`
+> (`eqproxy-net/tests/e2e_http3.rs`), and the v0.7 test name cited below no
+> longer exists in the tree.
+
 - **Interop decision.** h3 0.0.8 greases the stream frame before FIN on the
   first completed stream. The first aioquic run timed out with a complete
   response on the wire: aioquic 1.2.0 leaves its DATA event
@@ -83,7 +94,7 @@ loopback UDP; the origin is a real HTTP/1.1 TCP server.
 | `http3_requests_get_the_h1_engine_decisions_rules_and_compression` | a `direct_response` rule answers `418` without dialing the origin; `accept-encoding: gzip` produces `content-encoding: gzip` and the decoded body is the origin's 8192 bytes |
 | `http3_connect_is_refused_and_a_dead_backend_is_an_explicit_502` | `CONNECT` → `501` (counted rejected); a listener whose only server is down answers `502`, not a hang |
 | `http3_maxconn_refuses_a_second_quic_connection` | with `maxconn = 1` the second QUIC handshake is refused promptly and `connections_rejected` counts it |
-| `http3_reload_rejects_a_tls_change_and_can_turn_quic_off` | same name/address with different TLS → `ProxyError::QuicTlsReload`, the running endpoint keeps serving; `quic = false` is applied in place (endpoint closed, new h3 connection refused) while the TLS TCP listener keeps answering h1 |
+| `http3_reload_rejects_a_tls_change_and_can_turn_quic_off` (**v0.7 name; superseded by D7, see the note above**) | same name/address with different TLS → `ProxyError::QuicTlsReload`, the running endpoint keeps serving; `quic = false` is applied in place (endpoint closed, new h3 connection refused) while the TLS TCP listener keeps answering h1 |
 
 ### 4.2 Real release binary + first independent client (`aioquic`)
 
@@ -174,7 +185,7 @@ the valid one).
 | `quic` on a `tcp` listener | config error (`mode = "http"`) | same |
 | `quic` with `proxy_receive` | config error (no QUIC preamble) | same |
 | `alpn = ["h3"]` on the TCP TLS table | config error (reserved for QUIC) | same |
-| TLS material changed on a live QUIC listener | `QuicTlsReload`, running config keeps serving | reload E2E |
+| TLS material changed on a live QUIC listener (v0.7 semantics; D7 changed it) | `QuicTlsReload`, running config keeps serving — since D7 only ALPN, the client CA and the minimum version take this path; certificate material is applied in place | reload E2E (`http3_reload_applies_new_tls_on_the_same_socket`) |
 | UDP port already in use | `ProxyError::QuicBind` aborts startup whole (TCP sockets closed) | code path in `bind`; not exercised with a real port clash |
 | QUIC handshake fails/times out | logged, `tls_handshake_failures` counted, no request forwarded | code path; both clients exercise success only |
 | Body shorter than declared | h3 stream reset (`H3_REQUEST_INCOMPLETE`), never a clean end | code path |

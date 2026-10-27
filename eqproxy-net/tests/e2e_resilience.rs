@@ -315,10 +315,14 @@ async fn retry_saves_idempotent_get_from_dead_server() {
             ResolvedServer {
                 addr: dead.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             },
             ResolvedServer {
                 addr: live.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             },
         ],
         3,
@@ -368,10 +372,14 @@ async fn non_idempotent_post_is_never_retried_without_opt_in() {
             ResolvedServer {
                 addr: dead.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             },
             ResolvedServer {
                 addr: live.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             },
         ],
         3,
@@ -426,10 +434,14 @@ async fn non_idempotent_opt_in_allows_post_retry() {
             ResolvedServer {
                 addr: dead.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             },
             ResolvedServer {
                 addr: live.into(),
                 weight: 1,
+                backup: false,
+                priority: 0,
             },
         ],
         3,
@@ -474,6 +486,8 @@ async fn full_queue_rejects_explicitly_and_waiters_time_out() {
         vec![ResolvedServer {
             addr: drained.into(),
             weight: 0,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -541,6 +555,8 @@ async fn local_response_serves_the_configured_body() {
         vec![ResolvedServer {
             addr: drained.into(),
             weight: 0,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -589,6 +605,8 @@ async fn proxy_receive_forwards_the_claimed_peer() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -648,6 +666,8 @@ async fn proxy_receive_accepts_the_v2_header() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -706,6 +726,8 @@ async fn proxy_receive_rejects_non_allowlisted_origin() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -755,6 +777,8 @@ async fn proxy_receive_rejects_invalid_header() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -809,6 +833,8 @@ async fn forwarded_headers_append_and_replace() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -838,6 +864,8 @@ async fn forwarded_headers_append_and_replace() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -873,6 +901,8 @@ async fn forwarded_headers_append_and_replace() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -947,6 +977,8 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -963,8 +995,12 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
             .expect("serve");
     });
 
-    // Phase 1: the old material answers.
+    // Phase 1: the old material answers. This connection stays open across
+    // the renewal: a rotation must not cut the exchanges already running.
     tls_roundtrip_ok(proxy_addr, tls_client_with_root(OLD_CERT), "127.0.0.1").await;
+    let mut established = mtls_connect(proxy_addr, tls_client_with_root(OLD_CERT), "127.0.0.1")
+        .await
+        .expect("handshake before the rotation");
 
     // Rotation (D7): same name + same config address → the socket is
     // kept and only the config (the new TLS material) changes.
@@ -975,6 +1011,8 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,
@@ -992,6 +1030,20 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    // The connection opened before the renewal still relays: selection and
+    // TLS happened once, and the swap changes what new handshakes see.
+    established
+        .write_all(b"ping")
+        .await
+        .expect("write on the established connection");
+    let mut echoed = [0u8; 4];
+    tokio::time::timeout(WAIT, established.read_exact(&mut echoed))
+        .await
+        .expect("echo in time")
+        .expect("full echo on the established connection");
+    assert_eq!(&echoed, b"ping", "the pre-rotation connection still serves");
+    drop(established);
 
     // Phase 2: the NEW material is live on the same socket — trusting the
     // rotated-out root must fail, trusting the new root must work.
@@ -1036,10 +1088,14 @@ async fn passive_detection_marks_5xx_server_down() {
                 ResolvedServer {
                     addr: failing.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: healthy.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             2,
@@ -1112,10 +1168,14 @@ async fn http_expect_check_marks_5xx_server_down() {
                 ResolvedServer {
                     addr: failing.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: healthy.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             1,
@@ -1239,10 +1299,14 @@ async fn http_check_interops_with_keep_alive_origins() {
                 ResolvedServer {
                     addr: cl.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
                 ResolvedServer {
                     addr: chunked.into(),
                     weight: 1,
+                    backup: false,
+                    priority: 0,
                 },
             ],
             1, // fall
@@ -1386,6 +1450,8 @@ async fn mtls_requires_a_certificate_issued_by_the_client_ca() {
         vec![ResolvedServer {
             addr: echo.into(),
             weight: 1,
+            backup: false,
+            priority: 0,
         }],
         3,
         2,

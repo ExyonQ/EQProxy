@@ -52,7 +52,7 @@ use crate::http1::{
 };
 use crate::http2::{DATA_CHUNK, StreamError, build_request_head, capacity};
 use crate::proxy::{
-    AffinityMode, OutboundError, ResolvedListener, RouteDecision, open_grpc_stream,
+    AffinityMode, OutboundError, ResolvedBackend, ResolvedListener, RouteDecision, open_grpc_stream,
 };
 
 /// Headers that must never cross to the backend h2 stream (RFC 9113 §8.2.2).
@@ -124,7 +124,7 @@ pub(crate) async fn serve(
         peer: peer.ip(),
         maps: cfg.maps.as_ref(),
     };
-    let decision = cfg.decide(&facts);
+    let (decision, route_name) = cfg.decide_routed(&facts);
     if let Some(limiter) = decision.rate_limiter()
         && !limiter.try_acquire(peer.ip())
     {
@@ -260,6 +260,9 @@ pub(crate) async fn serve(
     };
 
     metrics.grpc_streams.fetch_add(1, Ordering::Relaxed);
+    // The stream outlives the borrow below: remember which server carries it
+    // while the struct is still whole (CE4).
+    let served_addr = stream.addr;
     let idle = cfg.idle_timeout;
     let deadline = (cfg.max_stream_duration > Duration::ZERO)
         .then(|| tokio::time::Instant::now() + cfg.max_stream_duration);
@@ -307,6 +310,7 @@ pub(crate) async fn serve(
         Ok(Ok(response)) => response,
     };
 
+    let failed = response.status().is_server_error();
     let mut out = Response::new(());
     *out.status_mut() = response.status();
     for (name, value) in response.headers() {
@@ -329,6 +333,7 @@ pub(crate) async fn serve(
         metrics
             .http_requests_proxied
             .fetch_add(1, Ordering::Relaxed);
+        record_detail(metrics, cfg, backend, served_addr, route_name, failed);
         return Ok(());
     }
 
@@ -351,6 +356,7 @@ pub(crate) async fn serve(
                     metrics
                         .http_requests_proxied
                         .fetch_add(1, Ordering::Relaxed);
+                    record_detail(metrics, cfg, backend, served_addr, route_name, failed);
                 }
                 _ => {
                     metrics.grpc_stream_errors.fetch_add(1, Ordering::Relaxed);
@@ -363,6 +369,7 @@ pub(crate) async fn serve(
                 metrics
                     .http_requests_proxied
                     .fetch_add(1, Ordering::Relaxed);
+                record_detail(metrics, cfg, backend, served_addr, route_name, failed);
             }
             _ => {
                 metrics.grpc_stream_errors.fetch_add(1, Ordering::Relaxed);
@@ -639,6 +646,27 @@ fn local_deny(
 ) -> Result<(), ()> {
     let status = StatusCode::from_u16(deny.status).unwrap_or(StatusCode::FORBIDDEN);
     local_answer(respond, status, &deny.headers, deny.body.as_bytes())
+}
+
+/// Attributes a completed gRPC stream to the server that carried it and to the
+/// rule that matched (CE4). A disabled registry costs one relaxed load.
+fn record_detail(
+    metrics: &Metrics,
+    cfg: &ResolvedListener,
+    backend: &ResolvedBackend,
+    served: SocketAddr,
+    route: Option<&str>,
+    failed: bool,
+) {
+    if !metrics.detail.enabled() {
+        return;
+    }
+    metrics
+        .detail
+        .record_server(&backend.name, &served.to_string(), failed);
+    if let Some(route) = route {
+        metrics.detail.record_route(&cfg.name, route, failed);
+    }
 }
 
 /// `503` for the whole "no server available" class, honoring the listener's

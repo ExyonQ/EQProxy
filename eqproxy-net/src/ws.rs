@@ -122,6 +122,7 @@ pub(crate) async fn serve(
             local,
             &engine_cfg,
             engine_metrics,
+            crate::access::ClientProtocol::Http2,
         )
         .await;
     });

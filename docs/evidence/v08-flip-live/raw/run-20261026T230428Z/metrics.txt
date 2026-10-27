@@ -1,0 +1,120 @@
+# TYPE eqproxy_connections_accepted_total counter
+eqproxy_connections_accepted_total 1040
+# TYPE eqproxy_connections_rejected_total counter
+eqproxy_connections_rejected_total 0
+# TYPE eqproxy_connections_completed_total counter
+eqproxy_connections_completed_total 1040
+# TYPE eqproxy_connect_failures_total counter
+eqproxy_connect_failures_total 0
+# TYPE eqproxy_idle_timeouts_total counter
+eqproxy_idle_timeouts_total 0
+# TYPE eqproxy_bytes_client_to_backend_total counter
+eqproxy_bytes_client_to_backend_total 0
+# TYPE eqproxy_bytes_backend_to_client_total counter
+eqproxy_bytes_backend_to_client_total 1040
+# TYPE eqproxy_http_requests_proxied_total counter
+eqproxy_http_requests_proxied_total 1040
+# TYPE eqproxy_http_requests_rejected_total counter
+eqproxy_http_requests_rejected_total 0
+# TYPE eqproxy_access_log_dropped_total counter
+eqproxy_access_log_dropped_total 0
+# TYPE eqproxy_rate_limited_total counter
+eqproxy_rate_limited_total 0
+# TYPE eqproxy_auth_denied_total counter
+eqproxy_auth_denied_total 0
+# TYPE eqproxy_auth_service_errors_total counter
+eqproxy_auth_service_errors_total 0
+# TYPE eqproxy_header_timeouts_total counter
+eqproxy_header_timeouts_total 0
+# TYPE eqproxy_tls_handshake_failures_total counter
+eqproxy_tls_handshake_failures_total 0
+# TYPE eqproxy_no_available_server_total counter
+eqproxy_no_available_server_total 0
+# TYPE eqproxy_backend_connections_reused_total counter
+eqproxy_backend_connections_reused_total 1030
+# TYPE eqproxy_backend_connections_opened_total counter
+eqproxy_backend_connections_opened_total 10
+# TYPE eqproxy_backend_connections_discarded_total counter
+eqproxy_backend_connections_discarded_total 0
+# TYPE eqproxy_config_reloads_total counter
+eqproxy_config_reloads_total 2
+# TYPE eqproxy_config_reload_failures_total counter
+eqproxy_config_reload_failures_total 0
+# TYPE eqproxy_queue_full_total counter
+eqproxy_queue_full_total 0
+# TYPE eqproxy_queue_timeout_total counter
+eqproxy_queue_timeout_total 0
+# TYPE eqproxy_retry_attempts_total counter
+eqproxy_retry_attempts_total 0
+# TYPE eqproxy_proxy_protocol_denied_total counter
+eqproxy_proxy_protocol_denied_total 0
+# TYPE eqproxy_proxy_protocol_invalid_total counter
+eqproxy_proxy_protocol_invalid_total 0
+# TYPE eqproxy_local_responses_served_total counter
+eqproxy_local_responses_served_total 0
+# TYPE eqproxy_redirects_served_total counter
+eqproxy_redirects_served_total 0
+# TYPE eqproxy_direct_responses_served_total counter
+eqproxy_direct_responses_served_total 0
+# TYPE eqproxy_dns_resolutions_total counter
+eqproxy_dns_resolutions_total 0
+# TYPE eqproxy_dns_resolution_failures_total counter
+eqproxy_dns_resolution_failures_total 0
+# TYPE eqproxy_dns_address_updates_total counter
+eqproxy_dns_address_updates_total 0
+# TYPE eqproxy_map_reloads_total counter
+eqproxy_map_reloads_total 0
+# TYPE eqproxy_map_reload_failures_total counter
+eqproxy_map_reload_failures_total 0
+# TYPE eqproxy_requests_mirrored_total counter
+eqproxy_requests_mirrored_total 0
+# TYPE eqproxy_mirror_failures_total counter
+eqproxy_mirror_failures_total 0
+# TYPE eqproxy_mirror_skipped_total counter
+eqproxy_mirror_skipped_total 0
+# TYPE eqproxy_h2_sessions_idle_closed_total counter
+eqproxy_h2_sessions_idle_closed_total 0
+# TYPE eqproxy_h2_goaway_received_total counter
+eqproxy_h2_goaway_received_total 0
+# TYPE eqproxy_h2_refused_retried_total counter
+eqproxy_h2_refused_retried_total 0
+# TYPE eqproxy_grpc_streams_total counter
+eqproxy_grpc_streams_total 0
+# TYPE eqproxy_grpc_stream_errors_total counter
+eqproxy_grpc_stream_errors_total 0
+# TYPE eqproxy_ws_tunnels_total counter
+eqproxy_ws_tunnels_total 0
+# TYPE eqproxy_ws_failures_total counter
+eqproxy_ws_failures_total 0
+# TYPE eqproxy_compression_gzip_responses_total counter
+eqproxy_compression_gzip_responses_total 0
+# TYPE eqproxy_compression_brotli_responses_total counter
+eqproxy_compression_brotli_responses_total 0
+# TYPE eqproxy_compression_bytes_in_total counter
+eqproxy_compression_bytes_in_total 0
+# TYPE eqproxy_compression_bytes_out_total counter
+eqproxy_compression_bytes_out_total 0
+# TYPE eqproxy_h3_clean_closes_total counter
+eqproxy_h3_clean_closes_total 0
+# TYPE eqproxy_h3_connection_errors_total counter
+eqproxy_h3_connection_errors_total 0
+# TYPE eqproxy_connections_active gauge
+eqproxy_connections_active 0
+# TYPE eqproxy_config_reload_last_swap_seconds gauge
+eqproxy_config_reload_last_swap_seconds 0.000013
+# TYPE eqproxy_build_info gauge
+eqproxy_build_info{version="0.7.0"} 1
+# TYPE eqproxy_metrics_detail_enabled gauge
+eqproxy_metrics_detail_enabled 0
+# TYPE eqproxy_metrics_detail_series gauge
+eqproxy_metrics_detail_series 0
+# TYPE eqproxy_metrics_detail_budget gauge
+eqproxy_metrics_detail_budget 128
+# TYPE eqproxy_metrics_detail_dropped_total counter
+eqproxy_metrics_detail_dropped_total 0
+# TYPE eqproxy_backend_servers_draining gauge
+eqproxy_backend_servers_draining 0
+# TYPE eqproxy_backend_servers_maintenance gauge
+eqproxy_backend_servers_maintenance 0
+# TYPE eqproxy_backend_drains_completed_total counter
+eqproxy_backend_drains_completed_total 0
