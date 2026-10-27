@@ -1,0 +1,5 @@
+host: x86_64, 8 cores, 6.8.0-147-generic
+cargo 1.99.1 (5f94df478 2026-08-27)
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+1.99.1-x86_64-unknown-linux-gnu (overridden by '/root/eqproxy-verify/rust-toolchain.toml')
+7621d2d46651e24eec3f63f2

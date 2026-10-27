@@ -1,0 +1,26 @@
+    Checking tokio v1.53.3
+    Checking serde v1.0.229
+   Compiling aws-lc-sys v0.46.0
+    Checking futures-executor v0.3.34
+    Checking futures v0.3.34
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking schemars v1.2.3
+    Checking toml_edit v0.22.27
+    Checking toml v0.8.23
+    Checking eqproxy-core v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-core)
+    Checking tokio-util v0.7.20
+    Checking h3 v0.0.8
+    Checking h2 v0.4.20
+    Checking eqproxy-config v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-config)
+   Compiling aws-lc-rs v1.18.2
+   Compiling rustls v0.23.46
+    Checking rustls-webpki v0.103.16
+    Checking quinn-proto v0.11.19
+    Checking tokio-rustls v0.26.6
+    Checking quinn v0.11.12
+    Checking h3-quinn v0.0.10
+    Checking eqproxy-net v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-net)
+    Checking eqproxy-cli v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-cli)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 33.93s
+clippy exit=0

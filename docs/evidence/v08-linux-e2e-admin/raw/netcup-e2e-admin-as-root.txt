@@ -1,0 +1,179 @@
+== host ==
+x86_64
+8
+== toolchain (pin read from rust-toolchain.toml) ==
+rustc 1.99.1 (58cf8f9c3 2026-10-13)
+cargo 1.99.1 (5f94df478 2026-08-27)
+== e2e_admin target (Linux-gated helper, real sockets as root) ==
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded md-5 v0.10.6
+  Downloaded xattr v1.6.1
+  Downloaded webpki-roots v1.0.10
+   Compiling libc v0.2.190
+   Compiling proc-macro2 v1.0.107
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.27
+   Compiling pin-project-lite v0.2.17
+   Compiling find-msvc-tools v0.1.14
+   Compiling shlex v2.0.1
+   Compiling fs_extra v1.3.0
+   Compiling dunce v1.0.5
+   Compiling pkg-config v0.3.34
+   Compiling memchr v2.8.3
+   Compiling cfg-if v1.0.5
+   Compiling bytes v1.12.1
+   Compiling once_cell v1.21.4
+   Compiling aws-lc-rs v1.18.2
+   Compiling zeroize v1.9.1
+   Compiling slab v0.4.12
+   Compiling log v0.4.34
+   Compiling version_check v0.9.5
+   Compiling futures-sink v0.3.34
+   Compiling futures-core v0.3.34
+   Compiling rustls-pki-types v1.15.1
+   Compiling untrusted v0.7.1
+   Compiling cfg_aliases v0.2.2
+   Compiling rand_core v0.10.1
+   Compiling tracing-core v0.1.36
+   Compiling generic-array v0.14.7
+   Compiling untrusted v0.9.0
+   Compiling typenum v1.20.1
+   Compiling getrandom v0.4.3
+   Compiling futures-io v0.3.34
+   Compiling syn v3.0.9
+   Compiling rustls v0.23.46
+   Compiling tracing v0.1.44
+   Compiling futures-channel v0.3.34
+   Compiling cpufeatures v0.3.1
+   Compiling subtle v2.6.1
+   Compiling serde_core v1.0.229
+   Compiling itoa v1.0.18
+   Compiling futures-task v0.3.34
+   Compiling thiserror v2.0.21
+   Compiling chacha20 v0.10.2
+   Compiling quinn-udp v0.5.16
+   Compiling jobserver v0.1.35
+   Compiling errno v0.3.14
+   Compiling socket2 v0.6.5
+   Compiling signal-hook-registry v1.4.8
+   Compiling mio v1.2.4
+   Compiling cc v1.8.0
+   Compiling http v1.5.0
+   Compiling rand v0.10.3
+   Compiling rand_pcg v0.10.2
+   Compiling quinn v0.11.12
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling aho-corasick v1.1.5
+   Compiling lru-slab v0.1.3
+   Compiling alloc-no-stdlib v3.0.0
+   Compiling rustix v1.1.5
+   Compiling regex-syntax v0.8.11
+   Compiling tinyvec v1.13.3
+   Compiling rustc-hash v2.1.3
+   Compiling crc32fast v1.5.3
+   Compiling serde v1.0.229
+   Compiling zmij v1.0.23
+   Compiling cmake v0.1.58
+   Compiling alloc-stdlib v0.3.0
+   Compiling digest v0.10.7
+   Compiling serde_json v1.0.154
+   Compiling linux-raw-sys v0.12.1
+   Compiling simd-adler32 v0.3.10
+   Compiling adler2 v2.0.1
+   Compiling bitflags v2.13.2
+   Compiling hashbrown v0.17.1
+   Compiling equivalent v1.0.3
+   Compiling fastrand v2.5.0
+   Compiling miniz_oxide v0.9.1
+   Compiling md-5 v0.10.6
+   Compiling aws-lc-sys v0.46.0
+   Compiling brotli-decompressor v6.0.1
+   Compiling regex-automata v0.4.18
+   Compiling indexmap v2.14.2
+   Compiling tokio-macros v2.7.2
+   Compiling futures-macro v0.3.34
+   Compiling thiserror-impl v2.0.21
+   Compiling serde_derive v1.0.229
+   Compiling tokio v1.53.3
+   Compiling futures-util v0.3.34
+   Compiling atomic-waker v1.1.2
+   Compiling base64 v0.22.1
+   Compiling fnv v1.0.7
+   Compiling flate2 v1.1.10
+   Compiling xattr v1.6.1
+   Compiling brotli v9.0.0
+   Compiling webpki-roots v1.0.10
+   Compiling regex v1.13.1
+   Compiling futures-executor v0.3.34
+   Compiling futures v0.3.34
+   Compiling tokio-util v0.7.20
+   Compiling h3 v0.0.8
+   Compiling h2 v0.4.20
+   Compiling eqproxy-core v0.8.0 (/root/eqproxy-verify/eqproxy-core)
+   Compiling rustls-webpki v0.103.16
+   Compiling quinn-proto v0.11.19
+   Compiling tokio-rustls v0.26.6
+   Compiling h3-quinn v0.0.10
+   Compiling eqproxy-net v0.8.0 (/root/eqproxy-verify/eqproxy-net)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 43.05s
+     Running tests/e2e_admin.rs (target/debug/deps/e2e_admin-ec5cf081cc7d67ff)
+
+running 16 tests
+test a_tcp_admin_plane_exposes_no_unix_socket_policy ... ok
+test draining_every_server_yields_an_explicit_503 ... ok
+WARN admin connection refused: unix-socket:uid=0 is not in unix_socket_allow_uids
+WARN admin connection refused: unix-socket:uid=0 is not in unix_socket_allow_uids
+test admin_unix_socket_acl_uids_write_replace_and_clear_the_posix_acl ... ok
+test admin_unix_socket_refuses_live_sockets_and_replaces_stale_ones ... ok
+test admin_unix_socket_group_mode_and_uid_allowlist ... ok
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:40486","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:32871/state","status":200,"backend":"api","server":"127.0.0.1:32871","from":"ready","to":"drain"}
+test admin_unix_socket_policy_reloads_without_a_restart ... FAILED
+test status_reports_topology_and_live_counters ... ok
+test the_dataplane_keeps_serving_when_the_admin_task_dies ... ok
+
+thread 'admin_unix_socket_policy_reloads_without_a_restart' (705206) panicked at eqproxy-net/tests/e2e_admin.rs:1298:10:
+an unprivileged chown to a foreign group must fail: ()
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:49200","role":"read","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":403,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50398","role":"none","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":401,"backend":null,"server":null,"from":null,"to":null}
+test metrics_export_is_prometheus_with_a_fixed_series_count ... ok
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"unix-socket:uid=0","role":"read","method":"PUT","path":"/api/v1/backends/api","status":403,"backend":null,"server":null,"from":null,"to":null}
+test without_a_write_token_the_state_route_stays_read_only ... ok
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50400","role":"read","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":403,"backend":null,"server":null,"from":null,"to":null}
+test admin_unix_socket_serves_the_same_routes_and_is_owner_only ... ok
+test malformed_and_oversized_heads_are_refused_without_killing_the_plane ... ok
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50402","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":415,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50404","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":411,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50406","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":400,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50416","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":403,"backend":null,"server":null,"from":null,"to":null}
+INFO server drained: backend=api target=127.0.0.1:32871 active=0 events=1
+test the_token_gates_every_route ... ok
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:40488","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:32871/state","status":200,"backend":"api","server":"127.0.0.1:32871","from":"drain","to":"ready"}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50430","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19999/state","status":404,"backend":"api","server":"127.0.0.1:19999","from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55690","role":"none","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":401,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55694","role":"read","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":403,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50434","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":200,"backend":"api","server":"127.0.0.1:19000","from":"ready","to":"drain"}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55700","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":200,"backend":"api","server":"127.0.0.1:19000","from":"ready","to":"ready"}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55706","role":"read","method":"PUT","path":"/api/v1/backends/api","status":403,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50456","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":200,"backend":"api","server":"127.0.0.1:19000","from":"drain","to":"ready"}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55716","role":"operate","method":"PUT","path":"/api/v1/backends/api","status":503,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50458","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":200,"backend":"api","server":"127.0.0.1:19000","from":"ready","to":"maintenance"}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55720","role":"read","method":"PUT","path":"/api/v1/listeners/web","status":403,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:50478","role":"operate","method":"PUT","path":"/api/v1/backends/api/servers/127.0.0.1:19000/state","status":200,"backend":"api","server":"127.0.0.1:19000","from":"maintenance","to":"ready"}
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55732","role":"operate","method":"PUT","path":"/api/v1/listeners/web","status":503,"backend":null,"server":null,"from":null,"to":null}
+test write_roles_and_bodies_are_enforced_over_the_wire ... ok
+AUDIT {"event":"admin_write","ts_unix":1793132468,"remote":"127.0.0.1:55742","role":"read","method":"POST","path":"/api/v1/certificates/reload","status":403,"backend":null,"server":null,"from":null,"to":null}
+AUDIT {"event":"admin_write","ts_unix":1793132469,"remote":"127.0.0.1:55754","role":"operate","method":"POST","path":"/api/v1/certificates/reload","status":503,"backend":null,"server":null,"from":null,"to":null}
+test every_route_is_authorized_by_the_matrix ... ok
+test drain_skips_new_requests_and_lets_the_in_flight_one_finish ... ok
+
+failures:
+
+failures:
+    admin_unix_socket_policy_reloads_without_a_restart
+
+test result: FAILED. 15 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.67s
+
+error: test failed, to rerun pass `-p eqproxy-net --test e2e_admin`

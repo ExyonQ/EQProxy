@@ -1,0 +1,66 @@
+[
+  {
+    "scenario": "old-100ms",
+    "health_timeout": "100ms",
+    "healthy_origin_probe_delay_ms": 300,
+    "requests": 20,
+    "bodies": {
+      "": 20
+    },
+    "first_unexpected_response": "HTTP/1.1 503 service unavailable\r\nconnection: close\r\ncontent-length: 0\r\n\r\n",
+    "transcript": [
+      "request 1: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 2: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 3: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 4: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 5: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 6: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 7: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 8: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 9: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 10: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 11: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 12: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 13: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 14: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 15: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 16: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 17: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 18: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 19: 'HTTP/1.1 503 service unavailable' body=''",
+      "request 20: 'HTTP/1.1 503 service unavailable' body=''"
+    ]
+  },
+  {
+    "scenario": "repaired-1s",
+    "health_timeout": "1s",
+    "healthy_origin_probe_delay_ms": 300,
+    "requests": 20,
+    "bodies": {
+      "a": 20
+    },
+    "first_unexpected_response": "",
+    "transcript": [
+      "request 1: 'HTTP/1.1 200 OK' body='a'",
+      "request 2: 'HTTP/1.1 200 OK' body='a'",
+      "request 3: 'HTTP/1.1 200 OK' body='a'",
+      "request 4: 'HTTP/1.1 200 OK' body='a'",
+      "request 5: 'HTTP/1.1 200 OK' body='a'",
+      "request 6: 'HTTP/1.1 200 OK' body='a'",
+      "request 7: 'HTTP/1.1 200 OK' body='a'",
+      "request 8: 'HTTP/1.1 200 OK' body='a'",
+      "request 9: 'HTTP/1.1 200 OK' body='a'",
+      "request 10: 'HTTP/1.1 200 OK' body='a'",
+      "request 11: 'HTTP/1.1 200 OK' body='a'",
+      "request 12: 'HTTP/1.1 200 OK' body='a'",
+      "request 13: 'HTTP/1.1 200 OK' body='a'",
+      "request 14: 'HTTP/1.1 200 OK' body='a'",
+      "request 15: 'HTTP/1.1 200 OK' body='a'",
+      "request 16: 'HTTP/1.1 200 OK' body='a'",
+      "request 17: 'HTTP/1.1 200 OK' body='a'",
+      "request 18: 'HTTP/1.1 200 OK' body='a'",
+      "request 19: 'HTTP/1.1 200 OK' body='a'",
+      "request 20: 'HTTP/1.1 200 OK' body='a'"
+    ]
+  }
+]

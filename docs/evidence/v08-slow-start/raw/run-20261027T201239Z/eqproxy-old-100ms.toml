@@ -1,0 +1,17 @@
+schema_version = 1
+[listener.web]
+listen = "127.0.0.1:0"
+backend = "api"
+mode = "http"
+[backend.api]
+balance = "roundrobin"
+slow_start = "2s"
+servers = [{ addr = "127.0.0.1:58751" }, { addr = "127.0.0.1:58754" }]
+[backend.api.health_check]
+type = "http"
+http_path = "/healthz"
+interval = "150ms"
+timeout = "100ms"
+fall = 1
+rise = 1
+expect_status = "200"
