@@ -110,7 +110,9 @@ mod tests {
         let version = u32::from_le_bytes(blob[0..4].try_into().expect("version"));
         assert_eq!(version, XATTR_VERSION);
         blob[4..]
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|chunk| {
                 (
                     u16::from_le_bytes(chunk[0..2].try_into().expect("tag")),

@@ -120,8 +120,10 @@ TOMLs the run used are next to them.
 - The panel journey of [v08-panel](v08-panel.md) re-run against it:
   **42 PASS, 0 FAIL, `ALL PASS`**
   ([`run-20261027T012157Z`](v08-panel/raw/run-20261027T012157Z/)).
-- `cargo test --workspace` on the 0.8.0 tree: **30 suites, 558 passed, 0
-  failed, 2 ignored** (the miri-gated cases).
+- `cargo test --workspace` on the 0.8.0 tree: on this macOS host **30
+  targets, 558 passed, 0 failed, 2 ignored** (the miri-gated cases); the
+  release workflow runs the same suite on the Linux tier-1 runner and counts
+  **559 passed, 0 failed** (one test is Linux-only).
 
 ## Not executed in this run
 

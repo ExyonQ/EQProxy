@@ -45,9 +45,9 @@ diagnostics, configuration, administration, extensibility and security.
 > ([ADR-0025](docs/adr/0025-certificate-renewal-without-restart.md)) and an
 > **opt-in server-rendered panel** with bearer sessions, a per-session CSRF
 > token and a write audit line, no JavaScript
-> ([ADR-0029](docs/adr/0029-panel-sessions-and-csrf.md)), with **558 tests**
-> across 30 targets green
-> (`cargo test --workspace`, 2026-10-27) plus two Docker-gated
+> ([ADR-0029](docs/adr/0029-panel-sessions-and-csrf.md)), with **559 tests**
+> across 30 targets green on the tier-1 platform (558 on macOS, where one
+> test is Linux-only; `cargo test --workspace`, 2026-10-27) plus two Docker-gated
 > harnesses (evidence from the v0.6 gate, not re-run since):
 > [differential corpus](docs/differential-corpus.md) **23/23** cases against
 > HAProxy 3.4.6, nginx, the ingress-nginx data plane and static Envoy

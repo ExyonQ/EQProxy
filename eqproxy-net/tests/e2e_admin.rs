@@ -1391,7 +1391,9 @@ async fn admin_unix_socket_acl_uids_write_replace_and_clear_the_posix_acl() {
 
     fn entries(blob: &[u8]) -> Vec<(u16, u32)> {
         blob[4..]
-            .chunks_exact(8)
+            .as_chunks::<8>()
+            .0
+            .iter()
             .map(|chunk| {
                 (
                     u16::from_le_bytes(chunk[0..2].try_into().expect("tag")),
