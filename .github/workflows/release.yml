@@ -54,8 +54,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Install Rust targets
-        run: rustup toolchain install stable --profile minimal && rustup default stable && rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      # Same pin as CI (rust-toolchain.toml, read here): the binary this job
+      # releases must come from the compiler the suite tested, not from
+      # whatever `stable` the runner happened to carry.
+      - name: Install Rust targets (pinned in rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup target add --toolchain "$channel" aarch64-apple-darwin x86_64-apple-darwin
 
       - name: Allow loopback services (macOS firewall drops unsigned listeners)
         run: |

@@ -3134,11 +3134,20 @@ fn start_balancer_origin(
 
 /// One request through the real binary; the origin marker as body.
 fn marker_body(proxy: &str) -> String {
-    body_of(&proxied(
+    marker_response(proxy).0
+}
+
+/// One request through the real binary: the marker body plus the raw
+/// response, so a routing mismatch can name what the proxy actually
+/// answered. The built-in "no server available" answer is a
+/// `503 service unavailable` with `content-length: 0`, which is why such a
+/// failure used to read as `unexpected origin body ""`.
+fn marker_response(proxy: &str) -> (String, String) {
+    let raw = proxied(
         proxy,
         b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
-    ))
-    .to_owned()
+    );
+    (body_of(&raw).to_owned(), raw)
 }
 
 /// leastconn (B-H5/B-N12/B-E6) through the **real** binary: while one
@@ -3245,6 +3254,13 @@ fn run_slow_start_ramps_the_recovered_server_up() {
     let healthy_b = std::sync::Arc::new(AtomicBool::new(false));
     let a = start_balancer_origin("a", healthy_a, served_a, None);
     let b = start_balancer_origin("b", std::sync::Arc::clone(&healthy_b), served_b, None);
+    // The check's timeout is 1 s, not the 100 ms a dead origin would need:
+    // this harness's probe shares the machine with the whole suite, and at
+    // 100 ms a scheduling hiccup under load marked the *healthy* origin down
+    // (`fall = 1`); the requests then met the built-in 503 with an empty
+    // body — the `unexpected origin body ""` flake recorded on 2026-10-27.
+    // B's intentional failure is a status mismatch (500), which no timeout
+    // can absorb, so the check still drops B on its first probe.
     let config = temp_config(
         "slowstart",
         &format!(
@@ -3261,7 +3277,7 @@ fn run_slow_start_ramps_the_recovered_server_up() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"100ms\"\n\
+             timeout = \"1s\"\n
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n"
@@ -3300,15 +3316,30 @@ fn run_slow_start_ramps_the_recovered_server_up() {
     }
 
     // Phase 2: recover B and watch the ramp — the recovered server is
-    // nearly invisible next to the fully ramped one.
+    // nearly invisible next to the fully ramped one. The window opens at
+    // B's **first byte of traffic**, observed through the dataplane, not at
+    // a fixed sleep: the ramp starts at the health checker's tick, and under
+    // load that tick can land later than any sleep the harness could pick,
+    // so the A-only answers before it are skipped instead of timed.
     healthy_b.store(true, Ordering::SeqCst);
-    std::thread::sleep(Duration::from_millis(300));
+    let deadline = Instant::now() + Duration::from_secs(20);
     let mut early = (0usize, 0usize);
-    for _ in 0..10 {
-        match marker_body(&proxy_addr).as_str() {
+    loop {
+        let (body, raw) = marker_response(&proxy_addr);
+        if early.0 + early.1 == 0 && body == "a" {
+            assert!(
+                Instant::now() < deadline,
+                "the recovered server never took traffic within 20 s"
+            );
+            continue; // the tick has not landed yet: not part of the ramp
+        }
+        match body.as_str() {
             "a" => early.0 += 1,
             "b" => early.1 += 1,
-            other => panic!("unexpected origin body {other:?}"),
+            other => panic!("unexpected origin body {other:?}; the proxy answered {raw:?}"),
+        }
+        if early.0 + early.1 == 10 {
+            break;
         }
     }
     assert!(
@@ -3329,10 +3360,11 @@ fn run_slow_start_ramps_the_recovered_server_up() {
         window += 1;
         late = (0, 0);
         for _ in 0..10 {
-            match marker_body(&proxy_addr).as_str() {
+            let (body, raw) = marker_response(&proxy_addr);
+            match body.as_str() {
                 "a" => late.0 += 1,
                 "b" => late.1 += 1,
-                other => panic!("unexpected origin body {other:?}"),
+                other => panic!("unexpected origin body {other:?}; the proxy answered {raw:?}"),
             }
         }
         if late == (5, 5) {

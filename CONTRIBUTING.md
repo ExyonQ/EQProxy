@@ -8,8 +8,12 @@ first so the scope can be agreed before code is written.
 
 ## Development setup
 
-Install a stable Rust toolchain: the workspace uses edition 2024, so **Rust
-1.85 or newer** is required. CI runs stable and the release image pins 1.97.
+Install a Rust toolchain: the workspace uses edition 2024, so **Rust 1.85 or
+newer** is required. The version every leg actually builds with is pinned in
+`rust-toolchain.toml` (currently 1.99.1) and `rustup` installs it
+automatically when you enter the checkout; CI and the release image use that
+same compiler, so bumping the pin is a deliberate change with its own
+verification rather than a moving `stable`.
 
 ```bash
 git clone https://github.com/ExyonQ/EQProxy.git

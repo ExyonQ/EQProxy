@@ -1,0 +1,13 @@
+# The compiler every leg builds with: the CI jobs, the release binaries and
+# the container image. A moving `stable` used to arrive on its own, and a new
+# stable brought a clippy lint that turned CI red between two pushes
+# (repaired in 7da08df); with this file the arrival of a toolchain is a
+# deliberate, verified bump instead.
+#
+# CI and the darwin release build read the `channel` line below; the release
+# image's builder names the same version in docker/Dockerfile
+# (ARG RUST_VERSION) and a CI gate refuses a mismatch.
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

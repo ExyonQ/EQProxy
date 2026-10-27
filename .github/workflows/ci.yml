@@ -15,8 +15,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
+      # The toolchain is pinned in rust-toolchain.toml, not `stable`: a new
+      # stable must arrive as a deliberate bump with its evidence, never as a
+      # surprise lint or formatting failure in this job. The step reads the
+      # file, so the pin stays the single source.
+      - name: Install Rust toolchain (pinned in rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+
+      # The release image is built by docker/Dockerfile, whose builder stage
+      # names its own Rust version in ARG RUST_VERSION. Two pins that can
+      # drift are not a pin, so this gate fails when they disagree.
+      - name: Docker builder matches the toolchain pin
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          builder=$(sed -n 's/^ARG RUST_VERSION=\(.*\)$/\1/p' docker/Dockerfile)
+          test "$channel" = "$builder" \
+            || { echo "rust-toolchain.toml pins $channel but docker/Dockerfile builds with $builder"; exit 1; }
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -81,8 +100,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        run: rustup toolchain install stable --profile minimal && rustup default stable
+      # Same pin as the tier-1 job: the journey must everywhere be built by
+      # one compiler, on both runner architectures.
+      - name: Install Rust toolchain (pinned in rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
