@@ -138,10 +138,24 @@ and [`.../20261028T015619Z/e2e-pool-under-load.txt`](v08-health-probe-robust/raw
 
 ## 4. CI on this tree
 
-Pending at the time of writing: the commit that carries this page is the one
-whose CI run proves the two repairs together. Its verdict, run URL and the
-job list are appended here as soon as the run ends — until then the CI leg of
-this increment is **NOT EXECUTED**.
+Commit `16c80a5`, run
+[40618301936](https://github.com/ExyonQ/EQProxy/actions/runs/40618301936) —
+**all five jobs success**:
+
+| Job | Conclusion |
+|---|---|
+| Linux x86_64 (tier-1) | success |
+| Suite as root (uid-gated skips declared) | success |
+| Evidence test citations | success |
+| Admin socket ACL E2E (native amd64) | success |
+| Admin socket ACL E2E (native arm64) | success |
+
+The root tier — the one that failed on `1b2db9b` — ran the repaired test in
+its log:
+
+```
+2026-10-28T02:02:53.4380179Z test keep_alive_reuses_a_single_backend_connection ... ok
+```
 
 ## 5. Limits and NOT EXECUTED
 
@@ -160,5 +174,37 @@ this increment is **NOT EXECUTED**.
 - Docker, Scout and the release artifacts: untouched by this increment
   (**NOT EXECUTED**).
 
-The increment's audit legs (Veyra Proof, Rust Audit, CodeGraph, Hindsight) are
-recorded in the delivery of the commit that carries this page.
+## 6. Audit legs
+
+- **Veyra Proof** — `veyra audit . --profile standard`: **ACCEPTED**, exit 0,
+  evidence `.veyra/evidence/20261028T020048Z/`. OK: `rustfmt`, `cargo check`,
+  `clippy -D warnings`, `cargo test --locked --workspace` (558 passed, 0
+  failed, 2 ignored over 30 targets), `cargo-audit`, `veyra-anti-theater`,
+  `nextest`, `llvm-cov`, `deny`, `machete`, `veyra-e2e`. SKIPPED: `dylint`
+  (no lint configuration in the workspace) and `cargo-semver-checks` (no
+  registry baseline for unpublished crates). INCONCLUSIVE: `cargo-geiger`
+  (coverage warnings in 4 runs; unsafe counts are a lower bound, not a pass).
+- **Rust Audit** — `python3.13 <rust-ai-audit>/scripts/rust_audit.py scan .
+  --format md --out report --fail-on high`: exit 0, **0 critical, 0 high**,
+  241 medium, 85 low ([report/rust-audit-20261028-030033.md](../../report/rust-audit-20261028-030033.md),
+  local-only). The scan names the new helper once,
+  `[R08 · medium] e2e_pool.rs:176 wait_for_proxied` — "wall-clock/monotonic
+  time read in test": reviewed, heuristic false positive. The clock there is
+  a deadline that only bounds the wait and turns a stuck proxy into a named
+  failure; no assertion compares timings. Every other finding in the report
+  predates this increment.
+- **CodeGraph Rust** — index rebuilt after the last source edit: 63 files,
+  61 848 lines, 7 043 nodes, 12 441 edges, `graph_complete: true`,
+  `vector_index_ready: true`, `index_ms: 850 476` (14.2 min, local Ollama,
+  `--batch-size 16`). `agent impact` on `wait_for_proxied` returned one
+  caller, `keep_alive_reuses_a_single_backend_connection`, which the source
+  confirms ([`e2e_pool.rs:207`](../../eqproxy-net/tests/e2e_pool.rs#L207)); its
+  claim that the helper depends on an `eqproxy-config` import is wrong (a
+  `#[cfg(test)]` helper in `eqproxy-net/tests/` cannot depend on another
+  crate's private module) and is not repeated. `agent context` correctly
+  listed the readers of `http_requests_proxied` but could not locate the
+  increment and said so; the source does
+  ([`http1.rs:2523`](../../eqproxy-net/src/http1.rs#L2523)).
+- **Hindsight** — note stored in bank `eqproxy` ("Health probes at 1 s and the
+  proxied-counter wait"), memory ids `971ac55a-0ff5-4035-8cf0-5121ccb103e4`
+  and `69e208e8-bc53-47c6-8ffa-3a8f8eb7738c`.
