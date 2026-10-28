@@ -223,14 +223,16 @@ its log:
 - The negative control of §1.1 is a **local, temporary** patch to
   `eqproxy-net/src/health.rs`, restored byte-for-byte and never committed; the
   shipped tree has no `_want` arm and `git diff` on that file is empty.
-- This follow-up is published as `ce77c5a`; its CI run
+- This follow-up is published as `ce77c5a`. Its first CI run
   [40722095133](https://github.com/ExyonQ/EQProxy/actions/runs/40722095133)
   came back 4/5, with `suite-as-root` failing on a test the commit does not
-  touch. §7 diagnoses it (descriptors under `sudo`, not the proxy), and the
-  fix `2749ec0` ran green in
-  [40723747985](https://github.com/ExyonQ/EQProxy/actions/runs/40723747985)
-  (**5/5**, 559 passed per tier). Docker image and Scout gate remain
-  untouched by this follow-up (**NOT EXECUTED**).
+  touch; §7 diagnoses that failure (descriptors under `sudo`) and §7.1 the
+  next one (a freed port). `2749ec0` ran green in
+  [40723747985](https://github.com/ExyonQ/EQProxy/actions/runs/40723747985),
+  and the final tree (`95cfc18`, both fixes) in
+  [40726664521](https://github.com/ExyonQ/EQProxy/actions/runs/40726664521):
+  **5/5**, both tiers 559 passed / 0 failed / 2 ignored. Docker image and
+  Scout gate remain untouched by this follow-up (**NOT EXECUTED**).
 
 ## 6. Audit legs
 
@@ -429,3 +431,10 @@ fail=0/10                                            (load 235-247)
 
 Raw: [`e2e-resilience-dead-backend-under-load.txt`](v08-health-probe-robust/raw/20261028T162500Z/e2e-resilience-dead-backend-under-load.txt)
 and [`…-2.txt`](v08-health-probe-robust/raw/20261028T162500Z/e2e-resilience-dead-backend-under-load-2.txt).
+
+Run [40726664521](https://github.com/ExyonQ/EQProxy/actions/runs/40726664521)
+over the commit that carries this fix (`95cfc18`): **5/5 jobs success**. The
+root log has the three retry tests green, and the two tests that had failed
+before in this tier (`pool_sizing…`, and the keep-alive journey this
+follow-up repaired) are green there too; both tiers closed at **559 passed,
+0 failed, 2 ignored** over 30 targets.
