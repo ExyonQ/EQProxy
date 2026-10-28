@@ -90,6 +90,16 @@ jobs:
           test -n "$channel"
           rustup toolchain install "$channel" --profile minimal
 
+      # `sudo` runs the suite under PAM's limit set, which on this runner is a
+      # few hundred descriptors — tighter than the unprivileged job's shell.
+      # The 400-stream burst test holds ~820 descriptors in one process (400
+      # client-side h2 streams alongside 400 backend exchanges); under the
+      # tight limit one dial failed and the exchange answered 502, which is
+      # what the product does when it cannot open a socket. Observed in run
+      # 40722095133 and reproduced locally: the `e2e_http2` target passes at
+      # `ulimit -n 1024` and fails at 512 with the same 502. The limit is
+      # raised here for the whole root suite and asserted, so a sudo/PAM
+      # policy change fails with a named message instead of a mystery 502.
       - name: Tests as root (uid 0)
         timeout-minutes: 20
         run: |
@@ -99,7 +109,18 @@ jobs:
             RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
             CARGO_HOME=/tmp/eqproxy-root-cargo \
             CARGO_TARGET_DIR=/tmp/eqproxy-root-target \
-            cargo test --workspace -- --nocapture 2>&1 | tee /tmp/suite-root.log
+            bash -c '
+              set -euo pipefail
+              ulimit -Hn 65536 2>/dev/null || true
+              ulimit -n 65536
+              got="$(ulimit -n)"
+              if [ "$got" -lt 65536 ]; then
+                printf "root suite fd limit is %s, not 65536: raise it, the 400-stream test needs ~820\n" "$got" >&2
+                exit 1
+              fi
+              printf "root suite fd limit: %s\n" "$got"
+              exec cargo test --workspace -- --nocapture
+            ' 2>&1 | tee /tmp/suite-root.log
 
       - name: UID-gated skips are declared (root run)
         run: |

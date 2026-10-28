@@ -223,9 +223,11 @@ its log:
 - The negative control of §1.1 is a **local, temporary** patch to
   `eqproxy-net/src/health.rs`, restored byte-for-byte and never committed; the
   shipped tree has no `_want` arm and `git diff` on that file is empty.
-- This follow-up is uncommitted at the time of writing, so its own CI run,
-  Docker image and Scout gate are **NOT EXECUTED**; the release artifacts are
-  untouched.
+- This follow-up is published as `ce77c5a`. Its CI run
+  [40722095133](https://github.com/ExyonQ/EQProxy/actions/runs/40722095133)
+  came back 4/5: `suite-as-root` failed on a test this commit does not touch,
+  diagnosed in §7 and fixed in the commit that carries that section. Docker
+  image and Scout gate remain untouched by this follow-up (**NOT EXECUTED**).
 
 ## 6. Audit legs
 
@@ -322,3 +324,46 @@ its log:
 - **Hindsight** — note stored in bank `eqproxy` ("Keep-alive journey probe
   raised to 1s (last sub-second cli_e2e probe)"), exit 0, `Memory stored
   successfully`; first memory id `059de630-424c-4249-a8a3-a610e2936440`.
+
+## 7. Publication: the root job's descriptor limit
+
+The change was published as `ce77c5a`. Its CI run
+[40722095133](https://github.com/ExyonQ/EQProxy/actions/runs/40722095133)
+came back **red in one job**, `suite-as-root`, on a test the commit does not
+touch:
+
+```
+thread 'pool_sizing_keeps_a_400_stream_burst_without_churn' panicked at eqproxy-net/tests/e2e_http2.rs:712:9:
+  left: 502
+ right: 200
+```
+
+The other four jobs were green, and the unprivileged tier had run the same
+test green in the same workflow (`test
+pool_sizing_keeps_a_400_stream_burst_without_churn ... ok`, 16:05:02Z). A
+`502` is the product's answer when a dial fails, and here the failing dial is
+the proxy having no descriptor to open the backend connection — not a pool or
+framing defect.
+
+**Cause.** `sudo` runs the suite under PAM's limit set, which on this runner
+is lower than the unprivileged shell's. The test keeps both ends of 400
+backend exchanges inside one process — 400 origin-accepted sockets plus 400
+proxied dials, ~820 descriptors — so a limit below that turns one dial into a
+`502`.
+
+**Reproduced locally** (macOS arm64, uid 501), with no product change:
+
+```
+# the single test
+ulimit -n 800    → FAILED: left 502, right 200 at e2e_http2.rs:712
+# the whole target (9 tests, default parallelism)
+ulimit -n 512    → FAILED: the same 502
+ulimit -n 1024   → ok. 9 passed
+```
+
+**Fix.** The root job raises the limit to 65 536 for the whole suite and
+asserts it, printing the value it got; a future sudo/PAM policy change fails
+with a named message instead of a mystery `502`. No test, assertion or retry
+was touched: a `502` when no socket can be opened is correct behaviour, and
+the test's contract needs the descriptors. The run of the commit that carries
+this fix is the verification, and §5 records it once it exists.
