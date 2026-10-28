@@ -1,0 +1,18 @@
+== run_http_check_interops_with_keep_alive_origin, probe timeout = 1s ==
+== Apple M2 Pro / 10 cpus, 8 spinners ==
+[rep 01] exit=0 35s load={ 218.23 213.43 210.49 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.29s
+[rep 02] exit=0 6s load={ 221.18 214.22 210.80 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.27s
+[rep 03] exit=0 5s load={ 222.29 214.56 210.94 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.13s
+[rep 04] exit=0 5s load={ 222.03 214.64 210.99 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.16s
+[rep 05] exit=0 5s load={ 225.07 215.39 211.28 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.11s
+[rep 06] exit=0 5s load={ 228.10 216.18 211.58 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.26s
+[rep 07] exit=0 5s load={ 230.74 216.92 211.87 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.91s
+[rep 08] exit=0 6s load={ 232.76 217.57 212.13 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.10s
+[rep 09] exit=0 5s load={ 230.94 217.45 212.12 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.03s
+[rep 10] exit=0 5s load={ 229.10 217.29 212.09 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.25s
+[rep 11] exit=0 5s load={ 229.97 217.67 212.25 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.06s
+[rep 12] exit=0 6s load={ 230.46 217.97 212.39 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.19s
+[rep 13] exit=0 5s load={ 231.14 218.32 212.55 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.04s
+[rep 14] exit=0 6s load={ 232.49 218.81 212.76 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.11s
+[rep 15] exit=0 5s load={ 231.73 218.88 212.82 } :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 3.20s
+fail=0/15

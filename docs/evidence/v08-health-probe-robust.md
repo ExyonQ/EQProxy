@@ -46,11 +46,58 @@ sick origin, a down primary that fails over, a backup pool that takes over —
 is untouched by the timeout, because none of them depends on the probe
 firing early.
 
-The 150 ms probe of `run_http_check_interops_with_keep_alive_origin`
-([`4658`](../../eqproxy-cli/tests/cli_e2e.rs#L4658)) was left as it is: it is a
-different journey (a local keep-alive origin cycled many times, no failover)
-and was not part of this repair. It is named here as the one remaining
-sub-second probe with `fall = 1`.
+### 1.1 The last sub-second probe, one increment later
+
+`run_http_check_interops_with_keep_alive_origin`
+([`4649`](../../eqproxy-cli/tests/cli_e2e.rs#L4649)) was the one journey still on
+a 150 ms probe with `fall = 1`. It now says `"1s"` as well
+([`4665`](../../eqproxy-cli/tests/cli_e2e.rs#L4665)), and the origin it runs —
+`start_keepalive_origin`, not the balancer origin — carries the same invariant
+in its own doc comment ([`4596`](../../eqproxy-cli/tests/cli_e2e.rs#L4596)), so
+the next journey that reuses it inherits the rule without reading this page.
+No assertion changed.
+
+A longer timeout can hide the very defect this journey exists for (a checker
+that reads a keep-alive response to EOF), so the change was checked against
+that defect directly. The production checker was temporarily patched back to
+reading the body to EOF, the journey run three times, and the file restored
+byte-for-byte (`sha256 146a3542…`, `git diff -- eqproxy-net/src/health.rs`
+empty). It failed **3/3**:
+
+```
+[rep 1] exit=101
+    panicked at eqproxy-cli/tests/cli_e2e.rs:4699:9:
+    assertion `left == right` failed: the server must stay UP after check cycle 2
+[rep 2] exit=101  … check cycle 2
+[rep 3] exit=101  … check cycle 2
+```
+
+The broken checker marks the origin DOWN when its first probe times out
+(≈1.1 s), and the journey's second round meets the empty `503` — the same
+symptom one second later, not a scenario the longer timeout absorbs.
+
+With the real checker: 15/15 repetitions under eight CPU spinners on the same
+machine (load average 218–233; four foreign 200 %-CPU test binaries from
+another project were also running, so this is heavier than the 2026-10-27
+flake), and the whole target green.
+
+```
+[rep 15] exit=0 5s load={ 231.73 218.88 212.82 } :: test result: ok. 1 passed; 0 failed … finished in 3.20s
+fail=0/15
+
+$ cargo test -p eqproxy-cli --test cli_e2e
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.80s
+
+$ cargo fmt --all -- --check                               # exit 0
+```
+
+Raw: [`keepalive-probe-1s.txt`](v08-health-probe-robust/raw/20261028T145002Z/keepalive-probe-1s.txt),
+[`keepalive-1s-under-load.txt`](v08-health-probe-robust/raw/20261028T145002Z/keepalive-1s-under-load.txt),
+[`keepalive-1s-negative-control.txt`](v08-health-probe-robust/raw/20261028T145002Z/keepalive-1s-negative-control.txt)
+and [`local-full-target.txt`](v08-health-probe-robust/raw/20261028T145002Z/local-full-target.txt).
+The journey was run once more after the final doc-comment edit of the same
+file (`1 passed`, 2.89 s):
+[`keepalive-post-edit.txt`](v08-health-probe-robust/raw/20261028T145002Z/keepalive-post-edit.txt).
 
 ## 2. Local verification (macOS arm64, uid 501)
 
@@ -170,11 +217,19 @@ its log:
   the sibling journeys sample them after the last head too. None has been
   observed failing; this increment only repaired the counter that failed and
   the probe timeouts that were asked for. They are candidates, not fixes.
-- The 150 ms probe named in §1 is unchanged (out of scope of this repair).
-- Docker, Scout and the release artifacts: untouched by this increment
-  (**NOT EXECUTED**).
+- The four sibling probes named in §6.2 are verified but **not** repaired:
+  the request covered the `cli_e2e` sites. They are the next candidates, not
+  a claim that the rest of the suite is flake-free.
+- The negative control of §1.1 is a **local, temporary** patch to
+  `eqproxy-net/src/health.rs`, restored byte-for-byte and never committed; the
+  shipped tree has no `_want` arm and `git diff` on that file is empty.
+- This follow-up is uncommitted at the time of writing, so its own CI run,
+  Docker image and Scout gate are **NOT EXECUTED**; the release artifacts are
+  untouched.
 
 ## 6. Audit legs
+
+### 6.1 The probe and counter increment (commits `1b2db9b`, `16c80a5`, `19c7be2`)
 
 - **Veyra Proof** — `veyra audit . --profile standard`: **ACCEPTED**, exit 0,
   evidence `.veyra/evidence/20261028T020048Z/`. OK: `rustfmt`, `cargo check`,
@@ -208,3 +263,62 @@ its log:
 - **Hindsight** — note stored in bank `eqproxy` ("Health probes at 1 s and the
   proxied-counter wait"), memory ids `971ac55a-0ff5-4035-8cf0-5121ccb103e4`
   and `69e208e8-bc53-47c6-8ffa-3a8f8eb7738c`.
+
+### 6.2 This follow-up (uncommitted)
+
+- **Veyra Proof** — `veyra audit . --profile standard`: **ACCEPTED**, exit
+  **0** (`VEYRA_EXIT=0`), evidence
+  [`.veyra/evidence/20261028T153231Z/`](../../.veyra/evidence/20261028T153231Z/report.md).
+  OK: `rustfmt`, `cargo check`, `clippy`, `cargo test` (558 passed, 0 failed,
+  2 ignored over 30 targets), `cargo-audit`, `veyra-anti-theater`,
+  `cargo-nextest`, `cargo-llvm-cov`, `cargo-deny`, `cargo-machete`,
+  `veyra-e2e`. SKIPPED by the tool's own policy: `dylint` (no lint
+  configuration in the workspace) and `cargo-semver-checks` (no registry
+  baseline). INCONCLUSIVE: `cargo-geiger` (coverage warnings in 4 runs; the
+  unsafe counts are a lower bound). An earlier run of the same tree
+  (`20261028T145857Z`) reached the same decision and the same 558/0/2; the
+  cited one is the second because the first was piped through `tee`, which
+  hid its exit status, and a verdict without its code is not evidence.
+- **Rust Audit** — `python3.13 <rust-ai-audit>/scripts/rust_audit.py scan .
+  --format md --out report --fail-on high` (tool 0.2.7): exit 0, **0
+  critical, 0 high**, 241 medium, 85 low
+  ([report/rust-audit-20261028-155611.md](../../report/rust-audit-20261028-155611.md),
+  local-only). Against the previous scan of the tree
+  (`rust-audit-20261028-030033.md`) the finding set is **identical**:
+  `added: []`, `removed: []` over the same per-rule/per-file/per-function
+  multiset. A probe timeout and two doc comments add no finding, and the
+  existing `R08` "wall-clock in test" notices keep their review status
+  (deadlines, not timing assertions).
+- **CodeGraph Rust** — index rebuilt after the last Rust edit (only
+  `cli_e2e.rs` changed, so 62 of 63 files came from cache): 63 files,
+  61 855 lines, 7 043 nodes, 12 441 edges, `graph_complete: true`,
+  `vector_index_ready: true`, `index_ms` 59 540 (22.4 s, incremental; the
+  cold build ran 852 443 ms). `agent impact` on the probe
+  timeout placed `check_one` → `http_ok`/`tcp_ok` →
+  `report_ok`/`report_fail` at
+  [`health.rs:134`](../../eqproxy-net/src/health.rs#L134) and the 1 s default
+  at [`schema.rs:91`](../../eqproxy-config/src/schema.rs#L91), both
+  confirmed in source; it named the journey at
+  [`4649`](../../eqproxy-cli/tests/cli_e2e.rs#L4649), correct. It got one
+  line wrong (`e2e_phase2b.rs:436` for a construction that is at
+  [`459`](../../eqproxy-net/tests/e2e_phase2b.rs#L459)), and its advice to
+  keep `timeout` below `interval` does not apply here: the cycle joins its
+  attempts before the next tick
+  ([`health.rs:117`](../../eqproxy-net/src/health.rs#L117)), so a 1 s probe
+  cannot overlap a cycle, it only delays it — what the negative control of
+  §1.1 measures.
+
+  What it found that matters: four library-level tests still build tight
+  probes with `fall = 1`, each verified in source and **not** changed —
+  [`e2e_resilience.rs:1316`](../../eqproxy-net/tests/e2e_resilience.rs#L1316)
+  (the twin of this journey: 100 ms interval, 150 ms timeout),
+  [`e2e_resilience.rs:1185`](../../eqproxy-net/tests/e2e_resilience.rs#L1185)
+  (80 ms/80 ms),
+  [`e2e_balancer.rs:441`](../../eqproxy-net/tests/e2e_balancer.rs#L441)
+  (150 ms/100 ms), plus
+  [`e2e_phase2b.rs:459`](../../eqproxy-net/tests/e2e_phase2b.rs#L459)
+  (80 ms/80 ms, `fall = 2`). Their symptom is a false `is_up`, not an empty
+  `503`: same cause, different surface.
+- **Hindsight** — note stored in bank `eqproxy` ("Keep-alive journey probe
+  raised to 1s (last sub-second cli_e2e probe)"), exit 0, `Memory stored
+  successfully`; first memory id `059de630-424c-4249-a8a3-a610e2936440`.

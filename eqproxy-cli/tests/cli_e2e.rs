@@ -4586,6 +4586,13 @@ fn validate_accepts_a_backup_pool_and_refuses_a_contradiction() {
 /// the interop hazard for a checker that reads its response to EOF.
 /// `/healthz` answers `200` + `ok` (Content-Length framed); any other
 /// path answers `200` with `marker`. `Connection: close` is ignored.
+///
+/// Like the balancer origin, a journey that health-checks through this one
+/// configures the probe with `timeout = "1s"`, never 150 ms: the probe shares
+/// the machine with the whole suite, and `fall = 1` turns one scheduling
+/// hiccup on a **healthy** origin into an empty `503`. The hazard this origin
+/// exists to catch does not need a short timeout to surface — a checker that
+/// waits for EOF fails every cycle, just 1 s later.
 fn start_keepalive_origin(marker: &'static str) -> std::net::SocketAddr {
     use std::io::{Read, Write};
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind keep-alive origin");
@@ -4655,7 +4662,7 @@ fn run_http_check_interops_with_keep_alive_origin() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"100ms\"\n\
-             timeout = \"150ms\"\n\
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n\

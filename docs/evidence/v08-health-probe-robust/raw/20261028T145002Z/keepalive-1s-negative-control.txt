@@ -1,0 +1,13 @@
+== negative control: checker reads the body to EOF (pre-fix behaviour) ==
+[rep 1] exit=101
+    thread 'run_http_check_interops_with_keep_alive_origin' (18330431) panicked at eqproxy-cli/tests/cli_e2e.rs:4699:9:
+    assertion `left == right` failed: the server must stay UP after check cycle 2
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.47s
+[rep 2] exit=101
+    thread 'run_http_check_interops_with_keep_alive_origin' (18330554) panicked at eqproxy-cli/tests/cli_e2e.rs:4699:9:
+    assertion `left == right` failed: the server must stay UP after check cycle 2
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.29s
+[rep 3] exit=101
+    thread 'run_http_check_interops_with_keep_alive_origin' (18330859) panicked at eqproxy-cli/tests/cli_e2e.rs:4699:9:
+    assertion `left == right` failed: the server must stay UP after check cycle 2
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.33s

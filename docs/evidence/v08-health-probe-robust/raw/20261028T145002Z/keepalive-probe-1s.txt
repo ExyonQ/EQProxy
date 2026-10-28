@@ -1,0 +1,9 @@
+   Compiling eqproxy-cli v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.11s
+     Running tests/cli_e2e.rs (target/debug/deps/cli_e2e-2022244d7f03e78e)
+
+running 1 test
+test run_http_check_interops_with_keep_alive_origin ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.84s
+
