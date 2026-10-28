@@ -1,0 +1,25 @@
+# UID-gated skips: the declarations a run of the suite as uid 0 may print.
+#
+# Every `SKIP (running as root): <reason>` line a root run of the suite prints
+# must be below, with the count that run is expected to print, and the reason
+# verbatim — it is what a reader gets when the skip fires.
+# `check-uid-skips.py --root-log <log>` rejects a printed line that is not
+# below (a skip nobody declared) and an entry no line printed (a declaration
+# that rotted, or a block that silently stopped skipping). The same script
+# with `--user-log <log>` rejects any of them appearing in an unprivileged
+# run, where the block must actually run instead of being skipped.
+#
+# One entry per line: `<count>  <the whole log line>` (two spaces or a tab
+# before the line; blank lines and `#` comments are ignored).
+#
+# eqproxy-net/tests/e2e_admin.rs — admin_unix_socket_policy_reloads_without_a_restart
+#   the refusal of an unprivileged chown(2) to a foreign group does not exist
+#   for root, which is allowed to perform it.
+1  SKIP (running as root): the reload must refuse an unprivileged chown to a foreign group, and root is allowed to perform it, so this block is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+#
+# eqproxy-cli/tests/cli_e2e.rs — run_admin_plane_reloads_unix_socket_policy_on_sighup
+#   step 2 waits for the reload to be refused and for that line to reach
+#   stderr; for root the reload is applied, so the step is skipped instead of
+#   blocking in read_line on a line that can never arrive (the 2026-10-27
+#   hang: a 90 s guard killed the run).
+1  SKIP (running as root): the reload can only be refused for an unprivileged process, and root is allowed to chown the socket to group 54321, so this step is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.

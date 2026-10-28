@@ -46,8 +46,60 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tests
-        run: cargo test --workspace
+      # The log is kept, with `--nocapture` so a uid-gated skip's `eprintln!`
+      # is in it instead of being swallowed for a passing test, because the
+      # step below reads it: this run is unprivileged, so it must print none
+      # of those markers. The root side is `suite-as-root`.
+      - name: Tests (unprivileged user)
+        run: |
+          set -euo pipefail
+          cargo test --workspace -- --nocapture 2>&1 | tee /tmp/suite-user.log
+
+      - name: UID-gated skips are declared (unprivileged run)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-uid-skips.py --user-log /tmp/suite-user.log
+
+  # The same suite, as uid 0. Two blocks of it only hold for an unprivileged
+  # uid: each asserts that a `chown(2)` to a foreign group is refused, and root
+  # is allowed to perform it. Run as root they print a declared
+  # `SKIP (running as root): <reason>` line and carry on, instead of failing
+  # on a premise that is absent — and instead of hanging on a line that can
+  # never arrive, which is what cli_e2e did before its declaration (it waited
+  # in `read_line`; a 90 s guard ended the run, 2026-10-27).
+  # check-uid-skips.py refuses a skip that is not declared in
+  # .github/scripts/uid-skips.txt, one whose count moved, and a declaration
+  # that stopped printing; the step timeout turns a hang into a red build
+  # instead of a squatting job. Build and registry live under /tmp so the root
+  # processes write into nothing the other jobs' cache steps save.
+  suite-as-root:
+    name: Suite as root (uid-gated skips declared)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned in rust-toolchain.toml)
+        run: |
+          set -euo pipefail
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+
+      - name: Tests as root (uid 0)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          sudo env \
+            PATH="$PATH" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            CARGO_HOME=/tmp/eqproxy-root-cargo \
+            CARGO_TARGET_DIR=/tmp/eqproxy-root-target \
+            cargo test --workspace -- --nocapture 2>&1 | tee /tmp/suite-root.log
+
+      - name: UID-gated skips are declared (root run)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-uid-skips.py --root-log /tmp/suite-root.log
 
   # The evidence documents are part of the published repository and of the
   # source tarball, so a test citation that points at nothing ships with the

@@ -169,6 +169,15 @@ authored by the contributor alone.
   history is declared with its reason in
   `.github/scripts/evidence-test-citations-allow.txt` (run the script locally
   to see the verdict).
+- Two blocks of the Linux suite only hold for an **unprivileged** uid: each
+  asserts that a `chown(2)` to a foreign group is refused. Run as root they
+  print `SKIP (running as root): <reason>` and carry on. CI runs the suite
+  both ways: the unprivileged run must print none of those lines, and the root
+  run must print exactly the ones declared in
+  `.github/scripts/uid-skips.txt`. Run
+  `python3 .github/scripts/check-uid-skips.py --self-test`, or give it a
+  capture with `--root-log <log>` / `--user-log <log>`; a root capture needs
+  `--nocapture`, or the marker never reaches the log.
 - `docs/` publishes documentation (`.md`) and the recorded data only, never
   code. The harnesses that produced the measurements live outside the
   repository in the maintainer's tree (`scripts/evidence/<campaign>/`), and
