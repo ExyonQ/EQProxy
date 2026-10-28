@@ -3062,6 +3062,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize};
 /// the checker completes at the message boundary, not at EOF). With
 /// `release` set, every response waits
 /// for the flag — a held exchange keeps the server loaded on purpose.
+///
+/// Every journey that runs this origin configures its health check with
+/// `timeout = "1s"`, not the 100 ms a *dead* origin would need: the probe
+/// shares the machine with the whole suite, and at 100 ms a scheduling
+/// hiccup marked the **healthy** origin down (`fall = 1`); the requests then
+/// met the built-in `503 service unavailable` with an empty body — the
+/// `expected a pool member, got ""` flake recorded on 2026-10-27. The
+/// intended failure in these journeys is a status mismatch (`500`), which no
+/// timeout can absorb, so the longer timeout takes nothing from the
+/// assertion.
 fn start_balancer_origin(
     marker: &'static str,
     healthy: std::sync::Arc<AtomicBool>,
@@ -3422,7 +3432,7 @@ fn run_backup_server_covers_a_failed_primary_and_returns_on_recovery() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"100ms\"\n\
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n"
@@ -3573,7 +3583,7 @@ fn run_priority_ladder_fails_over_between_backups_and_back() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"100ms\"\n\
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n"
@@ -3708,7 +3718,7 @@ fn run_all_backups_spreads_traffic_across_the_backup_pool() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"100ms\"\n\
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n"
@@ -3933,7 +3943,7 @@ fn run_document_put_flips_the_backup_pool_live() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"100ms\"\n\
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n\
@@ -3996,7 +4006,7 @@ fn run_document_put_flips_the_backup_pool_live() {
                   type = \"http\"\n\
                   http_path = \"/healthz\"\n\
                   interval = \"150ms\"\n\
-                  timeout = \"100ms\"\n\
+                  timeout = \"1s\"\n\
                   fall = 1\n\
                   rise = 1\n\
                   expect_status = \"200\"\n";
@@ -4282,7 +4292,7 @@ fn run_panel_applies_a_table_and_drains_a_server() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"100ms\"\n\
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n\
@@ -4398,7 +4408,7 @@ fn run_panel_applies_a_table_and_drains_a_server() {
          type = \"http\"\n\
          http_path = \"/healthz\"\n\
          interval = \"150ms\"\n\
-         timeout = \"100ms\"\n\
+         timeout = \"1s\"\n\
          fall = 1\n\
          rise = 1\n\
          expect_status = \"200\"\n"
