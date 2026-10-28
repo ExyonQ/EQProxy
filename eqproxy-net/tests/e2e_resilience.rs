@@ -213,12 +213,32 @@ async fn start_head_echo() -> SocketAddr {
     addr
 }
 
-/// Free loopback port (no listener): connects fail instantly.
+/// Free loopback port (no listener), for addresses a test never dials (a
+/// drained server with weight 0). It is **not** a "dead backend": once the
+/// listener is dropped the port returns to the ephemeral pool.
 async fn free_port() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     drop(listener);
     addr
+}
+
+/// Address that refuses connections for as long as the returned listener is
+/// alive, for the tests whose contract needs a dial to fail.
+///
+/// The listener keeps `127.0.0.1:P` bound for the whole test, so `P` can
+/// never be handed to another test in this binary; the address handed out is
+/// `127.0.0.2:P`, where nothing listens — all of `127/8` is loopback and a
+/// connect there is refused deterministically.
+///
+/// The old `free_port()` returned a *freed* port number: any neighbour
+/// binding `127.0.0.1:0` could be given that same port, and the "dead"
+/// server answered. Run 40724799187 showed exactly that symptom — six `200`s
+/// with `retry_attempts == 0`, because no dial ever failed.
+fn dead_backend() -> (SocketAddr, std::net::TcpListener) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind dead guard");
+    let port = listener.local_addr().expect("addr dead guard").port();
+    (SocketAddr::from(([127, 0, 0, 2], port)), listener)
 }
 
 fn http_listener(name: &str, backend: Arc<ResolvedBackend>) -> ResolvedListener {
@@ -306,7 +326,7 @@ fn response_body(response: &str) -> &str {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retry_saves_idempotent_get_from_dead_server() {
-    let dead = free_port().await;
+    let (dead, _dead_guard) = dead_backend();
     let live = start_ok_backend().await;
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(
@@ -363,7 +383,7 @@ async fn retry_saves_idempotent_get_from_dead_server() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_idempotent_post_is_never_retried_without_opt_in() {
-    let dead = free_port().await;
+    let (dead, _dead_guard) = dead_backend();
     let live = start_ok_backend().await;
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(
@@ -425,7 +445,7 @@ async fn non_idempotent_post_is_never_retried_without_opt_in() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn non_idempotent_opt_in_allows_post_retry() {
-    let dead = free_port().await;
+    let (dead, _dead_guard) = dead_backend();
     let live = start_ok_backend().await;
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(

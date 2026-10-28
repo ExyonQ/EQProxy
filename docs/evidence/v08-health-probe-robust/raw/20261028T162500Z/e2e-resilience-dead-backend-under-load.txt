@@ -1,0 +1,22 @@
+== e2e_resilience, 6 spinners, 10 cpus ==
+sysctl: unknown oid 'loadavg'
+[rep 01] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.47s
+sysctl: unknown oid 'loadavg'
+[rep 02] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.48s
+sysctl: unknown oid 'loadavg'
+[rep 03] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.67s
+sysctl: unknown oid 'loadavg'
+[rep 04] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.07s
+sysctl: unknown oid 'loadavg'
+[rep 05] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.75s
+sysctl: unknown oid 'loadavg'
+[rep 06] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.56s
+sysctl: unknown oid 'loadavg'
+[rep 07] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.84s
+sysctl: unknown oid 'loadavg'
+[rep 08] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.59s
+sysctl: unknown oid 'loadavg'
+[rep 09] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.45s
+sysctl: unknown oid 'loadavg'
+[rep 10] exit=0 load= :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.76s
+fail=0/10

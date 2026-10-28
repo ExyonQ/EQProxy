@@ -1,0 +1,4 @@
+== e2e_resilience with 6 spinners, load from uptime ==
+[rep 1] 235.38 239.63 237.32 :: exit=0 :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.41s
+[rep 2] 243.69 241.27 237.92 :: exit=0 :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.88s
+[rep 3] 247.18 242.10 238.26 :: exit=0 :: test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.66s

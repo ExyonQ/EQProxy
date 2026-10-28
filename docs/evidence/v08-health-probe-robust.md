@@ -383,3 +383,49 @@ Both tiers ran the same 30 targets: **559 passed, 0 failed, 2 ignored**, and
 the two declared root skips still print their reason. The journey this
 follow-up repaired ran in both tiers
 (`test run_http_check_interops_with_keep_alive_origin ... ok`).
+
+### 7.1 The next red root job: a freed port, not a retry bug
+
+The docs-only run
+[40724799187](https://github.com/ExyonQ/EQProxy/actions/runs/40724799187)
+went red in the same job, in a different test:
+
+```
+thread 'non_idempotent_opt_in_allows_post_retry' panicked at eqproxy-net/tests/e2e_resilience.rs:465:5:
+the opt-in redial must be counted
+```
+
+Six POSTs had all answered `200`, and `retry_attempts` was still `0`. That
+counter is incremented **before** the redial
+([`proxy.rs:2192`](../../eqproxy-net/src/proxy.rs#L2192)), so this is not the
+proxy sampling late: no dial had failed. The test's "dead" server came from
+`free_port()`, which bound an ephemeral port, **dropped the listener** and
+used the number; every other test in that binary binds `127.0.0.1:0`, so the
+kernel can hand the freed port to a neighbour, whose origin answers `200`.
+
+Mechanism checked without the product in the loop:
+
+```
+bind 127.0.0.1:0 and listen → P; connect 127.0.0.2:P
+  macOS (python3)              → refused
+  Linux (python:3-alpine)      → ECONNREFUSED, errno 111
+```
+
+The fix replaces the dead address in the three retry tests with
+`dead_backend()`
+([`e2e_resilience.rs:225`](../../eqproxy-net/tests/e2e_resilience.rs#L225)):
+the listener stays bound to `127.0.0.1:P` for the test, so `P` never returns
+to the pool, and the address handed out is `127.0.0.2:P`, where nothing
+listens. `free_port()` stays for the two weight-0 servers a test never dials,
+and its doc now says so. No assertion changed; the retry tests now always
+exercise a real refused connect instead of usually doing it.
+
+```
+$ cargo test -p eqproxy-net --test e2e_resilience     # x10 with 6 spinners
+[rep 01] … test result: ok. 15 passed; 0 failed … finished in 6.47s
+[rep 10] … test result: ok. 15 passed; 0 failed … finished in 6.76s
+fail=0/10                                            (load 235-247)
+```
+
+Raw: [`e2e-resilience-dead-backend-under-load.txt`](v08-health-probe-robust/raw/20261028T162500Z/e2e-resilience-dead-backend-under-load.txt)
+and [`…-2.txt`](v08-health-probe-robust/raw/20261028T162500Z/e2e-resilience-dead-backend-under-load-2.txt).
