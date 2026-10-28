@@ -163,6 +163,30 @@ async fn connect(addr: SocketAddr) -> TcpStream {
         .expect("connect")
 }
 
+/// Wait until the proxy has counted `want` proxied exchanges.
+///
+/// `http_requests_proxied` is incremented when the exchange finishes on the
+/// proxy side (`http1.rs`), which can land **after** the client has read the
+/// response head: the head is what `get_status` reads, and the bookkeeping
+/// runs when the response body has been copied. Sampling the counter once
+/// right after the last head therefore races the proxy — CI run 40616967835
+/// read `4` where `5` was expected on a correct proxy. The assertions below
+/// are unchanged: they observe the same final values, after the exchange has
+/// been counted.
+async fn wait_for_proxied(metrics: &Metrics, want: u64) {
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        if metrics.snapshot().http_requests_proxied == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the proxy never counted {want} proxied requests"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
 #[cfg_attr(
     miri,
     ignore = "requires TCP sockets: miri does not support networking (rust-lang/miri#3449)"
@@ -180,6 +204,7 @@ async fn keep_alive_reuses_a_single_backend_connection() {
         assert!(status.contains("200"), "expected 200, got {status:?}");
     }
     drop(client);
+    wait_for_proxied(&metrics, N as u64).await;
 
     assert_eq!(
         origin.accepts.load(Ordering::SeqCst),

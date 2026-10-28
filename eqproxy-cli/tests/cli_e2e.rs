@@ -3287,7 +3287,7 @@ fn run_slow_start_ramps_the_recovered_server_up() {
              type = \"http\"\n\
              http_path = \"/healthz\"\n\
              interval = \"150ms\"\n\
-             timeout = \"1s\"\n
+             timeout = \"1s\"\n\
              fall = 1\n\
              rise = 1\n\
              expect_status = \"200\"\n"

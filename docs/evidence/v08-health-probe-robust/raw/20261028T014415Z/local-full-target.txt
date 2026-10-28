@@ -1,0 +1,9 @@
+## cli_e2e, full target, 2026-10-28T01:44:15Z
+## macOS 26.5.1, 10 CPUs, uid 501, tree 8970db4+working-tree
+test run_startup_with_broken_dns_serves_immediately_with_explicit_503 ... ok
+test run_with_sni_serves_the_certificate_of_the_requested_name ... ok
+test run_hot_maps_swap_under_traffic_without_config_reload ... ok
+
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.15s
+
+cargo exit=0

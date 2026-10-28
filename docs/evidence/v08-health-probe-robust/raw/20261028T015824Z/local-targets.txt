@@ -1,0 +1,23 @@
+## fmt + the two touched targets, 2026-10-28T01:58:24Z
+## Darwin 25.5.0 arm64, 10 CPUs, uid 501, tree 1b2db9b+working-tree
+## rustup: 1.99.1-aarch64-apple-darwin (overridden by '/Volumes/Lexar/Cursor/EQProxy/rust-toolchain.toml')
+
+$ cargo fmt --all --check
+fmt-exit=0
+
+$ cargo test -p eqproxy-net --test e2e_pool
+
+running 4 tests
+test server_close_is_not_reused ... ok
+test close_request_is_never_pooled ... ok
+test keep_alive_reuses_a_single_backend_connection ... ok
+test framing_error_is_never_reused ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+pool-exit=0
+
+$ cargo test -p eqproxy-cli --test cli_e2e
+running 78 tests
+test result: ok. 78 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.57s
+cli-exit=0

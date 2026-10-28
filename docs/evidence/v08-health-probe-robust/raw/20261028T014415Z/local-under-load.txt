@@ -1,0 +1,41 @@
+## the seven health-check blocks after the repair: timeout = 1s, none at 100ms
+timeout = 100ms left: 0
+1934:·············timeout·=·\"1s\"\n\
+2064:·············idle_timeout·=·\"1s\"\n\
+2157:·············idle_timeout·=·\"1s\"\n\
+3290:·············timeout·=·\"1s\"\n
+3435:·············timeout·=·\"1s\"\n\
+3586:·············timeout·=·\"1s\"\n\
+3721:·············timeout·=·\"1s\"\n\
+3946:·············timeout·=·\"1s\"\n\
+4009:··················timeout·=·\"1s\"\n\
+4295:·············timeout·=·\"1s\"\n\
+4411:·········timeout·=·\"1s\"\n\
+
+## the five affected journeys x3 with 6 CPU spinners, 2026-10-28T01:44:20Z
+load before:  2:44  up 3 days, 15:27, 3 users, load averages: 171.58 182.57 195.80
+load with 6 spinners:  2:44  up 3 days, 15:27, 3 users, load averages: 171.58 182.57 195.80
+[rep 1] run_backup_server_covers :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.52s
+[rep 1] run_priority_ladder :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.06s
+[rep 1] run_all_backups :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.39s
+[rep 1] run_document_put :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.21s
+[rep 1] run_panel_applies :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.54s
+[rep 2] run_backup_server_covers :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.51s
+[rep 2] run_priority_ladder :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.98s
+[rep 2] run_all_backups :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.10s
+[rep 2] run_document_put :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.23s
+[rep 2] run_panel_applies :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.52s
+[rep 3] run_backup_server_covers :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.51s
+[rep 3] run_priority_ladder :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.92s
+[rep 3] run_all_backups :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.27s
+[rep 3] run_document_put :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 2.24s
+[rep 3] run_panel_applies :: exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 77 filtered out; finished in 1.55s
+bash: line 31: 18011 Terminated: 15          yes > /dev/null
+bash: line 31: 18012 Terminated: 15          yes > /dev/null
+bash: line 31: 18013 Terminated: 15          yes > /dev/null
+bash: line 31: 18014 Terminated: 15          yes > /dev/null
+bash: line 31: 18015 Terminated: 15          yes > /dev/null
+bash: line 31: 18016 Terminated: 15          yes > /dev/null
+spinners alive after kill: 0
+load after:  2:45  up 3 days, 15:28, 3 users, load averages: 194.15 187.09 196.72
+fail=0
