@@ -1,0 +1,15 @@
+## CI run 40612009126, commit 20ee440 (head carrying the detector's --self-test step), workflow CI
+## full log pulled with: gh run view 40612009126 --log ; fields 'job | step | line'
+  Evidence test citations :: success :: job 122565557867
+  Suite as root (uid-gated skips declared) :: success :: job 122565557986
+  Admin socket ACL E2E (native arm64) :: success :: job 122565558068
+  Admin socket ACL E2E (native amd64) :: success :: job 122565558249
+  Linux x86_64 (tier-1) :: success :: job 122565558653
+
+## the gate's lines in this run:
+Evidence test citations | Self-test the citation detector | 2026-10-28T00:57:05.0378575Z self-test ok: dangling citation detected, real and helper names accepted
+Suite as root (uid-gated skips declared) | UID-gated skips are declared (root run) | 2026-10-28T01:00:07.5944794Z uid-gated skips as root: 2 printed, 2 declared in uid-skips.txt
+Suite as root (uid-gated skips declared) | UID-gated skips are declared (root run) | 2026-10-28T01:00:07.5945272Z ok: every uid-gated skip of the root run is declared, with its reason
+Linux x86_64 (tier-1) | Self-test the uid-skip detector | 2026-10-28T00:57:23.3941981Z self-test ok: undeclared, missing, duplicated and malformed input all rejected
+Linux x86_64 (tier-1) | UID-gated skips are declared (unprivileged run) | 2026-10-28T00:59:26.1666174Z uid-gated skips in an unprivileged run: 0 printed
+Linux x86_64 (tier-1) | UID-gated skips are declared (unprivileged run) | 2026-10-28T00:59:26.1666614Z ok: the unprivileged run printed no uid-gated skip

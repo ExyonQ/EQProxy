@@ -74,6 +74,13 @@ ok: the unprivileged run printed no uid-gated skip
 # exit 0
 ```
 
+The head that carries the detector's `--self-test` step repeats it:
+[run 40612009126](https://github.com/ExonQ/EQProxy/actions/runs/40612009126)
+at `20ee440`, five jobs success, tier-1 printing
+`self-test ok: undeclared, missing, duplicated and malformed input all rejected`
+before the two checks above print the same verdicts
+([`ci-40612009126.txt`](v08-uid-skip-guard/raw/20261028T004705Z/ci-40612009126.txt)).
+
 Both jobs ran the whole suite: `559 passed; 0 failed; 2 ignored` in each,
 summed over the `test result:` lines of that run. The raw keeps the two
 `WARN … failed to connect` lines of the mirror test that `--nocapture` lets
