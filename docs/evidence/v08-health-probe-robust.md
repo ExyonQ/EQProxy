@@ -223,11 +223,14 @@ its log:
 - The negative control of §1.1 is a **local, temporary** patch to
   `eqproxy-net/src/health.rs`, restored byte-for-byte and never committed; the
   shipped tree has no `_want` arm and `git diff` on that file is empty.
-- This follow-up is published as `ce77c5a`. Its CI run
+- This follow-up is published as `ce77c5a`; its CI run
   [40722095133](https://github.com/ExyonQ/EQProxy/actions/runs/40722095133)
-  came back 4/5: `suite-as-root` failed on a test this commit does not touch,
-  diagnosed in §7 and fixed in the commit that carries that section. Docker
-  image and Scout gate remain untouched by this follow-up (**NOT EXECUTED**).
+  came back 4/5, with `suite-as-root` failing on a test the commit does not
+  touch. §7 diagnoses it (descriptors under `sudo`, not the proxy), and the
+  fix `2749ec0` ran green in
+  [40723747985](https://github.com/ExyonQ/EQProxy/actions/runs/40723747985)
+  (**5/5**, 559 passed per tier). Docker image and Scout gate remain
+  untouched by this follow-up (**NOT EXECUTED**).
 
 ## 6. Audit legs
 
@@ -365,5 +368,18 @@ ulimit -n 1024   → ok. 9 passed
 asserts it, printing the value it got; a future sudo/PAM policy change fails
 with a named message instead of a mystery `502`. No test, assertion or retry
 was touched: a `502` when no socket can be opened is correct behaviour, and
-the test's contract needs the descriptors. The run of the commit that carries
-this fix is the verification, and §5 records it once it exists.
+the test's contract needs the descriptors.
+
+Run [40723747985](https://github.com/ExyonQ/EQProxy/actions/runs/40723747985)
+over that commit (`2749ec0`): **5/5 jobs success**, with the root log showing
+both the limit and the test that had failed:
+
+```
+root suite fd limit: 65536
+test pool_sizing_keeps_a_400_stream_burst_without_churn ... ok
+```
+
+Both tiers ran the same 30 targets: **559 passed, 0 failed, 2 ignored**, and
+the two declared root skips still print their reason. The journey this
+follow-up repaired ran in both tiers
+(`test run_http_check_interops_with_keep_alive_origin ... ok`).
