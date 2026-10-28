@@ -1,0 +1,35 @@
+## checker + registry, Python 3.9.6, tree 28c7444+working-tree (.github only)
+started: 2026-10-28T00:47:05Z
+
+## 1. self-test
+self-test ok: undeclared, missing, duplicated and malformed input all rejected
+exit=0
+
+## 2. a root log built only from the two SKIP lines recorded on 2026-10-27 (registry checked byte-for-byte)
+uid-gated skips as root: 2 printed, 2 declared in uid-skips.txt
+ok: every uid-gated skip of the root run is declared, with its reason
+exit=0
+
+## 3. negative: a root log that printed only one of the two declarations
+uid-gated skips as root: 1 printed, 2 declared in uid-skips.txt
+uid-gated skip contract violated:
+  declared 1x but never printed: SKIP (running as root): the reload can only be refused for an unprivileged process, and root is allowed to chown the socket to group 54321, so this step is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+exit=1
+
+## 4. negative: a marker appearing in a log offered as unprivileged
+uid-gated skips in an unprivileged run: 1 printed
+  printed in an unprivileged run: SKIP (running as root): the reload can only be refused for an unprivileged process, and root is allowed to chown the socket to group 54321, so this step is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+In an unprivileged run the block must run: a root-only skip branch was taken with the wrong uid.
+exit=1
+
+## 5. negative: the recorded root suite without --nocapture (markers were captured invisibly)
+uid-gated skips as root: 0 printed, 2 declared in uid-skips.txt
+uid-gated skip contract violated:
+  declared 1x but never printed: SKIP (running as root): the reload can only be refused for an unprivileged process, and root is allowed to chown the socket to group 54321, so this step is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+exit=1
+
+## 6. positive: the recorded unprivileged run prints none
+uid-gated skips in an unprivileged run: 0 printed
+ok: the unprivileged run printed no uid-gated skip
+exit=0
+finished: 2026-10-28T00:47:06Z

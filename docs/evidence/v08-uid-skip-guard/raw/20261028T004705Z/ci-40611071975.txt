@@ -1,0 +1,28 @@
+## CI run 40611071975, commit 7c5eb92 (ExonQ/EQProxy main), workflow CI
+## full log pulled with: gh run view 40611071975 --log  (3256 lines locally); below: 'job | step | line', tabs as ' | '
+  Linux x86_64 (tier-1) :: success :: job 122562447790
+  Suite as root (uid-gated skips declared) :: success :: job 122562448115
+  Evidence test citations :: success :: job 122562448132
+  Admin socket ACL E2E (native arm64) :: success :: job 122562448134
+  Admin socket ACL E2E (native amd64) :: success :: job 122562448173
+
+## the two marker lines of the root run:
+Suite as root (uid-gated skips declared) | Tests as root (uid 0) | 2026-10-28T00:49:53.7510571Z SKIP (running as root): the reload can only be refused for an unprivileged process, and root is allowed to chown the socket to group 54321, so this step is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+Suite as root (uid-gated skips declared) | Tests as root (uid 0) | 2026-10-28T00:50:00.5887612Z SKIP (running as root): the reload must refuse an unprivileged chown to a foreign group, and root is allowed to perform it, so this block is not run. CI and normal developer runs are unprivileged; the reason is intentional, not a missing assertion.
+
+## the gate's own verdicts:
+Linux x86_64 (tier-1) | UID-gated skips are declared (unprivileged run) | 2026-10-28T00:50:39.0385239Z uid-gated skips in an unprivileged run: 0 printed
+Linux x86_64 (tier-1) | UID-gated skips are declared (unprivileged run) | 2026-10-28T00:50:39.0385608Z ok: the unprivileged run printed no uid-gated skip
+Suite as root (uid-gated skips declared) | UID-gated skips are declared (root run) | 2026-10-28T00:51:34.5886515Z uid-gated skips as root: 2 printed, 2 declared in uid-skips.txt
+Suite as root (uid-gated skips declared) | UID-gated skips are declared (root run) | 2026-10-28T00:51:34.5887581Z ok: every uid-gated skip of the root run is declared, with its reason
+
+## per-job suite totals, summed over the 'test result:' lines only:
+  Suite as root: passed=559 failed=0 ignored=2
+  Linux x86_64: passed=559 failed=0 ignored=2
+
+## --nocapture also lets plain test output through, so a loose grep for 'failed'
+## catches these (the mirror test's WARN), which is why the totals read 'test result:' only:
+Linux x86_64 (tier-1) | Tests (unprivileged user) | 2026-10-28T00:49:03.7722604Z WARN [web] mirror to "shadow" at 127.0.0.1:1 failed to connect (peer 127.0.0.1:1234)
+Linux x86_64 (tier-1) | Tests (unprivileged user) | 2026-10-28T00:50:13.3191657Z WARN [web] mirror to "shadow" at 127.0.0.1:1 failed to connect (peer 127.0.0.1:46138)
+Suite as root (uid-gated skips declared) | Tests as root (uid 0) | 2026-10-28T00:50:00.2368246Z WARN [web] mirror to "shadow" at 127.0.0.1:1 failed to connect (peer 127.0.0.1:1234)
+Suite as root (uid-gated skips declared) | Tests as root (uid 0) | 2026-10-28T00:51:08.8012079Z WARN [web] mirror to "shadow" at 127.0.0.1:1 failed to connect (peer 127.0.0.1:51000)
