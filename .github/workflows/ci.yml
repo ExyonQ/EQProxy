@@ -46,6 +46,11 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # The malformed-registry, count and duplicate branches that a green run
+      # never reaches.
+      - name: Self-test the uid-skip detector
+        run: python3 .github/scripts/check-uid-skips.py --self-test
+
       # The log is kept, with `--nocapture` so a uid-gated skip's `eprintln!`
       # is in it instead of being swallowed for a passing test, because the
       # step below reads it: this run is unprivileged, so it must print none
