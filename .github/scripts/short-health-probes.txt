@@ -1,0 +1,31 @@
+# Sub-second suite health probes: the exceptions `check-short-health-probes.py`
+# accepts, one `<path>::<test fn>  <reason>` per line (two spaces or a tab
+# before the reason; blank lines and `#` comments are ignored). A suite probe
+# lives in `tests/` or in a `src` file's `#[cfg(test)]` module; the gate scans
+# both.
+#
+# A suite health check keeps its interval short when the test depends on
+# seeing a DOWN within a few hundred milliseconds, but its **timeout** is 1 s:
+# a shorter timeout spends its budget waiting for the scheduler, and one
+# descheduled poll marks a healthy origin DOWN — `fall = 1` then turns that
+# into a 503 with no origin failure at all. An entry below covers every
+# sub-second probe of that test, so the reason must say why none of them can
+# mark a healthy origin DOWN.
+#
+# The registry is exhaustive in both directions: a sub-second probe that is
+# not below fails the gate, and an entry whose test no longer has one fails
+# too (it rotted), until it is removed.
+#
+# eqproxy-net/tests/e2e_phase2b.rs — all_servers_down_returns_503_in_http_mode
+#   and all_servers_down_closes_connection_in_tcp_mode. Both probe an address
+#   that is deliberately left closed: `common::dead_addr()` keeps the port
+#   bound on 127.0.0.1 (so no neighbour can be handed it) and hands out
+#   127.0.0.2 on that port, where nothing listens: the check's connect(2)
+#   never reaches a listener and fails by refusal or by its own timeout
+#   (macOS drops the SYN), so the short timeout cannot turn a healthy origin
+#   into DOWN — there is no healthy origin to mark. The tests assert the opposite direction of the
+#   hazard this gate guards: they need the server DOWN (503 / clean close) and
+#   a scheduling hiccup can only make it more DOWN. The 50 ms pair keeps the
+#   300 ms wait honest instead of turning it into a second of sleeping.
+eqproxy-net/tests/e2e_phase2b.rs::all_servers_down_returns_503_in_http_mode  the probed origin is a reserved port with no listener, so the connect is refused immediately and the test asserts DOWN (503): a short timeout cannot mark a healthy origin DOWN because there is none.
+eqproxy-net/tests/e2e_phase2b.rs::all_servers_down_closes_connection_in_tcp_mode  the probed origin is a reserved port with no listener, so the connect is refused immediately and the test asserts DOWN (clean close in TCP mode): a short timeout cannot mark a healthy origin DOWN because there is none.

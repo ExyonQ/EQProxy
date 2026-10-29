@@ -46,6 +46,20 @@ jobs:
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # A suite health check keeps its interval short when the test asserts a
+      # DOWN within a few hundred ms, but its **timeout** is 1 s: a shorter
+      # one spends its budget waiting for the scheduler, and one descheduled
+      # poll marks a healthy origin DOWN — `fall = 1` turns that into a 503
+      # with no origin failure at all (the 2026-10-27 `cli_e2e`/`e2e_*`
+      # flakes). The self-test first proves the detector still detects; the
+      # two deliberate dead-origin probes are declared, with their reason, in
+      # .github/scripts/short-health-probes.txt.
+      - name: Self-test the short health-probe gate
+        run: python3 .github/scripts/check-short-health-probes.py --self-test
+
+      - name: Health probes have 1 s of timeout
+        run: python3 .github/scripts/check-short-health-probes.py
+
       # The malformed-registry, count and duplicate branches that a green run
       # never reaches.
       - name: Self-test the uid-skip detector
