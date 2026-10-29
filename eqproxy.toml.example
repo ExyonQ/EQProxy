@@ -109,6 +109,22 @@ max_stream_duration = "0s"
 #max_body_bytes = 0          # 0 = unlimited (default)
 #stream_buffer_bytes = 16384 # 1024..=1048576; omit for the protocol default
 
+# WASM request filter (B-I5/B-E4, ADR-0031; mode = "http" only). The module
+# is compiled when the config is loaded: a missing file, a denied import
+# (WASI, network, filesystem) or a missing ABI export rejects the snapshot.
+# The plugin may add/remove request headers or reject with 400..=599; it
+# cannot touch framing headers (content-length, transfer-encoding, host, ...).
+# fuel bounds instructions, timeout bounds wall-clock time (epoch, 1 ms
+# resolution) and memory_bytes bounds linear memory. on_error = "closed"
+# (default) answers 503 on a trap/timeout; "open" forwards unchanged.
+#[listener.web.plugin]
+#path = "plugins/filter.wasm"
+#fuel = 10000000            # 1..=100000000 instructions per request
+#timeout = "50ms"           # 1ms..=5s
+#memory_bytes = 16777216    # 1048576..=268435456
+#max_header_ops = 16        # 1..=64 mutations per request
+#on_error = "closed"        # "closed" (503) | "open" (forward unchanged)
+
 # Response compression (v0.7, mode = "http" only): gzip and/or Brotli
 # negotiated from the request's Accept-Encoding. The body is compressed while
 # it is relayed, so the response is sent chunked (no Content-Length) and

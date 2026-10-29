@@ -1,0 +1,142 @@
+{
+  "none": {
+    "reps": [
+      {
+        "rep": 1,
+        "rps": 6189.7,
+        "p50_ms": 9.168,
+        "p99_ms": 32.31,
+        "proxy_cpu_pct": 117.0,
+        "errors": 62
+      },
+      {
+        "rep": 2,
+        "rps": 6319.1,
+        "p50_ms": 8.99,
+        "p99_ms": 30.248,
+        "proxy_cpu_pct": 119.3,
+        "errors": 64
+      },
+      {
+        "rep": 3,
+        "rps": 6420.2,
+        "p50_ms": 9.076,
+        "p99_ms": 26.844,
+        "proxy_cpu_pct": 121.4,
+        "errors": 64
+      },
+      {
+        "rep": 4,
+        "rps": 5749.9,
+        "p50_ms": 9.179,
+        "p99_ms": 46.712,
+        "proxy_cpu_pct": 107.7,
+        "errors": 64
+      },
+      {
+        "rep": 5,
+        "rps": 6305.5,
+        "p50_ms": 8.979,
+        "p99_ms": 31.79,
+        "proxy_cpu_pct": 118.1,
+        "errors": 63
+      },
+      {
+        "rep": 6,
+        "rps": 6662.5,
+        "p50_ms": 8.833,
+        "p99_ms": 23.033,
+        "proxy_cpu_pct": 125.2,
+        "errors": 64
+      },
+      {
+        "rep": 7,
+        "rps": 6612.8,
+        "p50_ms": 8.763,
+        "p99_ms": 26.476,
+        "proxy_cpu_pct": 122.4,
+        "errors": 64
+      }
+    ],
+    "median": {
+      "rps": 6319.1,
+      "p50_ms": 8.99,
+      "p99_ms": 30.248,
+      "proxy_cpu_pct": 119.3
+    },
+    "total_errors": 445
+  },
+  "plugin": {
+    "reps": [
+      {
+        "rep": 1,
+        "rps": 5226.7,
+        "p50_ms": 9.731,
+        "p99_ms": 61.339,
+        "proxy_cpu_pct": 123.7,
+        "errors": 64
+      },
+      {
+        "rep": 2,
+        "rps": 4258.5,
+        "p50_ms": 11.083,
+        "p99_ms": 94.247,
+        "proxy_cpu_pct": 106.5,
+        "errors": 64
+      },
+      {
+        "rep": 3,
+        "rps": 5384.3,
+        "p50_ms": 10.071,
+        "p99_ms": 44.756,
+        "proxy_cpu_pct": 133.6,
+        "errors": 64
+      },
+      {
+        "rep": 4,
+        "rps": 5552.4,
+        "p50_ms": 9.905,
+        "p99_ms": 39.947,
+        "proxy_cpu_pct": 135.6,
+        "errors": 64
+      },
+      {
+        "rep": 5,
+        "rps": 5411.9,
+        "p50_ms": 10.038,
+        "p99_ms": 45.616,
+        "proxy_cpu_pct": 132.6,
+        "errors": 63
+      },
+      {
+        "rep": 6,
+        "rps": 5815.7,
+        "p50_ms": 9.699,
+        "p99_ms": 33.701,
+        "proxy_cpu_pct": 145.3,
+        "errors": 64
+      },
+      {
+        "rep": 7,
+        "rps": 5499.7,
+        "p50_ms": 10.163,
+        "p99_ms": 37.722,
+        "proxy_cpu_pct": 136.3,
+        "errors": 64
+      }
+    ],
+    "median": {
+      "rps": 5411.9,
+      "p50_ms": 10.038,
+      "p99_ms": 44.756,
+      "proxy_cpu_pct": 133.6
+    },
+    "total_errors": 447
+  },
+  "delta": {
+    "rps_pct": -14.356474814451436,
+    "p50_pct": 11.65739710789766,
+    "p99_pct": 47.963501719121915,
+    "cpu_pct_points": 14.299999999999997
+  }
+}

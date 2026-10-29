@@ -1,0 +1,19 @@
+**The hook is `PluginHost::run` in `eqproxy-net/src/plugin.rs` (line 241)** — it takes the raw request head, instantiates the wasm module and calls the guest export `eqproxy_on_request` (plus `eqproxy_alloc`), returning a `PluginOutcome` the listener acts on. I could not confirm the exact production call site inside the request path; the graph only resolved test callers (detail under Gaps).
+
+**The hook itself.** `impl<PluginHost>::run(&self, head: &[u8]) -> PluginOutcome` at `eqproxy-net/src/plugin.rs:241`. It rejects heads larger than `MAX_PLUGIN_INPUT`, builds a `Store` with memory/table/instance limits, sets fuel and an epoch deadline from `PluginSettings`, instantiates the linker's module, then resolves the typed exports `eqproxy_alloc` and `eqproxy_on_request` — a missing export is reported as a failure (message text asserted at `eqproxy-net/src/plugin.rs:765`). The failure modes (trap, fuel, deadline, memory, host validation) are all funnelled into `PluginOutcome::Failed`.
+
+**The decision type.** `enum PluginOutcome` at `eqproxy-net/src/plugin.rs:82-98`: `Allow { set, remove }` (ordered header set/remove ops, lowercased names), `Deny(u16)` (status pre-validated to 400..=599), and `Failed { reason }`, whose handling is delegated to the listener's `on_error` policy.
+
+**Loading and configuration neighbours a change must account for.** `PluginHost::load(settings, base_dir)` at `eqproxy-net/src/plugin.rs:182` validates path, file size (`MAX_MODULE_BYTES`), module validity (ABI version), imports (`check_imports`) and exports (`check_exports`); every error there is a config error that rejects the snapshot. Accessors `policy()` and `path()` sit just below it in the same impl block. `FailurePolicy` and `PluginSettings` live in the same file and are re-exported from `eqproxy-net/src/lib.rs` (the `pub use plugin::FailurePolicy` import node), and are the types tests construct.
+
+**Behaviour the request path must preserve (proven by end-to-end tests in `eqproxy-net/tests/e2e_plugins.rs`):**
+- `plugin_denial_never_dials_the_backend` (line 208) — a `Deny` verdict must be enforced *before* any backend connection is opened (`origin.dials() == 0`), with `plugin_denied` incremented.
+- `plugin_adds_a_header_the_backend_receives` (line 179) — `Allow { set }` header ops must land on the head the backend sees (`x-plugin: on`), with `plugin_requests == 1`.
+- `plugin_sees_the_request_head_and_can_deny_by_method` (line 235) — the plugin sees the real method, and the verdict is per-request, not cached.
+- `fail_open_forwards_the_request_unchanged` (line 301) — with `FailurePolicy::Open`, a `Failed` outcome forwards the request unchanged and increments `plugin_errors`.
+- `plugin_denial_is_enforced_on_http2_streams` (line 365) — the same hook is applied per h2 stream, so the call site is not HTTP/1-only.
+
+**Gaps.** `get_reverse_dependencies(edge_type="Calls", depth=2)` on `run` returned only the in-file unit tests (`fuel_exhaustion_interrupts_an_infinite_loop` at `plugin.rs:698`, `the_epoch_deadline_interrupts_a_loop_with_plenty_of_fuel` at `plugin.rs:712`, `a_reserved_framing_header_is_a_host_error` at `plugin.rs:737`) — the crate-internal call site in the HTTP/1 and HTTP/2 request handlers was not resolved before the result budget ran out. The surrounding machinery is `eqproxy-net/src/http1.rs` (`RequestHead`, `parse_request_head` at line 3bb897d9, `apply_header_actions`), which `eqproxy-net/src/grpc.rs:49-52` also imports, so the plugin verdict most likely interacts with the parsed request head there; treat that as inference, not established.
+
+**Recommendation.** Start reading at `eqproxy-net/src/plugin.rs:241` for the contract (`PluginOutcome`) and then grep the `eqproxy-net/src` HTTP/1 and HTTP/2 handlers for `PluginHost::run` / `policy()` to locate the invocation point, since the graph does not report it.
+EXIT=0

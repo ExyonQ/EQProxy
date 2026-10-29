@@ -2782,6 +2782,32 @@ fn resolve_with(
                 max_body_bytes: listener.limits.max_body_bytes,
                 stream_buffer_bytes: listener.limits.stream_buffer_bytes,
             });
+            // WASM request filter (B-I5/B-E4, ADR-0031): compiled here, so a
+            // bad module rejects the snapshot (check/apply) instead of
+            // failing per request. Relative paths resolve from the config
+            // file's directory, like certificates and maps.
+            if let Some(plugin) = &listener.plugin {
+                let host = eqproxy_net::PluginHost::load(
+                    eqproxy_net::PluginSettings {
+                        path: PathBuf::from(&plugin.path),
+                        fuel: plugin.fuel,
+                        timeout: plugin.timeout,
+                        memory_bytes: plugin.memory_bytes,
+                        max_header_ops: plugin.max_header_ops,
+                        on_error: match plugin.on_error {
+                            eqproxy_config::schema::PluginFailurePolicy::Closed => {
+                                eqproxy_net::FailurePolicy::Closed
+                            }
+                            eqproxy_config::schema::PluginFailurePolicy::Open => {
+                                eqproxy_net::FailurePolicy::Open
+                            }
+                        },
+                    },
+                    base_dir,
+                )
+                .map_err(|why| format!("listener.{name}.plugin: {why}"))?;
+                resolved = resolved.with_plugin(std::sync::Arc::new(host));
+            }
             resolved = resolved.with_forwarded_headers(match listener.forwarded_headers {
                 eqproxy_config::schema::ForwardedHeaders::Off => {
                     eqproxy_net::proxy::ForwardedMode::Off

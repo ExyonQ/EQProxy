@@ -1038,6 +1038,10 @@ pub struct ListenerConfig {
     /// Absent = the documented defaults, which are the previous behaviour.
     #[serde(default)]
     pub limits: LimitsConfig,
+    /// WASM request filter (B-I5/B-E4, ADR-0031). `http` mode only.
+    /// Absent = no plugin runs; the request path is untouched.
+    #[serde(default)]
+    pub plugin: Option<PluginConfig>,
     /// Ordered routing rules (v0.6, B-H3/B-H4): first match wins, the
     /// `backend` above is the fallback. `http` mode only.
     #[serde(default)]
@@ -1091,6 +1095,78 @@ fn default_max_head_bytes() -> usize {
 
 fn default_max_headers() -> usize {
     100
+}
+
+/// WASM request filter attached to one listener (B-I5/B-E4, ADR-0031).
+///
+/// The module is loaded and validated when the configuration is resolved, so
+/// an unreadable file, a denied import or a missing export rejects the
+/// snapshot instead of failing per request. `on_error` decides only what a
+/// **runtime** failure (trap, fuel, deadline, memory) does.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PluginConfig {
+    /// Path to the `.wasm` module; relative paths resolve from the config
+    /// file's directory.
+    pub path: String,
+    /// Instruction budget per request. Default 10,000,000; 1..=100,000,000.
+    #[serde(default = "default_plugin_fuel")]
+    pub fuel: u64,
+    /// Wall-clock bound per request (epoch resolution 1 ms).
+    /// Default `"50ms"`; 1 ms..=5 s.
+    #[serde(default = "default_plugin_timeout", with = "duration")]
+    #[schemars(with = "String")]
+    pub timeout: Duration,
+    /// Linear-memory cap per instance. Default 16 MiB; 1..=256 MiB.
+    #[serde(default = "default_plugin_memory")]
+    pub memory_bytes: usize,
+    /// Maximum header mutations per request. Default 16; 1..=64.
+    #[serde(default = "default_plugin_max_header_ops")]
+    pub max_header_ops: usize,
+    /// Runtime failure policy: `closed` (default) answers 503 and never
+    /// forwards; `open` forwards the request unchanged and counts the error.
+    #[serde(default)]
+    pub on_error: PluginFailurePolicy,
+}
+
+impl Default for PluginConfig {
+    fn default() -> Self {
+        Self {
+            path: String::new(),
+            fuel: default_plugin_fuel(),
+            timeout: default_plugin_timeout(),
+            memory_bytes: default_plugin_memory(),
+            max_header_ops: default_plugin_max_header_ops(),
+            on_error: PluginFailurePolicy::default(),
+        }
+    }
+}
+
+/// What a runtime plugin failure does (ADR-0031 §5).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginFailurePolicy {
+    /// Reject with 503; the request never reaches the backend.
+    #[default]
+    Closed,
+    /// Forward the request unchanged; the failure is counted.
+    Open,
+}
+
+fn default_plugin_fuel() -> u64 {
+    10_000_000
+}
+
+fn default_plugin_timeout() -> Duration {
+    Duration::from_millis(50)
+}
+
+fn default_plugin_memory() -> usize {
+    16 * 1024 * 1024
+}
+
+fn default_plugin_max_header_ops() -> usize {
+    16
 }
 
 /// Response compression (B-N6/H6): gzip and Brotli, opt-in per listener.

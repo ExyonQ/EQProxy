@@ -1,0 +1,21 @@
+schema_version = 1
+shutdown_grace = "2s"
+
+[listener.web]
+listen = "127.0.0.1:18080"
+mode = "http"
+backend = "api"
+maxconn = 4096
+connect_timeout = "2s"
+idle_timeout = "60s"
+
+[backend.api]
+server = "127.0.0.1:18081"
+
+[listener.web.plugin]
+path = "/Volumes/Lexar/Cursor/EQProxy/docs/evidence/v085-wasm-plugins/raw/20261029T181509Z/plugin.wasm"
+fuel = 10000000
+timeout = "50ms"
+memory_bytes = 16777216
+max_header_ops = 16
+on_error = "closed"

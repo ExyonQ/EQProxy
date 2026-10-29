@@ -1,0 +1,7 @@
+binary: /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+4543dc1f977f6dd6aa91ccf76081c9782459ced0617ec93bd070192487e87a65  /Volumes/Lexar/Cursor/EQProxy/target/release/eqproxy
+eqproxy 0.8.0
+Darwin lex 25.5.0 Darwin Kernel Version 25.5.0: Mon Apr 27 20:39:09 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T6020 arm64
+ncpu: 10
+oha 1.14.0
+go version go1.26.2 darwin/arm64

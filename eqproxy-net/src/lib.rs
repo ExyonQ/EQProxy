@@ -21,6 +21,7 @@ pub mod http3;
 pub mod maps;
 pub mod mirror;
 pub mod panel;
+pub mod plugin;
 pub mod pool;
 pub mod proxy;
 pub mod proxy_proto;
@@ -45,6 +46,7 @@ pub use balancer::{
 pub use dns::{DnsSettings, Resolving, SystemResolver};
 pub use health::HealthCheck;
 pub use panel::Panel;
+pub use plugin::{FailurePolicy, PluginHost, PluginOutcome, PluginSettings};
 pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, IDLE_CEILING_PER_SERVER, IDLE_FLOOR_PER_SERVER, Pool};
 pub use proxy::{
     AffinityMode, BoundProxy, BoxRead, BoxWrite, HashKey, HashPolicy, MirrorPolicy, OutboundError,

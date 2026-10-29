@@ -1637,6 +1637,47 @@ pub(crate) fn apply_header_actions(
     join_head_lines(&out, head.len() + 64)
 }
 
+/// Applies a plugin's header operations to the forwarded copy (B-I5/B-E4,
+/// ADR-0031). The plugin runs last, so its `set` replaces any value earlier
+/// stages wrote; `remove` drops every line with that name. Names and values
+/// were validated and framed out (no CR/LF, reserved headers refused) by the
+/// plugin host before reaching this function.
+pub(crate) fn apply_plugin_headers(
+    head: &[u8],
+    set: &[(String, String)],
+    remove: &[String],
+) -> Vec<u8> {
+    let mut lines: Vec<&[u8]> = Vec::new();
+    let mut rest = head;
+    while let Some(pos) = rest.windows(2).position(|w| w == b"\r\n") {
+        lines.push(&rest[..pos]);
+        rest = &rest[pos + 2..];
+    }
+    lines.push(rest);
+
+    let mut out: Vec<Vec<u8>> = Vec::with_capacity(lines.len() + set.len());
+    for line in lines {
+        let name_end = line.iter().position(|&b| b == b':').unwrap_or(line.len());
+        let name = &line[..name_end];
+        let dropped = remove
+            .iter()
+            .chain(set.iter().map(|(name, _)| name))
+            .any(|candidate| candidate.as_bytes().eq_ignore_ascii_case(name));
+        if !dropped {
+            out.push(line.to_vec());
+        }
+    }
+    for (name, value) in set {
+        out.push(format!("{name}: {value}").into_bytes());
+    }
+    let capacity = head.len()
+        + set
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 4)
+            .sum::<usize>();
+    join_head_lines(&out, capacity)
+}
+
 /// Appends the rendered `response` header actions to the response head
 /// the client sees (B-N4/B-I4/B-E17).
 fn append_response_headers(head: &[u8], lines: &[String]) -> Vec<u8> {
@@ -2000,6 +2041,79 @@ pub async fn serve_http<CR, CW>(
             }
         };
 
+        // WASM request filter (B-I5/B-E4, ADR-0031): proxied requests only,
+        // after authentication and before any backend byte is dialed. It
+        // receives the client's head; its mutations are applied last to the
+        // forwarded copy, below.
+        let plugin_policy = cfg.plugin.as_ref().map(|plugin| plugin.policy());
+        let mut plugin_set: Vec<(String, String)> = Vec::new();
+        let mut plugin_remove: Vec<String> = Vec::new();
+        if let Some(plugin) = cfg.plugin.as_ref() {
+            metrics.plugin_requests.fetch_add(1, Ordering::Relaxed);
+            match plugin.run(&head_bytes) {
+                crate::plugin::PluginOutcome::Allow { set, remove } => {
+                    plugin_set = set;
+                    plugin_remove = remove;
+                }
+                crate::plugin::PluginOutcome::Deny(status) => {
+                    metrics.plugin_denied.fetch_add(1, Ordering::Relaxed);
+                    if let Some(record) = access.as_mut() {
+                        record.status(status);
+                    }
+                    write_error(&mut client_write, status, "denied by plugin").await;
+                    return;
+                }
+                crate::plugin::PluginOutcome::Failed { .. } => {
+                    metrics.plugin_errors.fetch_add(1, Ordering::Relaxed);
+                    if plugin_policy == Some(crate::plugin::FailurePolicy::Closed) {
+                        if let Some(record) = access.as_mut() {
+                            record.status(503);
+                        }
+                        write_error(&mut client_write, 503, "plugin failure").await;
+                        return;
+                    }
+                    // `open`: forward the request unchanged, never a partial
+                    // set of mutations from a failed invocation.
+                }
+            }
+        }
+
+        // Forwarded headers (B-N4) and rule rewrites (v0.6 slice 2):
+        // applied to the forwarded copy only, never to the client's bytes.
+        // Rule header actions run first; the forwarded-headers policy is
+        // applied last, so `replace` cannot be undone by a rule. The plugin
+        // runs after both, per ADR-0031.
+        let acted = rule_headers
+            .map(|actions| apply_header_actions(&head_bytes, actions, peer, &request.host, scheme));
+        let base: &[u8] = acted.as_deref().unwrap_or(&head_bytes);
+        let forwarded_base = apply_forwarded(base, peer, cfg.forwarded_headers, scheme);
+        let forwarded_base = match rewrite {
+            Some(rewrite) => apply_rewrite(&forwarded_base, rewrite, &request.target),
+            None => forwarded_base,
+        };
+        let forwarded_head = if plugin_set.is_empty() && plugin_remove.is_empty() {
+            forwarded_base
+        } else {
+            let mutated = apply_plugin_headers(&forwarded_base, &plugin_set, &plugin_remove);
+            // A plugin can only grow the head through validated header lines,
+            // but the listener's own bound still applies: over it is a plugin
+            // failure, handled by the same `on_error` policy (open forwards
+            // the unmutated head, never a truncated one).
+            if mutated.len() > limits.max_head_bytes {
+                metrics.plugin_errors.fetch_add(1, Ordering::Relaxed);
+                if plugin_policy == Some(crate::plugin::FailurePolicy::Closed) {
+                    if let Some(record) = access.as_mut() {
+                        record.status(503);
+                    }
+                    write_error(&mut client_write, 503, "plugin failure").await;
+                    return;
+                }
+                forwarded_base
+            } else {
+                mutated
+            }
+        };
+
         // Request mirror (B-H3): resolved per matching request — the rule's
         // policy decides by its own percentage, and only a sampled request
         // costs anything. Placement matters: a mirror never runs for a
@@ -2156,19 +2270,9 @@ pub async fn serve_http<CR, CW>(
         let mut backend_write = conn.write;
 
         // --- Head + request body forwarding ---
-        // Forwarded headers (B-N4) and rule rewrites (v0.6 slice 2):
-        // applied to the forwarded copy only, never to the client's bytes.
-        // Rule header actions (B-N4/B-I4/B-E17) run first; the
-        // forwarded-headers policy is applied last, so `replace` cannot
-        // be undone by a rule.
-        let acted = rule_headers
-            .map(|actions| apply_header_actions(&head_bytes, actions, peer, &request.host, scheme));
-        let base: &[u8] = acted.as_deref().unwrap_or(&head_bytes);
-        let forwarded_head = apply_forwarded(base, peer, cfg.forwarded_headers, scheme);
-        let forwarded_head = match rewrite {
-            Some(rewrite) => apply_rewrite(&forwarded_head, rewrite, &request.target),
-            None => forwarded_head,
-        };
+        // `forwarded_head` was built before the dial (rules, forwarded
+        // headers, rewrite and plugin, in that order): a plugin rejection or
+        // failure never opens a backend connection.
         if write_with_timeout(&mut backend_write, &forwarded_head, cfg.idle_timeout)
             .await
             .is_err()

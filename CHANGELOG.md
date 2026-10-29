@@ -25,6 +25,34 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   config-gate and 6 socket E2E, including 16 streams × 512 KiB through 1 KiB
   pipes) and the full suite (576 passed); 10/10 passes under 10 saturated
   cores ([evidence](docs/evidence/v085-limits.md)).
+- **WASM request-filter plugins (B-I5/B-E4, ADR-0031; B-N17 decided in
+  ADR-0032).** `[listener.<name>.plugin]` runs a Wasm module compiled once at
+  config resolution for every proxied HTTP request. The ABI v1 exports
+  `memory`, `eqproxy_alloc` and `eqproxy_on_request` and may import only
+  `eqproxy.set_request_header` and `eqproxy.remove_request_header`: there is
+  no WASI, network or filesystem capability to grant, and any other import
+  rejects the snapshot with the import named. The plugin can add, replace or
+  remove forwarded request headers, or reject with `400..=599`; framing and
+  connection headers (`content-length`, `transfer-encoding`, `host`, …) are
+  reserved and a plugin that touches them fails. Fuel (instructions),
+  a 1 ms epoch deadline, a per-instance memory cap and a mutation budget
+  bound each call; `on_error = "closed"` (default) answers 503 on a
+  trap/timeout, `"open"` forwards unchanged. A fresh store per request keeps
+  plugins stateless and leaks nothing between exchanges. Runtime 50 with only
+  `cranelift`, `runtime` and `std` ([ADR-0031](docs/adr/0031-wasm-plugin-host.md));
+  Cranelift's `foldhash` is Zlib, allowed explicitly by
+  [ADR-0033](docs/adr/0033-zlib-license-for-foldhash.md);
+  FastCGI/uwsgi/scgi are explicitly rejected by
+  [ADR-0032](docs/adr/0032-fastcgi-uwsgi-scgi-decision.md). Verified with 9
+  unit tests, 9 socket E2E (header injection, deny without dial, real head
+  inspection, fuel, deadline, fail-open, memory growth, reserved header, h2
+  stream) and the config gate; full suite 595 passed. S-PLG-01 (10×15 s per
+  arm, 64 keep-alive connections, 1 KiB, loopback co-located, final binary):
+  medians 6369.6 → 5526.0 RPS (−13.2 %), p50 8.99 → 9.82 ms (+9.3 %), p99
+  30.9 → 41.9 ms (+35.6 %), proxy CPU 118.9 → 135.9 % of a core (+17 pp). At
+  the 50 ms default deadline, 22 of 825 294 requests were answered 503 by the
+  fail-closed policy under a saturated host (0.0027 %); with `timeout =
+  "500ms"` the same run answered 0/87 493 ([evidence](docs/evidence/v085-wasm-plugins.md)).
 
 ### Fixed
 

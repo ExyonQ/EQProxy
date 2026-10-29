@@ -3,6 +3,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use eqproxy_core::expectation::{IpBlock, RegexMatcher, StatusExpectation};
 use eqproxy_core::maps;
@@ -647,6 +648,83 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                 "stream_buffer_bytes = 16384 (omit for the protocol default)".to_owned(),
                 &section,
             );
+        }
+
+        // WASM request filter (B-I5/B-E4, ADR-0031): the file is loaded and
+        // compiled at resolution, but the bounds belong to the gate so a typo
+        // is reported with field, line and example instead of a runtime 503.
+        if let Some(plugin) = &listener.plugin {
+            if listener.mode == ListenerMode::Tcp {
+                err(
+                    field("plugin"),
+                    "a WASM plugin filters HTTP requests and requires mode = \"http\"".to_owned(),
+                    "mode = \"http\"".to_owned(),
+                    &section,
+                );
+            }
+            if plugin.path.trim().is_empty() {
+                err(
+                    field("plugin.path"),
+                    "path is empty".to_owned(),
+                    "path = \"plugins/filter.wasm\"".to_owned(),
+                    &section,
+                );
+            }
+            if !(1..=100_000_000).contains(&plugin.fuel) {
+                err(
+                    field("plugin.fuel"),
+                    format!("{} is outside 1..=100000000 instructions", plugin.fuel),
+                    "fuel = 10000000".to_owned(),
+                    &section,
+                );
+            }
+            if plugin.timeout < Duration::from_millis(1) || plugin.timeout > Duration::from_secs(5)
+            {
+                err(
+                    field("plugin.timeout"),
+                    format!(
+                        "{:?} is outside 1ms..=5s (epoch resolution is 1 ms)",
+                        plugin.timeout
+                    ),
+                    "timeout = \"50ms\"".to_owned(),
+                    &section,
+                );
+            }
+            if !(1_048_576..=268_435_456).contains(&plugin.memory_bytes) {
+                err(
+                    field("plugin.memory_bytes"),
+                    format!(
+                        "{} is outside 1048576..=268435456 bytes",
+                        plugin.memory_bytes
+                    ),
+                    "memory_bytes = 16777216".to_owned(),
+                    &section,
+                );
+            }
+            if !(1..=64).contains(&plugin.max_header_ops) {
+                err(
+                    field("plugin.max_header_ops"),
+                    format!("{} is outside 1..=64 mutations", plugin.max_header_ops),
+                    "max_header_ops = 16".to_owned(),
+                    &section,
+                );
+            }
+            // ABI v1 hands the plugin at most 64 KiB of request head; the
+            // listener budget must not be larger, or a valid request would
+            // become a plugin failure. Keep in sync with
+            // eqproxy-net::plugin::MAX_PLUGIN_INPUT (layering prevents the
+            // config crate from depending on the dataplane crate).
+            if listener.limits.max_head_bytes > 65_536 {
+                err(
+                    field("limits.max_head_bytes"),
+                    format!(
+                        "{} exceeds the 65536-byte WASM plugin input budget; lower it or remove the plugin",
+                        listener.limits.max_head_bytes
+                    ),
+                    "max_head_bytes = 16384".to_owned(),
+                    &section,
+                );
+            }
         }
 
         if listener.proxy_receive {
@@ -1926,6 +2004,7 @@ mod tests {
                     forwarded_headers: ForwardedHeaders::default(),
                     local_response: None,
                     compression: crate::schema::CompressionConfig::default(),
+                    plugin: None,
                     rules: Vec::new(),
                 },
             );
@@ -1935,6 +2014,112 @@ mod tests {
 
     fn check_config(config: &Config) -> CheckResult {
         check(config, "", Path::new("eqproxy.toml"))
+    }
+
+    #[test]
+    fn plugin_bounds_are_enforced_and_http_mode_is_required() {
+        let valid = r#"
+            schema_version = 1
+            [listener.web]
+            listen = "127.0.0.1:8080"
+            mode = "http"
+            backend = "api"
+            [listener.web.plugin]
+            path = "plugins/filter.wasm"
+            fuel = 1000000
+            timeout = "10ms"
+            memory_bytes = 2097152
+            max_header_ops = 8
+            on_error = "open"
+            [backend.api]
+            server = "127.0.0.1:9000"
+        "#;
+        let result = check_source(valid);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        for (snippet, field) in [
+            ("path = \"\"", "listener.web.plugin.path"),
+            ("fuel = 0", "listener.web.plugin.fuel"),
+            ("timeout = \"0s\"", "listener.web.plugin.timeout"),
+            ("memory_bytes = 1024", "listener.web.plugin.memory_bytes"),
+            ("max_header_ops = 0", "listener.web.plugin.max_header_ops"),
+        ] {
+            let path_line = if field.ends_with(".path") {
+                ""
+            } else {
+                "path = \"p.wasm\""
+            };
+            let source = format!(
+                r#"
+                schema_version = 1
+                [listener.web]
+                listen = "127.0.0.1:8080"
+                mode = "http"
+                backend = "api"
+                [listener.web.plugin]
+                {path_line}
+                {snippet}
+                [backend.api]
+                server = "127.0.0.1:9000"
+                "#
+            );
+            let result = check_source(&source);
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|error| error.field.as_deref() == Some(field)),
+                "missing {field} for {snippet}: {:?}",
+                result.errors
+            );
+        }
+
+        // A plugin filters HTTP requests only: a TCP listener rejects it.
+        let tcp = r#"
+            schema_version = 1
+            [listener.db]
+            listen = "127.0.0.1:5432"
+            mode = "tcp"
+            backend = "pg"
+            [listener.db.plugin]
+            path = "p.wasm"
+            [backend.pg]
+            server = "127.0.0.1:5433"
+        "#;
+        let result = check_source(tcp);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.field.as_deref() == Some("listener.db.plugin")),
+            "{:?}",
+            result.errors
+        );
+
+        // The ABI receives at most 64 KiB of head: a larger listener budget
+        // is refused instead of truncating valid requests.
+        let head = r#"
+            schema_version = 1
+            [listener.web]
+            listen = "127.0.0.1:8080"
+            mode = "http"
+            backend = "api"
+            [listener.web.limits]
+            max_head_bytes = 131072
+            [listener.web.plugin]
+            path = "p.wasm"
+            [backend.api]
+            server = "127.0.0.1:9000"
+        "#;
+        let result = check_source(head);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.field.as_deref() == Some("listener.web.limits.max_head_bytes")),
+            "{:?}",
+            result.errors
+        );
     }
 
     #[test]

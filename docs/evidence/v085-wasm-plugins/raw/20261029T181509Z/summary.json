@@ -1,0 +1,78 @@
+{
+  "none": {
+    "reps": [
+      {
+        "rep": 1,
+        "rps": 6670.1,
+        "p50_ms": 8.796,
+        "p99_ms": 25.029,
+        "proxy_cpu_pct": 123.7,
+        "errors": 64
+      },
+      {
+        "rep": 2,
+        "rps": 6579.3,
+        "p50_ms": 8.921,
+        "p99_ms": 25.247,
+        "proxy_cpu_pct": 122.8,
+        "errors": 64
+      },
+      {
+        "rep": 3,
+        "rps": 6768.5,
+        "p50_ms": 8.752,
+        "p99_ms": 23.564,
+        "proxy_cpu_pct": 125.2,
+        "errors": 63
+      }
+    ],
+    "median": {
+      "rps": 6670.1,
+      "p50_ms": 8.796,
+      "p99_ms": 25.029,
+      "proxy_cpu_pct": 123.7
+    },
+    "total_errors": 191
+  },
+  "plugin": {
+    "reps": [
+      {
+        "rep": 1,
+        "rps": 6259.4,
+        "p50_ms": 9.096,
+        "p99_ms": 31.942,
+        "proxy_cpu_pct": 145.2,
+        "errors": 63
+      },
+      {
+        "rep": 2,
+        "rps": 6315.5,
+        "p50_ms": 9.056,
+        "p99_ms": 31.762,
+        "proxy_cpu_pct": 147.5,
+        "errors": 64
+      },
+      {
+        "rep": 3,
+        "rps": 6480.4,
+        "p50_ms": 9.066,
+        "p99_ms": 24.845,
+        "proxy_cpu_pct": 150.3,
+        "errors": 64
+      }
+    ],
+    "median": {
+      "rps": 6315.5,
+      "p50_ms": 9.066,
+      "p99_ms": 31.762,
+      "proxy_cpu_pct": 147.5
+    },
+    "total_errors": 191
+  },
+  "delta": {
+    "rps_pct": -5.316262125005622,
+    "p50_pct": 3.069577080491137,
+    "p99_pct": 26.90079507770986,
+    "cpu_pct_points": 23.799999999999997
+  }
+}

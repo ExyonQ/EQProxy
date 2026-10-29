@@ -143,6 +143,14 @@ pub struct Metrics {
     /// HTTP/3 connections that ended with a real error (protocol error code,
     /// transport error, reset or timeout): counted and logged as `WARN`.
     pub h3_connection_errors: AtomicU64,
+    /// WASM plugin invocations (B-I5/B-E4): every request that reached a
+    /// configured filter, counted before the verdict.
+    pub plugin_requests: AtomicU64,
+    /// Requests a WASM plugin rejected explicitly (4xx/5xx from the guest).
+    pub plugin_denied: AtomicU64,
+    /// Plugin invocations that failed at runtime (trap, fuel, deadline,
+    /// memory, host validation); `on_error` decided what the client saw.
+    pub plugin_errors: AtomicU64,
     /// Opt-in per-server/per-route series (CE4): disabled and empty until the
     /// configuration asks for it.
     pub detail: DetailMetrics,
@@ -528,6 +536,9 @@ pub struct MetricsSnapshot {
     pub compression_bytes_out: u64,
     pub h3_clean_closes: u64,
     pub h3_connection_errors: u64,
+    pub plugin_requests: u64,
+    pub plugin_denied: u64,
+    pub plugin_errors: u64,
 }
 
 impl MetricsSnapshot {
@@ -605,6 +616,9 @@ impl MetricsSnapshot {
             ("compression_bytes_out", self.compression_bytes_out),
             ("h3_clean_closes", self.h3_clean_closes),
             ("h3_connection_errors", self.h3_connection_errors),
+            ("plugin_requests", self.plugin_requests),
+            ("plugin_denied", self.plugin_denied),
+            ("plugin_errors", self.plugin_errors),
         ];
         let mut out = String::with_capacity(4096);
         for (name, value) in counters {
@@ -701,6 +715,9 @@ impl Metrics {
             compression_bytes_out: self.compression_bytes_out.load(Ordering::Relaxed),
             h3_clean_closes: self.h3_clean_closes.load(Ordering::Relaxed),
             h3_connection_errors: self.h3_connection_errors.load(Ordering::Relaxed),
+            plugin_requests: self.plugin_requests.load(Ordering::Relaxed),
+            plugin_denied: self.plugin_denied.load(Ordering::Relaxed),
+            plugin_errors: self.plugin_errors.load(Ordering::Relaxed),
         }
     }
 

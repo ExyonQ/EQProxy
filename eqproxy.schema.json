@@ -839,6 +839,17 @@
           "description": "Mode: `\"tcp\"` (tunnel, default) or `\"http\"` (strict HTTP/1.1).",
           "$ref": "#/$defs/ListenerMode"
         },
+        "plugin": {
+          "description": "WASM request filter (B-I5/B-E4, ADR-0031). `http` mode only.\nAbsent = no plugin runs; the request path is untouched.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "proxy_allow": {
           "description": "Trusted PROXY origins (IP or CIDR; required non-empty with\n`proxy_receive = true`).",
           "type": "array",
@@ -1018,6 +1029,65 @@
         }
       },
       "additionalProperties": false
+    },
+    "PluginConfig": {
+      "description": "WASM request filter attached to one listener (B-I5/B-E4, ADR-0031).\n\nThe module is loaded and validated when the configuration is resolved, so\nan unreadable file, a denied import or a missing export rejects the\nsnapshot instead of failing per request. `on_error` decides only what a\n**runtime** failure (trap, fuel, deadline, memory) does.",
+      "type": "object",
+      "properties": {
+        "fuel": {
+          "description": "Instruction budget per request. Default 10,000,000; 1..=100,000,000.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 10000000,
+          "minimum": 0
+        },
+        "max_header_ops": {
+          "description": "Maximum header mutations per request. Default 16; 1..=64.",
+          "type": "integer",
+          "format": "uint",
+          "default": 16,
+          "minimum": 0
+        },
+        "memory_bytes": {
+          "description": "Linear-memory cap per instance. Default 16 MiB; 1..=256 MiB.",
+          "type": "integer",
+          "format": "uint",
+          "default": 16777216,
+          "minimum": 0
+        },
+        "on_error": {
+          "description": "Runtime failure policy: `closed` (default) answers 503 and never\nforwards; `open` forwards the request unchanged and counts the error.",
+          "$ref": "#/$defs/PluginFailurePolicy"
+        },
+        "path": {
+          "description": "Path to the `.wasm` module; relative paths resolve from the config\nfile's directory.",
+          "type": "string"
+        },
+        "timeout": {
+          "description": "Wall-clock bound per request (epoch resolution 1 ms).\nDefault `\"50ms\"`; 1 ms..=5 s.",
+          "type": "string",
+          "default": "50ms"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "PluginFailurePolicy": {
+      "description": "What a runtime plugin failure does (ADR-0031 §5).",
+      "oneOf": [
+        {
+          "description": "Reject with 503; the request never reaches the backend.",
+          "type": "string",
+          "const": "closed"
+        },
+        {
+          "description": "Forward the request unchanged; the failure is counted.",
+          "type": "string",
+          "const": "open"
+        }
+      ]
     },
     "ProxyProtocolMode": {
       "description": "PROXY protocol send to the backend (A9; reception in Phase 3).",

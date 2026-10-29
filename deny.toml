@@ -6,6 +6,10 @@
 # rustls/aws-lc (aws-lc-rs, aws-lc-sys); CDLA-Permissive-2.0 is the license
 # Mozilla root-store data (webpki-roots). All permissive.
 # Documented in release 0.2.0.
+#
+# Zlib (OSI, permissive, no copyleft) is `foldhash`, pulled by hashbrown in
+# wasmtime's Cranelift (ADR-0031); added by ADR-0033 after cargo-deny rejected
+# the tree in the v0.8.5 plugin increment.
 
 [graph]
 all-features = true
@@ -28,6 +32,7 @@ allow = [
     "BSL-1.0",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
+    "Zlib",
 ]
 
 [bans]

@@ -35,6 +35,14 @@ quinn = { version = "0.11", default-features = false, features = [
 ] }
 h3 = "0.0.8"
 h3-quinn = "0.0.10"
+# WASM plugins (B-I5/B-E4): the SPEC names wasmtime; reduced to the JIT,
+# runtime and std, without async/component-model/cache/GC features the
+# plugin ABI does not use.
+wasmtime = { version = "50", default-features = false, features = [
+    "cranelift",
+    "runtime",
+    "std",
+] }
 
 # POSIX ACLs on the admin socket (ADR-0023) are an extended attribute; the
 # Linux-only wrapper keeps the C library out (static musl image, no libacl).

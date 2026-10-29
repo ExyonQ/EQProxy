@@ -865,6 +865,9 @@ pub struct ResolvedListener {
     pub compression: Option<crate::compression::ResolvedCompression>,
     /// Message limits and per-stream buffer sizing (B-N19/B-I17/B-E19).
     pub limits: ResolvedLimits,
+    /// Compiled WASM request filter (B-I5/B-E4, ADR-0031). `None` = no
+    /// plugin, and the request path is exactly the pre-plugin one.
+    pub plugin: Option<Arc<crate::plugin::PluginHost>>,
     /// Data maps in force (C10/PP-02): what `map` rule conditions
     /// consult; the file watchers swap their data in hot.
     pub maps: Arc<eqproxy_core::maps::MapRegistry>,
@@ -912,6 +915,7 @@ impl ResolvedListener {
             local_response: None,
             compression: None,
             limits: ResolvedLimits::default(),
+            plugin: None,
             maps: Arc::new(eqproxy_core::maps::MapRegistry::new()),
             access: None,
         }
@@ -938,6 +942,13 @@ impl ResolvedListener {
     #[must_use]
     pub fn with_limits(mut self, limits: ResolvedLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// Attaches a compiled WASM request filter (B-I5/B-E4, ADR-0031).
+    #[must_use]
+    pub fn with_plugin(mut self, plugin: Arc<crate::plugin::PluginHost>) -> Self {
+        self.plugin = Some(plugin);
         self
     }
 

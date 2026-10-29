@@ -398,7 +398,9 @@ fixed at startup; a `SIGHUP` that edits them warns and keeps the running sink.
 
 ## 10. Extensions (WASM)
 
-Designed (scope); implementation in Phase 7. Single route:
+Implemented in v0.8.5 as a **request filter** ([ADR-0031](docs/adr/0031-wasm-plugin-host.md));
+response filters, body access and the other extension points remain future
+slices. Single route:
 
 - **WASM (wasmtime)** for untrusted plugins: fuel/epoch interruption, per-store
   memory limits, deadlines.
@@ -408,19 +410,33 @@ Designed (scope); implementation in Phase 7. Single route:
   is ever needed, it would be in an isolated process outside the binary and
   with a new ADR.
 
-For each plugin (plugin template) is defined: extension points (fetch,
-converter, action, service, task — equivalent to the reference proxy's),
-execution model (never arbitrary blocking tasks on dataplane workers; a timeout
-does **not** magically cancel a block; isolation in another process when the
-plugin may block), allowed capabilities (network and files **denied by
+ABI v1 (v0.8.5) compiles **one module per HTTP listener** and runs it inline on
+the dataplane worker for every request of that listener. The guest exports
+`memory`, `eqproxy_alloc` and `eqproxy_on_request`, and may import only
+`eqproxy.set_request_header` and `eqproxy.remove_request_header`; there is no
+WASI, network or filesystem import to grant, and any other import rejects the
+configuration. The plugin can add, replace or remove forwarded request headers
+or reject with 400..=599; framing and connection headers are reserved. Fuel
+(10 M instructions by default), a 50 ms epoch deadline, a 16 MiB memory cap
+and a mutation budget bound each call; `on_error = "closed"` answers 503 on a
+trap/timeout and `"open"` forwards unchanged. A fresh store per request keeps
+plugins stateless. Metrics are `plugin_requests`, `plugin_denied` and
+`plugin_errors`, label-free.
+
+For any further extension point (fetch, converter, action, service, task —
+equivalent to the reference proxy's) the same contract must be defined before
+code: execution model (never arbitrary blocking tasks on dataplane workers; a
+timeout does **not** magically cancel a block; isolation in another process
+when the plugin may block), allowed capabilities (network and files **denied by
 default**), instruction budget, deadlines, cancellation, fail-open/fail-closed
 policy **per extension**, plugin API versioning, pre-activation validation and
 isolation tests.
 
-Rules: plugins do not run on every request by default; the cost with and
-without plugins is measured (BENCHMARK_PLAN.md, scenario S-PLG-01). WASM is
-not presented as perfect isolation: host capabilities, residual risks and
-runtime dependency are documented.
+Rules: plugins are opt-in per listener and, once configured, run on every
+request of that listener; the cost with and without plugins is measured
+(BENCHMARK_PLAN.md, scenario S-PLG-01). WASM is not presented as perfect
+isolation: host capabilities, residual risks and runtime dependency are
+documented.
 
 ## 11. Security
 

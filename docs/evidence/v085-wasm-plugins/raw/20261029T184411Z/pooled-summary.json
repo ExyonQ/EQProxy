@@ -1,0 +1,39 @@
+{
+  "none": {
+    "n": 10,
+    "median_rps": 6369.6,
+    "median_p50": 8.985,
+    "median_p99": 30.901,
+    "rps_min": 5749.9,
+    "rps_max": 6662.5,
+    "status": {
+      "200": 948783
+    },
+    "deadline_aborts": 637,
+    "median_cpu_pct": 118.9
+  },
+  "plugin": {
+    "n": 10,
+    "median_rps": 5526.0,
+    "median_p50": 9.818,
+    "median_p99": 41.9,
+    "rps_min": 4258.5,
+    "rps_max": 6105.2,
+    "status": {
+      "200": 825272,
+      "503": 22
+    },
+    "deadline_aborts": 631,
+    "median_cpu_pct": 135.9
+  },
+  "delta": {
+    "rps_pct": -13.24,
+    "p50_pct": 9.27,
+    "p99_pct": 35.59,
+    "cpu_pct_points": 17.0
+  },
+  "runs": [
+    "docs/evidence/v085-wasm-plugins/raw/20261029T183408Z",
+    "docs/evidence/v085-wasm-plugins/raw/20261029T184411Z"
+  ]
+}
