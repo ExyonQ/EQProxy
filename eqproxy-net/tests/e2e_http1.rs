@@ -13,6 +13,8 @@ use tokio::task::JoinHandle;
 use eqproxy_core::{Metrics, shutdown};
 use eqproxy_net::{BoundProxy, ProxyMode, ResolvedListener, bind};
 
+mod common;
+
 const WAIT: Duration = Duration::from_secs(5);
 
 /// Minimal real HTTP backend: answers 200 echoing the request body.
@@ -337,8 +339,10 @@ async fn http1_get_roundtrip_and_keepalive() {
     );
 
     drop(client);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(metrics.snapshot().http_requests_proxied, 2);
+    common::wait_for_counter("http_requests_proxied", 2, || {
+        metrics.snapshot().http_requests_proxied
+    })
+    .await;
     assert_eq!(metrics.snapshot().http_requests_rejected, 0);
 
     handle.trigger();
@@ -904,7 +908,10 @@ async fn http1_client_abort_cancels_upstream_promptly() {
         .expect("the client abort must cancel the upstream immediately")
         .expect("backend close signal");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    common::wait_for_counter("connections_active", 0, || {
+        metrics.snapshot().connections_active
+    })
+    .await;
     assert_eq!(
         metrics.snapshot().connections_active,
         0,
@@ -1002,8 +1009,10 @@ async fn expect_100_continue_releases_client_and_streams_body() {
     assert!(extra.is_empty(), "nothing past the body: {extra:?}");
 
     drop(client);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(metrics.snapshot().http_requests_proxied, 1);
+    common::wait_for_counter("http_requests_proxied", 1, || {
+        metrics.snapshot().http_requests_proxied
+    })
+    .await;
     assert_eq!(metrics.snapshot().http_requests_rejected, 0);
 
     handle.trigger();
@@ -1075,8 +1084,10 @@ async fn interim_1xx_is_forwarded_and_never_desyncs_keepalive() {
     assert!(extra.is_empty(), "nothing past the body: {extra:?}");
 
     drop(client);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(metrics.snapshot().http_requests_proxied, 2);
+    common::wait_for_counter("http_requests_proxied", 2, || {
+        metrics.snapshot().http_requests_proxied
+    })
+    .await;
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
@@ -1130,8 +1141,10 @@ async fn backend_redundant_100_is_consumed_exactly_once() {
     assert!(extra.is_empty(), "nothing past the body: {extra:?}");
 
     drop(client);
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(metrics.snapshot().http_requests_proxied, 1);
+    common::wait_for_counter("http_requests_proxied", 1, || {
+        metrics.snapshot().http_requests_proxied
+    })
+    .await;
 
     handle.trigger();
     tokio::time::timeout(WAIT, serve)
@@ -1227,7 +1240,10 @@ async fn oversent_backend_bytes_are_never_forwarded_or_pooled() {
     assert!(extra2.is_empty(), "nothing past body 2: {extra2:?}");
 
     drop(client);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    common::wait_for_counter("backend_connections_discarded", 1, || {
+        metrics.snapshot().backend_connections_discarded
+    })
+    .await;
     let snap = metrics.snapshot();
     assert_eq!(
         snap.backend_connections_opened, 2,

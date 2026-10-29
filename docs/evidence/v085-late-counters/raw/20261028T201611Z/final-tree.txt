@@ -1,0 +1,12 @@
+# 2026-10-28T20:16:11Z host=Darwin arm64 nproc=10
+     Running tests/e2e_http1.rs (target/debug/deps/e2e_http1-2a13c8c6adef242b)
+test common::revivable_addr_is_closed_and_then_bindable ... ok
+test common::dead_addr_never_answers_and_keeps_its_port_out_of_the_pool ... ok
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.98s
+     Running tests/e2e_http3.rs (target/debug/deps/e2e_http3-6e3dd6c3433b41fe)
+test common::revivable_addr_is_closed_and_then_bindable ... ok
+test common::dead_addr_never_answers_and_keeps_its_port_out_of_the_pool ... ok
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.21s
+fmt: ok
+suite health probes: 18 found, 2 sub-second or unproven, 2 declared in short-health-probes.txt
+ok: every suite health probe has 1 s of timeout or a declared reason

@@ -1,0 +1,12 @@
+# 2026-10-28T20:14:11Z positive control: same +300 ms patch, tests now wait with deadline
+[e2e_http1::http1_get_roundtrip_and_keepalive] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.62s 
+[e2e_http1::an_aborted_request_body_cancels_the_upstream] exit=0 :: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s 
+[e2e_http1::interim_1xx_is_forwarded_and_never_desyncs_keepalive] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.71s 
+[e2e_http1::interim_1xx_is_forwarded_and_the_body_streams] exit=0 :: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s 
+[e2e_http1::backend_redundant_100_is_consumed_exactly_once] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.38s 
+[e2e_http1::polluted_backend_connection_is_never_reused] exit=0 :: test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s 
+[e2e_http3::http3_get_is_terminated_and_relayed_to_the_h1_origin] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.38s 
+# 2026-10-28T20:14:51Z positive control, remaining three (correct test names)
+[e2e_http1::http1_client_abort_cancels_upstream_promptly] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.04s 
+[e2e_http1::expect_100_continue_releases_client_and_streams_body] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.31s 
+[e2e_http1::oversent_backend_bytes_are_never_forwarded_or_pooled] exit=0 :: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.62s 

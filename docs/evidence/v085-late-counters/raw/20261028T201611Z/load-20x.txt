@@ -1,0 +1,22 @@
+# 20 repetitions of e2e_http1 + e2e_http3 with 10 CPU spinners (late counters)
+[rep 1] exit=0 3s load= 284.60 304.02 320.30  :: 2 targets ok
+[rep 2] exit=0 3s load= 285.67 303.92 320.17  :: 2 targets ok
+[rep 3] exit=0 4s load= 285.67 303.92 320.17  :: 2 targets ok
+[rep 4] exit=0 3s load= 285.62 303.60 319.97  :: 2 targets ok
+[rep 5] exit=0 4s load= 286.53 303.49 319.83  :: 2 targets ok
+[rep 6] exit=0 3s load= 286.53 303.49 319.83  :: 2 targets ok
+[rep 7] exit=0 3s load= 285.84 303.07 319.59  :: 2 targets ok
+[rep 8] exit=0 4s load= 284.66 302.54 319.30  :: 2 targets ok
+[rep 9] exit=0 3s load= 284.66 302.54 319.30  :: 2 targets ok
+[rep 10] exit=0 3s load= 284.12 302.13 319.06  :: 2 targets ok
+[rep 11] exit=0 3s load= 284.51 301.91 318.88  :: 2 targets ok
+[rep 12] exit=0 3s load= 284.51 301.91 318.88  :: 2 targets ok
+[rep 13] exit=0 3s load= 284.95 301.71 318.71  :: 2 targets ok
+[rep 14] exit=0 2s load= 284.95 301.71 318.71  :: 2 targets ok
+[rep 15] exit=0 3s load= 286.16 301.68 318.60  :: 2 targets ok
+[rep 16] exit=0 3s load= 285.50 301.29 318.36  :: 2 targets ok
+[rep 17] exit=0 3s load= 285.50 301.29 318.36  :: 2 targets ok
+[rep 18] exit=0 3s load= 287.86 301.52 318.34  :: 2 targets ok
+[rep 19] exit=0 3s load= 288.60 301.44 318.22  :: 2 targets ok
+[rep 20] exit=0 3s load= 288.60 301.44 318.22  :: 2 targets ok
+fail=0/20

@@ -29,6 +29,8 @@ use eqproxy_net::{
     RouteAction, ServerAddr, bind,
 };
 
+mod common;
+
 const WAIT: Duration = Duration::from_secs(10);
 const CERT: &[u8] = include_bytes!("fixtures/cert.pem");
 const KEY: &[u8] = include_bytes!("fixtures/key.pem");
@@ -401,6 +403,10 @@ async fn http3_get_is_terminated_and_relayed_to_the_h1_origin() {
         !head.to_ascii_lowercase().contains("connection:"),
         "a hop-by-hop header crossed the translation: {head}"
     );
+    common::wait_for_counter("http_requests_proxied", 1, || {
+        metrics.http_requests_proxied.load(Ordering::Relaxed)
+    })
+    .await;
     assert_eq!(
         metrics.http_requests_proxied.load(Ordering::Relaxed),
         1,
