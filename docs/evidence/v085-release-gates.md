@@ -142,6 +142,13 @@ escribió `SHA256SUMS.txt` con las cuatro líneas de binarios más el tarball y 
 verificó (`eqproxy-0.8.0-src.tar.gz: OK`); solo la creación del release quedó
 `skipped`.
 
+**Equivalencia publicada.** La rama de prueba se borró al integrar los seis
+incrementos en `main`, un commit por casilla (`aa00ebf`, `c03ea75`, `daa0736`,
+`689295d`, `ab97783`, `acbe598`). `cbabc2a` deja de ser alcanzable, pero su
+árbol de fuentes es idéntico al de `acbe598`: `git diff cbabc2a acbe598 --
+':(exclude)docs'` sale vacío, y lo único que cambia es este documento y su
+crudo, escritos después del run.
+
 Crudo: [`image.log`](v085-release-gates/raw/20261029T0110Z/image.log),
 [`release.log`](v085-release-gates/raw/20261029T0110Z/release.log),
 [`guard.log`](v085-release-gates/raw/20261029T0110Z/guard.log),
