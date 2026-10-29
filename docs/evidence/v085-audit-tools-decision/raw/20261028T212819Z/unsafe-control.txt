@@ -1,0 +1,46 @@
+    Checking typenum v1.20.1
+   Compiling serde_core v1.0.229
+    Checking memchr v2.8.3
+   Compiling serde v1.0.229
+    Checking regex-syntax v0.8.11
+    Checking bytes v1.12.1
+    Checking libc v0.2.190
+    Checking cfg-if v1.0.5
+    Checking pin-project-lite v0.2.17
+    Checking base64 v0.22.1
+    Checking aho-corasick v1.1.5
+    Checking generic-array v0.14.7
+    Checking errno v0.3.14
+    Checking socket2 v0.6.5
+    Checking mio v1.2.4
+    Checking signal-hook-registry v1.4.8
+    Checking tokio v1.53.3
+    Checking block-buffer v0.10.4
+    Checking crypto-common v0.1.7
+    Checking digest v0.10.7
+    Checking regex-automata v0.4.18
+    Checking md-5 v0.10.6
+    Checking regex v1.13.1
+    Checking eqproxy-core v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-core)
+error: usage of an `unsafe` block
+  --> eqproxy-core/src/lib.rs:27:5
+   |
+27 |     unsafe { 0 }
+   |     ^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> eqproxy-core/src/lib.rs:5:11
+   |
+ 5 | #![forbid(unsafe_code)]
+   |           ^^^^^^^^^^^
+
+warning: unnecessary `unsafe` block
+  --> eqproxy-core/src/lib.rs:27:5
+   |
+27 |     unsafe { 0 }
+   |     ^^^^^^ unnecessary `unsafe` block
+   |
+   = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: `eqproxy-core` (lib) generated 1 warning
+error: could not compile `eqproxy-core` (lib) due to 1 previous error; 1 warning emitted

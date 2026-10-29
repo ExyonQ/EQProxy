@@ -1,0 +1,6 @@
+$ cargo semver-checks check-release
+error: failed to retrieve index of crate versions from registry
+
+Caused by:
+    eqproxy-config not found in registry (crates.io). For workarounds check https://github.com/obi1kenobi/cargo-semver-checks#does-the-crate-im-checking-have-to-be-published-on-cratesio
+exit: 101

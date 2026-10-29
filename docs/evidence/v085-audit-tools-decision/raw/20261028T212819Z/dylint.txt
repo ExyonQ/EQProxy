@@ -1,0 +1,5 @@
+dylint: not on PATH
+/Users/toni/.cargo/bin/cargo-dylint
+ls: .dylint.toml: No such file or directory
+ls: dylint.toml: No such file or directory
+no [*metadata.dylint] table

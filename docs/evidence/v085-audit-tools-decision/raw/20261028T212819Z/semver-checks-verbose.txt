@@ -1,0 +1,3 @@
+    Skipping eqproxy-config v0.8.0 (current)
+    Skipping eqproxy-core v0.8.0 (current)
+    Skipping eqproxy-net v0.8.0 (current)

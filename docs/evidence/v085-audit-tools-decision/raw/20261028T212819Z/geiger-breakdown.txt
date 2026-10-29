@@ -1,0 +1,16 @@
+warning lines: 4417
+unique files:     1130
+unique registry crates:       87
+workspace .rs files:        0
+workspace non-rs files:
+/Volumes/Lexar/Cursor/EQProxy/eqproxy.schema.json
+target generated files:        7
+top crates:
+ 560 libm-0.2.16
+ 556 icu_properties_data-2.3.0
+ 344 jsonschema-0.49.9
+ 240 icu_locale_core-2.3.0
+ 184 referencing-0.49.9
+ 160 core-foundation-sys-0.8.7
+ 140 security-framework-3.7.0
+ 128 micromap-0.3.0
