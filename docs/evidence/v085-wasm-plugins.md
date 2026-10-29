@@ -163,6 +163,13 @@ cargo test -p eqproxy-config --release plugin_bounds   → 1 passed, 0 failed
 REPS=7 bash scripts/evidence/v085-wasm-plugins/run.sh  → exit 0; crudo en raw/20261029T184411Z
 ```
 
+El pipeline de CI del commit publicado `005aaf7`
+([run 40958107023](https://github.com/ExyonQ/EQProxy/actions/runs/40958107023))
+cerró **verde** con sus cinco jobs entre 21:28:38 y 21:33:18 UTC:
+`Linux x86_64 (tier-1)` (fmt, Clippy y suite completa),
+`Suite as root (uid-gated skips declared)`, los dos `Admin socket ACL E2E`
+(nativo amd64 y arm64) y `Evidence test citations`.
+
 El binario del benchmark se construyó con `cargo build --release -p
 eqproxy-cli`; su sha256 está en `environment.txt` de cada tanda. El montaje no
 usa contenedores ni otra máquina: es el mismo host de las pruebas, y por eso
