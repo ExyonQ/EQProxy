@@ -51,6 +51,10 @@ xattr = "1"
 
 [dev-dependencies]
 base64 = { workspace = true }
+# The 400-stream fixture listens with the backlog a real origin uses; std's
+# `TcpListener::bind` hardcodes 128 and the burst would overflow it on a slow
+# runner. Same version the workspace already resolves (no new crate).
+socket2 = "0.6"
 
 # The ACL test reads the attribute back; the library already links it on Linux.
 [target.'cfg(target_os = "linux")'.dev-dependencies]

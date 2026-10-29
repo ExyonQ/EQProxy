@@ -582,14 +582,32 @@ async fn tls_alpn_h2_terminates_a_real_http2_connection() {
 /// keeps them all open at once instead of letting the fastest ones finish and
 /// park their connection before the rest have started (which would make the
 /// observed concurrency depend on scheduling).
+/// A real origin listens with a backlog far above the 128 that std's
+/// `TcpListener::bind` hardcodes (nginx 511, HAProxy 4096, `somaxconn` 4096).
+/// The 400-stream wave below opens 400 backend connections at once, so on a
+/// slow runner the std backlog can overflow and one connection dies before its
+/// response — a 502 with no dial error in the log, which is what this fixture
+/// was hitting intermittently in CI. The backlog belongs to the fixture, not to
+/// the proxy, so it is raised here instead of widening any assertion.
+fn bind_keepalive_origin() -> std::io::Result<TcpListener> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_nonblocking(true)?;
+    let addr: SocketAddr = "127.0.0.1:0".parse().expect("origin addr");
+    socket.bind(&addr.into())?;
+    socket.listen(4096)?;
+    TcpListener::from_std(socket.into())
+}
+
 async fn start_keepalive_origin(
     hold: Duration,
 ) -> (SocketAddr, Arc<AtomicUsize>, Arc<AtomicUsize>) {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind keepalive origin");
+    let listener = bind_keepalive_origin().expect("bind keepalive origin");
     let addr = listener.local_addr().expect("addr keepalive origin");
     let connections = Arc::new(AtomicUsize::new(0));
     let requests = Arc::new(AtomicUsize::new(0));
