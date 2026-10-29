@@ -1,0 +1,22 @@
+# 20 repetitions of the three targets with 10 CPU spinners
+[rep 1] exit=0 12s load= 325.40 322.23 329.37  :: 3 targets ok
+[rep 2] exit=0 12s load= 324.89 322.27 329.26  :: 3 targets ok
+[rep 3] exit=0 13s load= 323.91 322.15 329.14  :: 3 targets ok
+[rep 4] exit=0 12s load= 320.63 321.50 328.78  :: 3 targets ok
+[rep 5] exit=0 13s load= 322.68 321.90 328.83  :: 3 targets ok
+[rep 6] exit=0 13s load= 326.63 322.79 329.03  :: 3 targets ok
+[rep 7] exit=0 12s load= 329.00 323.42 329.18  :: 3 targets ok
+[rep 8] exit=0 13s load= 325.31 322.89 328.89  :: 3 targets ok
+[rep 9] exit=0 12s load= 324.28 322.74 328.77  :: 3 targets ok
+[rep 10] exit=0 13s load= 323.19 322.50 328.57  :: 3 targets ok
+[rep 11] exit=0 12s load= 321.77 322.22 328.40  :: 3 targets ok
+[rep 12] exit=0 13s load= 321.22 322.09 328.25  :: 3 targets ok
+[rep 13] exit=0 12s load= 324.40 322.73 328.40  :: 3 targets ok
+[rep 14] exit=0 13s load= 320.70 321.98 328.03  :: 3 targets ok
+[rep 15] exit=0 12s load= 322.63 322.34 328.09  :: 3 targets ok
+[rep 16] exit=0 13s load= 328.88 323.72 328.48  :: 3 targets ok
+[rep 17] exit=0 13s load= 333.29 324.83 328.82  :: 3 targets ok
+[rep 18] exit=0 12s load= 342.18 327.21 329.59  :: 3 targets ok
+[rep 19] exit=0 13s load= 343.63 328.03 329.86  :: 3 targets ok
+[rep 20] exit=0 13s load= 339.68 327.90 329.78  :: 3 targets ok
+fail=0/20

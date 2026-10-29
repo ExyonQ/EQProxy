@@ -19,6 +19,8 @@ use eqproxy_net::{
     ResolvedServer, bind,
 };
 
+mod common;
+
 const WAIT: Duration = Duration::from_secs(5);
 const CERT: &[u8] = include_bytes!("fixtures/cert.pem");
 const KEY: &[u8] = include_bytes!("fixtures/key.pem");
@@ -101,14 +103,6 @@ async fn start_tls_echo() -> SocketAddr {
             });
         }
     });
-    addr
-}
-
-/// Free loopback port (no listener): connects fail instantly.
-async fn free_port() -> SocketAddr {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    drop(listener);
     addr
 }
 
@@ -435,7 +429,9 @@ async fn balancer_weights() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn healthchecks_e2e() {
     let a = start_marker_echo(b'A').await;
-    let b_addr = free_port().await; // no listener: checks fail
+    // Closed on the TCP side now (checks fail) and bound by this test below.
+    // The guard claims the port across test binaries without opening it.
+    let (b_addr, _b_guard) = common::revivable_addr();
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(
         "api",
@@ -628,7 +624,7 @@ async fn proxy_protocol_v2() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_servers_down_returns_503_in_http_mode() {
-    let dead = free_port().await;
+    let (dead, _dead_guard) = common::dead_addr();
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(
         "api",
@@ -680,7 +676,7 @@ async fn all_servers_down_returns_503_in_http_mode() {
 )]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_servers_down_closes_connection_in_tcp_mode() {
-    let dead = free_port().await;
+    let (dead, _dead_guard) = common::dead_addr();
     let metrics = Arc::new(Metrics::default());
     let backend = ResolvedBackend::new(
         "api",

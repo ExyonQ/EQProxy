@@ -1,0 +1,13 @@
+# 2026-10-28T19:06:49Z host=Darwin arm64
+     Running tests/e2e_phase2b.rs (target/debug/deps/e2e_phase2b-3dc8780361652a25)
+test common::revivable_addr_is_closed_and_then_bindable ... ok
+test common::dead_addr_refuses_and_keeps_its_port_out_of_the_pool has been running for over 60 seconds
+test common::dead_addr_refuses_and_keeps_its_port_out_of_the_pool ... ok
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 75.00s
+     Running tests/e2e_reload.rs (target/debug/deps/e2e_reload-0a2aee8090a3605f)
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+     Running tests/e2e_resilience.rs (target/debug/deps/e2e_resilience-e10ef5631ee8b2a8)
+test common::revivable_addr_is_closed_and_then_bindable ... ok
+test common::dead_addr_refuses_and_keeps_its_port_out_of_the_pool has been running for over 60 seconds
+test common::dead_addr_refuses_and_keeps_its_port_out_of_the_pool ... ok
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 75.00s

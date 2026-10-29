@@ -44,12 +44,10 @@ async fn tagged_echo(tag: u8) -> SocketAddr {
     addr
 }
 
-/// A free port (probe bind then release).
-async fn free_port() -> SocketAddr {
-    let probe = TcpListener::bind("127.0.0.1:0").await.expect("probe");
-    let addr = probe.local_addr().expect("probe addr");
-    drop(probe);
-    addr
+/// A listener key the kernel resolves: the real address is read back from
+/// the bound proxy, never predicted from a probe-and-release.
+fn ephemeral() -> SocketAddr {
+    "127.0.0.1:0".parse().expect("ephemeral addr")
 }
 
 fn tcp_listener(name: &str, listen: SocketAddr, server: SocketAddr) -> ResolvedListener {
@@ -108,10 +106,15 @@ async fn hot_swap_changes_new_routing_and_drains_established_connections() {
     let a = tagged_echo(b'A').await;
     let b = tagged_echo(b'B').await;
     let metrics = Arc::new(Metrics::default());
-    let listen = free_port().await;
-    let mut proxy = proxy::bind(vec![tcp_listener("web", listen, a)], Arc::clone(&metrics))
-        .await
-        .expect("bind");
+    let mut proxy = proxy::bind(
+        vec![tcp_listener("web", ephemeral(), a)],
+        Arc::clone(&metrics),
+    )
+    .await
+    .expect("bind");
+    // The kernel assigned this port to this socket: reading it back is the
+    // only way to have it without predicting one.
+    let listen = proxy.local_addrs()[0].1;
 
     // Connection established BEFORE the swap: it must drain with backend A.
     let mut old = TcpStream::connect(listen).await.expect("connect old");
@@ -120,9 +123,10 @@ async fn hot_swap_changes_new_routing_and_drains_established_connections() {
     old.read_exact(&mut buf).await.expect("read old");
     assert_eq!(buf, [b'A', b'x'], "initial routing must reach backend A");
 
-    // Hot swap: same listener name + address (socket kept), new backend.
+    // Hot swap: same listener name and configured key (`:0`), so the socket
+    // is kept; only the backend changes.
     let summary = proxy
-        .apply(vec![tcp_listener("web", listen, b)])
+        .apply(vec![tcp_listener("web", ephemeral(), b)])
         .await
         .expect("apply must succeed");
     assert_eq!(
@@ -157,22 +161,24 @@ async fn supervisor_counts_reloads_and_rejects_fail_closed() {
     let a = tagged_echo(b'A').await;
     let b = tagged_echo(b'B').await;
     let metrics = Arc::new(Metrics::default());
-    let listen = free_port().await;
-
     // Port P is held by this test: any listener on it can never bind.
     let held = TcpListener::bind("127.0.0.1:0").await.expect("held port");
     let held_addr = held.local_addr().expect("held addr");
 
-    let proxy = proxy::bind(vec![tcp_listener("web", listen, a)], Arc::clone(&metrics))
-        .await
-        .expect("bind");
+    let proxy = proxy::bind(
+        vec![tcp_listener("web", ephemeral(), a)],
+        Arc::clone(&metrics),
+    )
+    .await
+    .expect("bind");
+    let listen = proxy.local_addrs()[0].1;
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     let (stop, signal) = eqproxy_core::shutdown::channel();
     let server = tokio::spawn(proxy.serve_with_reloads(signal, Duration::from_secs(2), rx));
 
     // Bad candidate: a second listener on the held port → bind conflict.
     tx.send(SwapRequest::plain(vec![
-        tcp_listener("web", listen, a),
+        tcp_listener("web", ephemeral(), a),
         tcp_listener("extra", held_addr, b),
     ]))
     .await
@@ -195,9 +201,13 @@ async fn supervisor_counts_reloads_and_rejects_fail_closed() {
     );
 
     // Good candidate: same listener, new backend.
-    tx.send(SwapRequest::plain(vec![tcp_listener("web", listen, b)]))
-        .await
-        .expect("send good reload");
+    tx.send(SwapRequest::plain(vec![tcp_listener(
+        "web",
+        ephemeral(),
+        b,
+    )]))
+    .await
+    .expect("send good reload");
     wait_until("config_reloads == 1", || {
         metrics.snapshot().config_reloads == 1
     })
@@ -220,18 +230,20 @@ async fn supervisor_counts_reloads_and_rejects_fail_closed() {
 async fn apply_adds_removes_and_rebinds_listeners() {
     let a = tagged_echo(b'A').await;
     let metrics = Arc::new(Metrics::default());
-    let l1 = free_port().await;
-    let l2 = free_port().await;
-    let l3 = free_port().await;
-    let mut proxy = proxy::bind(vec![tcp_listener("web", l1, a)], Arc::clone(&metrics))
-        .await
-        .expect("bind");
+    let mut proxy = proxy::bind(
+        vec![tcp_listener("web", ephemeral(), a)],
+        Arc::clone(&metrics),
+    )
+    .await
+    .expect("bind");
+    let l1 = proxy.local_addrs()[0].1;
 
-    // Add a listener.
+    // Add a listener. Its configured key is a second `:0` placeholder (the
+    // duplicate check ignores port 0); the bound address is read back.
     let summary = proxy
         .apply(vec![
-            tcp_listener("web", l1, a),
-            tcp_listener("extra", l2, a),
+            tcp_listener("web", ephemeral(), a),
+            tcp_listener("extra", ephemeral(), a),
         ])
         .await
         .expect("apply add");
@@ -243,11 +255,17 @@ async fn apply_adds_removes_and_rebinds_listeners() {
             removed: 0
         }
     );
+    let l2 = proxy
+        .local_addrs()
+        .into_iter()
+        .find(|(name, _)| name == "extra")
+        .expect("the added listener must be reported")
+        .1;
     assert_eq!(round_trip(l2).await, b'A', "the new listener must serve");
 
     // Remove it.
     let summary = proxy
-        .apply(vec![tcp_listener("web", l1, a)])
+        .apply(vec![tcp_listener("web", ephemeral(), a)])
         .await
         .expect("apply remove");
     assert_eq!(
@@ -260,9 +278,12 @@ async fn apply_adds_removes_and_rebinds_listeners() {
     );
     wait_until_refused(l2).await;
 
-    // Rebind: same name, new address (removed + added).
+    // Rebind: same name, new configured address (removed + added). `[::1]:0`
+    // is a distinct swap key that is still kernel-resolved, so no port is
+    // predicted for it either.
+    let v6 = "[::1]:0".parse().expect("v6 placeholder");
     let summary = proxy
-        .apply(vec![tcp_listener("web", l3, a)])
+        .apply(vec![tcp_listener("web", v6, a)])
         .await
         .expect("apply rebind");
     assert_eq!(
@@ -274,6 +295,7 @@ async fn apply_adds_removes_and_rebinds_listeners() {
         }
     );
     wait_until_refused(l1).await;
+    let l3 = proxy.local_addrs()[0].1;
     assert_eq!(
         round_trip(l3).await,
         b'A',
@@ -285,10 +307,13 @@ async fn apply_adds_removes_and_rebinds_listeners() {
 async fn duplicate_addresses_are_rejected_without_touching_the_running_config() {
     let a = tagged_echo(b'A').await;
     let metrics = Arc::new(Metrics::default());
-    let listen = free_port().await;
-    let mut proxy = proxy::bind(vec![tcp_listener("web", listen, a)], Arc::clone(&metrics))
-        .await
-        .expect("bind");
+    let mut proxy = proxy::bind(
+        vec![tcp_listener("web", ephemeral(), a)],
+        Arc::clone(&metrics),
+    )
+    .await
+    .expect("bind");
+    let listen = proxy.local_addrs()[0].1;
 
     match proxy
         .apply(vec![

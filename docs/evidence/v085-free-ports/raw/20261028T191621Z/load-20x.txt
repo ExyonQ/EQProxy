@@ -1,0 +1,22 @@
+# 20 repetitions with 10 CPU spinners (UDP-claimed revivable ports)
+[rep 1] exit=0 13s load= 313.29 312.28 316.74  :: 3 targets ok
+[rep 2] exit=0 14s load= 314.04 312.48 316.73  :: 3 targets ok
+[rep 3] exit=0 13s load= 312.62 312.29 316.59  :: 3 targets ok
+[rep 4] exit=0 14s load= 312.60 312.29 316.54  :: 3 targets ok
+[rep 5] exit=0 14s load= 313.34 312.45 316.52  :: 3 targets ok
+[rep 6] exit=0 13s load= 312.09 312.20 316.36  :: 3 targets ok
+[rep 7] exit=0 14s load= 310.79 311.90 316.21  :: 3 targets ok
+[rep 8] exit=0 13s load= 311.43 312.03 316.18  :: 3 targets ok
+[rep 9] exit=0 14s load= 311.85 312.09 316.13  :: 3 targets ok
+[rep 10] exit=0 13s load= 312.19 312.11 316.06  :: 3 targets ok
+[rep 11] exit=0 14s load= 311.24 311.94 315.95  :: 3 targets ok
+[rep 12] exit=0 14s load= 311.90 312.00 315.90  :: 3 targets ok
+[rep 13] exit=0 13s load= 308.48 311.25 315.57  :: 3 targets ok
+[rep 14] exit=0 14s load= 300.66 309.45 314.88  :: 3 targets ok
+[rep 15] exit=0 14s load= 300.53 309.03 314.63  :: 3 targets ok
+[rep 16] exit=0 14s load= 303.34 309.23 314.61  :: 3 targets ok
+[rep 17] exit=0 13s load= 304.64 309.24 314.52  :: 3 targets ok
+[rep 18] exit=0 14s load= 304.28 309.01 314.37  :: 3 targets ok
+[rep 19] exit=0 13s load= 308.41 309.62 314.49  :: 3 targets ok
+[rep 20] exit=0 14s load= 310.47 310.07 314.57  :: 3 targets ok
+fail=0/20

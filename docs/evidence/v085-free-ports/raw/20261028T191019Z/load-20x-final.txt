@@ -1,0 +1,41 @@
+# 20 repetitions of the final tree with 10 CPU spinners
+[rep 1] exit=0 13s load= 268.35 298.46 316.54  :: 3 targets ok
+[rep 2] exit=0 14s load= 277.69 299.06 316.43  :: 3 targets ok
+[rep 3] exit=0 13s load= 280.96 298.73 316.01  :: 3 targets ok
+[rep 4] exit=0 13s load= 274.82 296.57 314.94  :: 3 targets ok
+[rep 5] exit=0 14s load= 267.40 294.28 313.92  :: 3 targets ok
+[rep 6] exit=0 15s load= 273.15 294.15 313.52  :: 3 targets ok
+[rep 7] exit=0 13s load= 283.52 295.39 313.62  :: 3 targets ok
+[rep 8] exit=0 14s load= 293.41 297.00 313.88  :: 3 targets ok
+[rep 9] exit=0 13s load= 299.30 298.16 314.10  :: 3 targets ok
+[rep 10] FAIL 7s load= 304.88 299.38 314.34 
+
+running 15 tests
+common::revivable_addr_is_closed_and_then_bindable --- FAILED
+..............
+failures:
+
+---- common::revivable_addr_is_closed_and_then_bindable stdout ----
+
+thread 'common::revivable_addr_is_closed_and_then_bindable' (18945961) panicked at eqproxy-net/tests/common/mod.rs:105:44:
+the test must be able to bind it later: Os { code: 48, kind: AddrInUse, message: "Address already in use" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    common::revivable_addr_is_closed_and_then_bindable
+
+test result: FAILED. 14 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.17s
+
+error: test failed, to rerun pass `-p eqproxy-net --test e2e_phase2b`
+[rep 11] exit=0 13s load= 306.72 299.97 314.38  :: 3 targets ok
+[rep 12] exit=0 15s load= 312.98 301.66 314.73  :: 3 targets ok
+[rep 13] exit=0 13s load= 315.16 302.69 314.86  :: 3 targets ok
+[rep 14] exit=0 14s load= 315.15 303.29 314.87  :: 3 targets ok
+[rep 15] exit=0 13s load= 316.58 303.98 314.97  :: 3 targets ok
+[rep 16] exit=0 14s load= 322.79 305.98 315.50  :: 3 targets ok
+[rep 17] exit=0 13s load= 329.12 308.20 316.12  :: 3 targets ok
+[rep 18] exit=0 14s load= 330.04 309.45 316.43  :: 3 targets ok
+[rep 19] exit=0 14s load= 331.05 310.35 316.67  :: 3 targets ok
+[rep 20] exit=0 14s load= 332.78 311.67 317.02  :: 3 targets ok
+fail=1/20
