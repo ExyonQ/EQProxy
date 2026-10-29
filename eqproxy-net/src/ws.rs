@@ -44,7 +44,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use eqproxy_core::Metrics;
 
-use crate::http1::{Prefixed, parse_response_head, read_head};
+use crate::http1::{HeadLimits, Prefixed, parse_response_head, read_head};
 use crate::http2::{capacity, is_hop_by_hop, relay_response, response_headers};
 use crate::proxy::ResolvedListener;
 
@@ -110,7 +110,8 @@ pub(crate) async fn serve(
 
     // One h1 exchange on a bounded pipe: the engine owns the server half,
     // this task writes the handshake and then relays the tunnel.
-    let (pipe_ours, pipe_engine) = tokio::io::duplex(PIPE_BUFFER);
+    let (pipe_ours, pipe_engine) =
+        tokio::io::duplex(cfg.limits.stream_buffer_bytes.unwrap_or(PIPE_BUFFER));
     let (engine_read, engine_write) = tokio::io::split(pipe_engine);
     let engine_cfg = Arc::clone(cfg);
     let engine_metrics = Arc::clone(metrics);
@@ -141,7 +142,13 @@ pub(crate) async fn serve(
         pos: 0,
         inner: &mut reader,
     };
-    let (head_bytes, mut carry) = match read_head(&mut source, cfg.server_header_timeout).await {
+    let (head_bytes, mut carry) = match read_head(
+        &mut source,
+        cfg.server_header_timeout,
+        cfg.limits.max_head_bytes,
+    )
+    .await
+    {
         Ok(pair) => pair,
         Err(_) => {
             engine.abort();
@@ -152,7 +159,14 @@ pub(crate) async fn serve(
         }
     };
     carry.extend(source.prefix.split_off(source.pos));
-    let response = match parse_response_head(&head_bytes, false) {
+    let response = match parse_response_head(
+        &head_bytes,
+        false,
+        HeadLimits {
+            max_head_bytes: cfg.limits.max_head_bytes,
+            max_headers: cfg.limits.max_headers,
+        },
+    ) {
         Ok(response) => response,
         Err(reject) => {
             eprintln!(

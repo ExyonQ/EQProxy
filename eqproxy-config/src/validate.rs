@@ -611,6 +611,44 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             );
         }
 
+        // Message and buffer limits (B-N19/B-I17/B-E19): the bounds keep a
+        // typo (`max_head_bytes = 16`, thought of as KiB) from turning into
+        // an outage, and a zero-sized pipe from deadlocking every stream.
+        if !(1024..=1_048_576).contains(&listener.limits.max_head_bytes) {
+            err(
+                field("limits.max_head_bytes"),
+                format!(
+                    "{} is outside 1024..=1048576 bytes",
+                    listener.limits.max_head_bytes
+                ),
+                "max_head_bytes = 16384".to_owned(),
+                &section,
+            );
+        }
+
+        if !(1..=1000).contains(&listener.limits.max_headers) {
+            err(
+                field("limits.max_headers"),
+                format!(
+                    "{} is outside 1..=1000 header fields",
+                    listener.limits.max_headers
+                ),
+                "max_headers = 100".to_owned(),
+                &section,
+            );
+        }
+
+        if let Some(buffer) = listener.limits.stream_buffer_bytes
+            && !(1024..=1_048_576).contains(&buffer)
+        {
+            err(
+                field("limits.stream_buffer_bytes"),
+                format!("{buffer} is outside 1024..=1048576 bytes"),
+                "stream_buffer_bytes = 16384 (omit for the protocol default)".to_owned(),
+                &section,
+            );
+        }
+
         if listener.proxy_receive {
             if listener.proxy_allow.is_empty() {
                 err(
@@ -1880,6 +1918,7 @@ mod tests {
                     client_header_timeout: Duration::from_secs(5),
                     server_header_timeout: Duration::from_secs(30),
                     max_stream_duration: Duration::ZERO,
+                    limits: Default::default(),
                     tls: None,
                     quic: false,
                     proxy_receive: false,
@@ -1896,6 +1935,70 @@ mod tests {
 
     fn check_config(config: &Config) -> CheckResult {
         check(config, "", Path::new("eqproxy.toml"))
+    }
+
+    #[test]
+    fn limits_bounds_are_enforced_and_the_defaults_are_valid() {
+        let valid = r#"
+            schema_version = 1
+            [listener.web]
+            listen = "127.0.0.1:8080"
+            backend = "api"
+            [listener.web.limits]
+            max_head_bytes = 32768
+            max_headers = 200
+            max_body_bytes = 1048576
+            stream_buffer_bytes = 16384
+            [backend.api]
+            server = "127.0.0.1:9000"
+        "#;
+        let result = check_source(valid);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        // An empty table resolves to the historical defaults: 16 KiB head,
+        // 100 headers, no body cap and protocol-default pipes.
+        let defaults = r#"
+            schema_version = 1
+            [listener.web]
+            listen = "127.0.0.1:8080"
+            backend = "api"
+            [listener.web.limits]
+            [backend.api]
+            server = "127.0.0.1:9000"
+        "#;
+        let result = check_source(defaults);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        for (snippet, field) in [
+            ("max_head_bytes = 16", "listener.web.limits.max_head_bytes"),
+            ("max_headers = 0", "listener.web.limits.max_headers"),
+            (
+                "stream_buffer_bytes = 0",
+                "listener.web.limits.stream_buffer_bytes",
+            ),
+        ] {
+            let source = format!(
+                r#"
+                schema_version = 1
+                [listener.web]
+                listen = "127.0.0.1:8080"
+                backend = "api"
+                [listener.web.limits]
+                {snippet}
+                [backend.api]
+                server = "127.0.0.1:9000"
+                "#
+            );
+            let result = check_source(&source);
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .any(|e| e.field.as_deref() == Some(field)),
+                "missing {field} for {snippet}: {:?}",
+                result.errors
+            );
+        }
     }
 
     #[test]

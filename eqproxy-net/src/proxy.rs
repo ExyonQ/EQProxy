@@ -41,6 +41,7 @@ use crate::balancer::{ActiveGuard, Balance, Balancer, ResolvedServer};
 use crate::dns::{self, DnsSettings, Resolving, SystemResolver};
 use crate::health::{self, HealthCheck};
 use crate::http1;
+use crate::http1::HeadLimits;
 use crate::http2;
 use crate::pool::Pool;
 use crate::proxy_proto::{self, ProxyProtocolMode};
@@ -790,6 +791,36 @@ pub struct ResolvedRoute {
     pub headers: Option<ResolvedHeaders>,
 }
 
+/// Message limits and per-stream buffer sizing resolved for one listener
+/// (B-N19/B-I17/B-E19).
+///
+/// `Default` is exactly the behaviour before the `[listener.<name>.limits]`
+/// section existed: a 16 KiB head, 100 header fields, no request-body cap and
+/// the protocol's own pipe size. Keeping the defaults identical is what makes
+/// the section additive instead of a breaking change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedLimits {
+    /// Maximum message head (request and response), bytes.
+    pub max_head_bytes: usize,
+    /// Maximum header fields per message.
+    pub max_headers: usize,
+    /// Maximum request body, bytes; `0` = unlimited.
+    pub max_body_bytes: u64,
+    /// Internal stream pipe, bytes; `None` = protocol default.
+    pub stream_buffer_bytes: Option<usize>,
+}
+
+impl Default for ResolvedLimits {
+    fn default() -> Self {
+        Self {
+            max_head_bytes: crate::http1::MAX_HEAD_BYTES,
+            max_headers: crate::http1::MAX_HEADERS,
+            max_body_bytes: 0,
+            stream_buffer_bytes: None,
+        }
+    }
+}
+
 /// Resolved listener (already-validated config: parsed addresses, sound refs).
 ///
 /// `#[non_exhaustive]`: adding fields is not a breaking change for
@@ -832,6 +863,8 @@ pub struct ResolvedListener {
     pub local_response: Option<LocalResponse>,
     /// Response compression (B-N6/H6). `None` = identity only.
     pub compression: Option<crate::compression::ResolvedCompression>,
+    /// Message limits and per-stream buffer sizing (B-N19/B-I17/B-E19).
+    pub limits: ResolvedLimits,
     /// Data maps in force (C10/PP-02): what `map` rule conditions
     /// consult; the file watchers swap their data in hot.
     pub maps: Arc<eqproxy_core::maps::MapRegistry>,
@@ -878,6 +911,7 @@ impl ResolvedListener {
             forwarded_headers: ForwardedMode::Off,
             local_response: None,
             compression: None,
+            limits: ResolvedLimits::default(),
             maps: Arc::new(eqproxy_core::maps::MapRegistry::new()),
             access: None,
         }
@@ -897,6 +931,13 @@ impl ResolvedListener {
         compression: crate::compression::ResolvedCompression,
     ) -> Self {
         self.compression = Some(compression);
+        self
+    }
+
+    /// Message limits and per-stream buffer sizing (B-N19/B-I17/B-E19).
+    #[must_use]
+    pub fn with_limits(mut self, limits: ResolvedLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -2145,6 +2186,11 @@ async fn dial_with_retries<'a>(
                 connect: cfg.connect_timeout,
                 idle: cfg.idle_timeout,
                 http: opts.http,
+                limits: HeadLimits {
+                    max_head_bytes: cfg.limits.max_head_bytes,
+                    max_headers: cfg.limits.max_headers,
+                },
+                pipe_buffer: cfg.limits.stream_buffer_bytes,
             },
             backend,
             addr,
@@ -2285,6 +2331,12 @@ pub(crate) struct DialTimeouts<'a> {
     /// `true` for `mode = "http"`: only then can the backend be spoken to in
     /// HTTP/2. A `tcp` listener relays bytes and never interprets ALPN.
     pub http: bool,
+    /// Head bounds of the h1 message the engine hands to an h2 backend
+    /// exchange (B-N19): the same bound the frontend parsed with.
+    pub limits: HeadLimits,
+    /// Internal pipe of an h2 backend exchange, resolved from
+    /// `limits.stream_buffer_bytes` (`None` = protocol default).
+    pub pipe_buffer: Option<usize>,
 }
 
 /// A dialed backend stream after TCP, the optional TLS handshake and the
@@ -2341,6 +2393,8 @@ pub(crate) async fn connect_backend_to(
         connect: connect_timeout,
         idle,
         http,
+        limits,
+        pipe_buffer,
     } = timeouts;
 
     // HTTP/2 (B-H1): a live session serves this exchange with its own stream,
@@ -2354,6 +2408,8 @@ pub(crate) async fn connect_backend_to(
                 connect: connect_timeout,
                 idle,
                 http,
+                limits,
+                pipe_buffer,
             },
             backend,
             addr,
@@ -2396,6 +2452,8 @@ async fn open_h2_exchange(
         name,
         connect: connect_timeout,
         idle,
+        limits,
+        pipe_buffer,
         ..
     } = timeouts;
     // Everything a fresh session needs. The exchange keeps it so a stream the
@@ -2415,14 +2473,21 @@ async fn open_h2_exchange(
         metrics: Arc::clone(metrics),
     });
     let (session, mut opened) = session_for(hub, &dialer, addr).await?;
-    let mut stream = stream_on_session(&session, Arc::clone(&dialer), name, idle);
+    let mut stream = stream_on_session(
+        &session,
+        Arc::clone(&dialer),
+        name,
+        idle,
+        limits,
+        pipe_buffer,
+    );
     if stream.is_err() && hub.lookup(addr).is_none() {
         // The peer's GOAWAY arrived between the lookup and the admission, so
         // the session was retired before a stream was opened: nothing reached
         // the origin and the exchange belongs on a fresh session.
         let (fresh, dialed) = session_for(hub, &dialer, addr).await?;
         opened |= dialed;
-        stream = stream_on_session(&fresh, dialer, name, idle);
+        stream = stream_on_session(&fresh, dialer, name, idle, limits, pipe_buffer);
     }
     let (read, write) = stream.map_err(|err| {
         metrics.connect_failures.fetch_add(1, Ordering::Relaxed);
@@ -2599,8 +2664,10 @@ fn stream_on_session(
     dialer: Arc<H2Dialer>,
     name: &str,
     idle: Duration,
+    limits: HeadLimits,
+    pipe_buffer: Option<usize>,
 ) -> Result<(BoxRead, BoxWrite), std::io::Error> {
-    backend_h2::open(session, dialer, name, idle)
+    backend_h2::open(session, dialer, name, idle, limits, pipe_buffer)
 }
 
 /// Everything one fresh h2 session needs, owned so an exchange can dial a

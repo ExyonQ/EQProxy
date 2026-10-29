@@ -53,6 +53,30 @@ pub const MAX_HEAD_BYTES: usize = 16 * 1024;
 pub const MAX_HEADERS: usize = 100;
 /// Maximum header-or-chunk line size (T03).
 pub const MAX_LINE_BYTES: usize = 8 * 1024;
+/// Pipe feeding the streaming compressor when the listener sets no
+/// `limits.stream_buffer_bytes`.
+const DEFAULT_COMPRESSION_PIPE: usize = 64 * 1024;
+
+/// Head bounds for one message, resolved from
+/// [`ResolvedListener::limits`](crate::proxy::ResolvedListener::limits)
+/// (B-N19). [`Default`] is the historical constant pair, so a listener that
+/// configures nothing parses exactly what it parsed before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeadLimits {
+    /// Maximum head size in bytes (terminator included in the budget).
+    pub max_head_bytes: usize,
+    /// Maximum header fields (the request/status line is not one).
+    pub max_headers: usize,
+}
+
+impl Default for HeadLimits {
+    fn default() -> Self {
+        Self {
+            max_head_bytes: MAX_HEAD_BYTES,
+            max_headers: MAX_HEADERS,
+        }
+    }
+}
 
 const CRLF: &[u8] = b"\r\n";
 const HEAD_END: &[u8] = b"\r\n\r\n";
@@ -360,7 +384,7 @@ fn request_framing(
 }
 
 /// Parses the request head with strict rules (T01–T03).
-pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
+pub fn parse_request_head(head: &[u8], limits: HeadLimits) -> Result<RequestHead, Reject> {
     let lines = parse_lines(head)?;
     let request_line = lines.first().ok_or(Reject {
         status: 400,
@@ -419,7 +443,7 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
         }
     };
 
-    if lines.len() - 1 > MAX_HEADERS {
+    if lines.len() - 1 > limits.max_headers {
         return Err(Reject {
             status: 431,
             reason: "too many headers",
@@ -477,7 +501,11 @@ pub fn parse_request_head(head: &[u8]) -> Result<RequestHead, Reject> {
 /// Parses the response head with the same line rules (T02) and the
 /// RFC 9112 §6 framing. An ambiguous backend answers 502 (never forwarded
 /// a framing the client could interpret differently).
-pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHead, Reject> {
+pub fn parse_response_head(
+    head: &[u8],
+    head_request: bool,
+    limits: HeadLimits,
+) -> Result<ResponseHead, Reject> {
     let bad_gateway = Reject {
         status: 502,
         reason: "malformed response from upstream",
@@ -506,7 +534,7 @@ pub fn parse_response_head(head: &[u8], head_request: bool) -> Result<ResponseHe
         return Err(bad_gateway);
     }
 
-    if lines.len() - 1 > MAX_HEADERS {
+    if lines.len() - 1 > limits.max_headers {
         return Err(bad_gateway);
     }
     let mut headers = Vec::with_capacity(lines.len() - 1);
@@ -581,6 +609,10 @@ pub(crate) enum CopyError {
     Truncated,
     Idle,
     Io,
+    /// A request body crossed `limits.max_body_bytes` (B-N19): the frame
+    /// that would cross is refused **before** its data is forwarded, and the
+    /// exchange answers 413 instead of truncating silently.
+    TooLarge,
 }
 
 fn idle_copy_error(idle_counter: &AtomicU64) -> CopyError {
@@ -720,9 +752,34 @@ async fn copy_chunked<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     counter: &AtomicU64,
     idle_counter: &AtomicU64,
 ) -> Result<(), CopyError> {
+    copy_chunked_capped(reader, writer, idle, counter, idle_counter, None).await
+}
+
+/// [`copy_chunked`] with an optional payload cap (B-N19).
+///
+/// The cap is checked against the chunk **size line** before the frame is
+/// written, so the backend never receives a chunk that would cross the
+/// configured bound: the client gets an explicit 413 and the exchange is
+/// abandoned (earlier chunks may already have reached the backend, so the
+/// connection is never pooled).
+async fn copy_chunked_capped<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut R,
+    writer: &mut W,
+    idle: Duration,
+    counter: &AtomicU64,
+    idle_counter: &AtomicU64,
+    cap: Option<u64>,
+) -> Result<(), CopyError> {
+    let mut total = 0u64;
     loop {
         let line = read_crlf_line(reader, idle, MAX_LINE_BYTES).await?;
         let size = parse_chunk_size(&line)?;
+        if let Some(cap) = cap
+            && size > cap.saturating_sub(total)
+        {
+            return Err(CopyError::TooLarge);
+        }
+        total += size;
         write_with_timeout(writer, &line, idle).await?;
         if size == 0 {
             // Trailers: empty or validated as headers; never framing.
@@ -868,6 +925,15 @@ async fn pump_chunked_plain<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     }
 }
 
+/// How a response body is compressed, and how much memory its streaming
+/// pipe may use (`limits.stream_buffer_bytes`, B-E19).
+struct CompressPlan<'a> {
+    framing: BodyFraming,
+    encoding: compression::Encoding,
+    settings: &'a compression::ResolvedCompression,
+    pipe: usize,
+}
+
 /// Streams a response body to the client as a chunked compressed stream,
 /// without buffering it whole. The decoder side closes the pipe on every path,
 /// so the compressor always reaches EOF (a truncated body fails the exchange
@@ -875,20 +941,24 @@ async fn pump_chunked_plain<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 async fn copy_compressed_body<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut R,
     writer: &mut W,
-    framing: BodyFraming,
-    encoding: compression::Encoding,
-    settings: &compression::ResolvedCompression,
+    plan: CompressPlan<'_>,
     idle: Duration,
     metrics: &Metrics,
 ) -> Result<(), CopyError> {
-    const PIPE: usize = 64 * 1024;
     let scratch = AtomicU64::new(0);
-    let (mut plain_read, plain_write) = tokio::io::duplex(PIPE);
-    let trailers = match framing {
+    let (mut plain_read, plain_write) = tokio::io::duplex(plan.pipe);
+    let trailers = match plan.framing {
         BodyFraming::None => return Ok(()),
         BodyFraming::ContentLength(len) => {
             let (compressed, fed) = tokio::join!(
-                compress_to_chunks(&mut plain_read, writer, encoding, settings, idle, metrics),
+                compress_to_chunks(
+                    &mut plain_read,
+                    writer,
+                    plan.encoding,
+                    plan.settings,
+                    idle,
+                    metrics,
+                ),
                 async move {
                     let mut plain_write = plain_write;
                     let result = copy_exact(
@@ -910,7 +980,14 @@ async fn copy_compressed_body<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         BodyFraming::Chunked => {
             let (compressed, fed) = tokio::join!(
-                compress_to_chunks(&mut plain_read, writer, encoding, settings, idle, metrics),
+                compress_to_chunks(
+                    &mut plain_read,
+                    writer,
+                    plan.encoding,
+                    plan.settings,
+                    idle,
+                    metrics,
+                ),
                 async move {
                     let mut plain_write = plain_write;
                     let result =
@@ -925,7 +1002,14 @@ async fn copy_compressed_body<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         BodyFraming::UntilEof => {
             let (compressed, fed) = tokio::join!(
-                compress_to_chunks(&mut plain_read, writer, encoding, settings, idle, metrics),
+                compress_to_chunks(
+                    &mut plain_read,
+                    writer,
+                    plan.encoding,
+                    plan.settings,
+                    idle,
+                    metrics,
+                ),
                 async move {
                     let mut plain_write = plain_write;
                     let result = copy_to_eof(
@@ -990,6 +1074,7 @@ pub(crate) enum HeadError {
 pub(crate) async fn read_head<R: AsyncRead + Unpin>(
     reader: &mut R,
     timeout: Duration,
+    max_head_bytes: usize,
 ) -> Result<(Vec<u8>, Vec<u8>), HeadError> {
     tokio::time::timeout(timeout, async {
         let mut acc = Vec::with_capacity(1024);
@@ -1001,11 +1086,19 @@ pub(crate) async fn read_head<R: AsyncRead + Unpin>(
             }
             acc.extend_from_slice(&buf[..got]);
             if let Some(pos) = find_sub(&acc, HEAD_END) {
+                // The bound is the head itself, not the read chunk: a single
+                // 2 KiB read can deliver a whole oversized head, and the
+                // terminator check must not bless it. (This was the gap the
+                // configured-bound E2E found: `max_head_bytes = 128` still
+                // forwarded a 300-byte head.)
+                if pos > max_head_bytes {
+                    return Err(HeadError::TooLarge);
+                }
                 let head = acc[..pos].to_vec();
                 let rest = acc[pos + HEAD_END.len()..].to_vec();
                 return Ok((head, rest));
             }
-            if acc.len() > MAX_HEAD_BYTES {
+            if acc.len() > max_head_bytes {
                 return Err(HeadError::TooLarge);
             }
         }
@@ -1617,6 +1710,12 @@ pub async fn serve_http<CR, CW>(
     CR: AsyncRead + Unpin,
     CW: AsyncWrite + Unpin,
 {
+    let limits = cfg.limits;
+    let head_limits = HeadLimits {
+        max_head_bytes: limits.max_head_bytes,
+        max_headers: limits.max_headers,
+    };
+    let body_cap = (limits.max_body_bytes > 0).then_some(limits.max_body_bytes);
     let mut client_read = BufReader::new(client_read);
     let mut client_write = client_write;
     let mut first_exchange = true;
@@ -1646,31 +1745,32 @@ pub async fn serve_http<CR, CW>(
         } else {
             cfg.idle_timeout
         };
-        let (head_bytes, rest) = match read_head(&mut source, head_timeout).await {
-            Ok(pair) => pair,
-            Err(HeadError::Eof) => return,
-            Err(HeadError::Timeout) => {
-                if first_exchange {
-                    metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
-                    log_unparsed(cfg, peer, protocol, 408);
-                    write_error(&mut client_write, 408, "request timeout").await;
-                } else {
-                    // An idle keep-alive close is normal traffic: counted as
-                    // inactivity, never as a client protocol failure.
-                    metrics.idle_timeouts.fetch_add(1, Ordering::Relaxed);
+        let (head_bytes, rest) =
+            match read_head(&mut source, head_timeout, limits.max_head_bytes).await {
+                Ok(pair) => pair,
+                Err(HeadError::Eof) => return,
+                Err(HeadError::Timeout) => {
+                    if first_exchange {
+                        metrics.header_timeouts.fetch_add(1, Ordering::Relaxed);
+                        log_unparsed(cfg, peer, protocol, 408);
+                        write_error(&mut client_write, 408, "request timeout").await;
+                    } else {
+                        // An idle keep-alive close is normal traffic: counted as
+                        // inactivity, never as a client protocol failure.
+                        metrics.idle_timeouts.fetch_add(1, Ordering::Relaxed);
+                    }
+                    return;
                 }
-                return;
-            }
-            Err(HeadError::TooLarge) => {
-                metrics
-                    .http_requests_rejected
-                    .fetch_add(1, Ordering::Relaxed);
-                log_unparsed(cfg, peer, protocol, 431);
-                write_error(&mut client_write, 431, "request header fields too large").await;
-                return;
-            }
-            Err(HeadError::Io) => return,
-        };
+                Err(HeadError::TooLarge) => {
+                    metrics
+                        .http_requests_rejected
+                        .fetch_add(1, Ordering::Relaxed);
+                    log_unparsed(cfg, peer, protocol, 431);
+                    write_error(&mut client_write, 431, "request header fields too large").await;
+                    return;
+                }
+                Err(HeadError::Io) => return,
+            };
         first_exchange = false;
         // Exact stream remainder after the head, in order: bytes read past
         // the terminator plus any prefix bytes read_head never consumed.
@@ -1678,7 +1778,7 @@ pub async fn serve_http<CR, CW>(
         let mut carry = rest;
         carry.extend(unread_prefix);
 
-        let request = match parse_request_head(&head_bytes) {
+        let request = match parse_request_head(&head_bytes, head_limits) {
             Ok(request) => request,
             Err(reject) => {
                 metrics
@@ -1955,6 +2055,25 @@ pub async fn serve_http<CR, CW>(
             continue;
         }
 
+        // Request-body cap (B-N19): a declared length over the bound is
+        // refused before the backend is dialed, so not one byte of an
+        // unacceptable body is forwarded. `0` = unlimited (the default, and
+        // the behaviour before this limit existed).
+        if let BodyFraming::ContentLength(len) = request.framing
+            && limits.max_body_bytes > 0
+            && len > limits.max_body_bytes
+        {
+            metrics
+                .http_requests_rejected
+                .fetch_add(1, Ordering::Relaxed);
+            if let Some(record) = access.as_mut() {
+                record.status(413);
+                record.bytes(0);
+            }
+            write_error(&mut client_write, 413, "request body too large").await;
+            return;
+        }
+
         // B-H11/B-E12 (`max_stream_duration`, Q5): one total cap for the
         // forwarded exchange — request body, response head and response
         // body — on top of the per-phase timeouts. `ZERO` disables it.
@@ -2117,24 +2236,26 @@ pub async fn serve_http<CR, CW>(
                 BodyFraming::Chunked => match mirror.is_some() {
                     true => {
                         let mut tee = MirrorTee::new(&mut backend_write, mirror::BODY_BUDGET);
-                        let copied = copy_chunked(
+                        let copied = copy_chunked_capped(
                             &mut from_client,
                             &mut tee,
                             cfg.idle_timeout,
                             &metrics.bytes_client_to_backend,
                             &metrics.idle_timeouts,
+                            body_cap,
                         )
                         .await;
                         mirror_body = tee.finish();
                         copied
                     }
                     false => {
-                        copy_chunked(
+                        copy_chunked_capped(
                             &mut from_client,
                             &mut backend_write,
                             cfg.idle_timeout,
                             &metrics.bytes_client_to_backend,
                             &metrics.idle_timeouts,
+                            body_cap,
                         )
                         .await
                     }
@@ -2175,6 +2296,19 @@ pub async fn serve_http<CR, CW>(
                     record.status(400);
                 }
                 write_error(&mut client_write, 400, "truncated request body").await;
+                return;
+            }
+            Err(CopyError::TooLarge) => {
+                // The exchange is abandoned: earlier chunks already reached
+                // the backend, so the connection is not pooled (dropped on
+                // return) and the client gets the explicit refusal.
+                metrics
+                    .http_requests_rejected
+                    .fetch_add(1, Ordering::Relaxed);
+                if let Some(record) = access.as_mut() {
+                    record.status(413);
+                }
+                write_error(&mut client_write, 413, "request body too large").await;
                 return;
             }
             Err(CopyError::Idle) => return,
@@ -2222,7 +2356,11 @@ pub async fn serve_http<CR, CW>(
             };
             let (head_bytes, rest) = match until_deadline(
                 stream_deadline,
-                read_head(&mut source, cfg.server_header_timeout),
+                read_head(
+                    &mut source,
+                    cfg.server_header_timeout,
+                    limits.max_head_bytes,
+                ),
             )
             .await
             .map_err(|_| HeadError::Timeout)
@@ -2251,7 +2389,11 @@ pub async fn serve_http<CR, CW>(
             carry = rest;
             carry.extend(unread_prefix);
 
-            let response = match parse_response_head(&head_bytes, request.method == "HEAD") {
+            let response = match parse_response_head(
+                &head_bytes,
+                request.method == "HEAD",
+                head_limits,
+            ) {
                 Ok(response) => response,
                 Err(reject) => {
                     eprintln!(
@@ -2447,9 +2589,14 @@ pub async fn serve_http<CR, CW>(
                     copy_compressed_body(
                         &mut from_backend,
                         &mut client_write,
-                        response.framing,
-                        encoding,
-                        settings,
+                        CompressPlan {
+                            framing: response.framing,
+                            encoding,
+                            settings,
+                            pipe: limits
+                                .stream_buffer_bytes
+                                .unwrap_or(DEFAULT_COMPRESSION_PIPE),
+                        },
                         cfg.idle_timeout,
                         &metrics,
                     )
@@ -2599,7 +2746,7 @@ mod tests {
     use super::*;
 
     fn req(head: &str) -> Result<RequestHead, Reject> {
-        parse_request_head(head.as_bytes())
+        parse_request_head(head.as_bytes(), HeadLimits::default())
     }
 
     #[test]
@@ -2682,24 +2829,120 @@ mod tests {
     }
 
     #[test]
+    fn configured_header_count_is_the_bound_in_both_directions() {
+        let limits = HeadLimits {
+            max_head_bytes: 1024,
+            max_headers: 2,
+        };
+        let at_limit = "GET / HTTP/1.1\r\nHost: x\r\nA: 1\r\n";
+        assert!(parse_request_head(at_limit.as_bytes(), limits).is_ok());
+        let over = "GET / HTTP/1.1\r\nHost: x\r\nA: 1\r\nB: 2\r\n";
+        assert_eq!(
+            parse_request_head(over.as_bytes(), limits)
+                .expect_err("over the configured count")
+                .status,
+            431
+        );
+        // The same bound applies to the backend's answer, which is a 502.
+        let at_limit = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nA: 1\r\n";
+        assert!(parse_response_head(at_limit.as_bytes(), false, limits).is_ok());
+        let over = "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nA: 1\r\nB: 2\r\n";
+        assert_eq!(
+            parse_response_head(over.as_bytes(), false, limits)
+                .expect_err("over the configured count")
+                .status,
+            502
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_cap_refuses_a_max_size_chunk_without_overflowing() {
+        let (mut sender, mut reader) = tokio::io::duplex(64);
+        sender
+            .write_all(b"ffffffffffffffff\r\n")
+            .await
+            .expect("write size line");
+        let mut out = Vec::new();
+        let countered = AtomicU64::new(0);
+        let idle = AtomicU64::new(0);
+        let result = copy_chunked_capped(
+            &mut reader,
+            &mut out,
+            Duration::from_secs(1),
+            &countered,
+            &idle,
+            Some(16),
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CopyError::TooLarge)),
+            "a chunk of u64::MAX bytes must be refused by the cap, not added to the total"
+        );
+        assert!(out.is_empty(), "nothing of that frame may be forwarded");
+    }
+
+    #[tokio::test]
+    async fn read_head_enforces_the_configured_byte_budget() {
+        let unterminated = vec![b'x'; 200];
+        let mut source = Prefixed {
+            prefix: unterminated,
+            pos: 0,
+            inner: &mut &b""[..],
+        };
+        assert!(
+            matches!(
+                read_head(&mut source, Duration::from_secs(1), 100).await,
+                Err(HeadError::TooLarge)
+            ),
+            "a head over the configured budget must be refused, not read whole"
+        );
+        let mut source = Prefixed {
+            prefix: b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec(),
+            pos: 0,
+            inner: &mut &b""[..],
+        };
+        assert!(
+            read_head(&mut source, Duration::from_secs(1), 1024)
+                .await
+                .is_ok(),
+            "the configured budget must still accept a head that fits"
+        );
+    }
+
+    #[test]
     fn response_framing_follows_rfc_9112() {
-        let parsed = parse_response_head(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n", false)
-            .expect("respuesta");
+        let parsed = parse_response_head(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n",
+            false,
+            HeadLimits::default(),
+        )
+        .expect("respuesta");
         assert_eq!(parsed.framing, BodyFraming::ContentLength(2));
         assert!(!parsed.wants_close);
 
-        let parsed =
-            parse_response_head(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n", false).expect("1.0");
+        let parsed = parse_response_head(
+            b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n",
+            false,
+            HeadLimits::default(),
+        )
+        .expect("1.0");
         assert!(parsed.wants_close);
 
-        let parsed = parse_response_head(b"HTTP/1.1 204 No Content\r\n", false).expect("204");
+        let parsed =
+            parse_response_head(b"HTTP/1.1 204 No Content\r\n", false, HeadLimits::default())
+                .expect("204");
         assert_eq!(parsed.framing, BodyFraming::None);
 
-        let parsed = parse_response_head(b"HTTP/1.1 200 OK\r\n", false).expect("eof");
+        let parsed =
+            parse_response_head(b"HTTP/1.1 200 OK\r\n", false, HeadLimits::default()).expect("eof");
         assert_eq!(parsed.framing, BodyFraming::UntilEof);
 
-        let parsed =
-            parse_response_head(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n", true).expect("HEAD");
+        let parsed = parse_response_head(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n",
+            true,
+            HeadLimits::default(),
+        )
+        .expect("HEAD");
         assert_eq!(parsed.framing, BodyFraming::None);
     }
 
@@ -2708,6 +2951,7 @@ mod tests {
         let err = parse_response_head(
             b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n",
             false,
+            HeadLimits::default(),
         )
         .expect_err("CL+TE en respuesta");
         assert_eq!(err.status, 502);
@@ -2734,7 +2978,8 @@ mod tests {
     #[test]
     fn response_status_out_of_range_is_rejected_as_502() {
         for head in ["HTTP/1.1 999 X\r\n", "HTTP/1.1 016 X\r\n"] {
-            let err = parse_response_head(head.as_bytes(), false).expect_err(head);
+            let err =
+                parse_response_head(head.as_bytes(), false, HeadLimits::default()).expect_err(head);
             assert_eq!(err.status, 502, "case: {head}");
         }
     }

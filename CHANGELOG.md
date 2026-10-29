@@ -3,6 +3,40 @@
 Language: **English**. Format follows "Keep a Changelog" (Added / Changed /
 Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
+## [Unreleased] — v0.8.5
+
+### Added
+
+- **Message limits and per-stream buffers, per listener (B-N19/B-I17/B-E19,
+  CE3).** `[listener.<name>.limits]` bounds the request and response head
+  (`max_head_bytes`, `max_headers`), the request body (`max_body_bytes`, 413)
+  and the internal pipe of every HTTP/2, HTTP/3, WebSocket and backend-h2
+  stream (`stream_buffer_bytes`). Every default is the constant the dataplane
+  already used — 16 KiB head, 100 fields, unlimited request body and the
+  protocol's own pipe (64 KiB; 16 KiB for h3) — so an absent table changes
+  nothing. A declared `Content-Length` over the cap is refused **before** the
+  backend is dialed; a chunked body is refused as soon as the next frame would
+  cross it, and the exchange is never pooled. The configured head bound also
+  becomes h2's `max_header_list_size`. The E2E journeys found a real gap in
+  the old fixed constant: `read_head` checked the budget only while the
+  terminator was missing, so a whole oversized head delivered by one read was
+  accepted; the bound is now checked against the head itself (431 for a
+  client, 502 for a backend). Verified with 10 new tests (3 unit parser, 1
+  config-gate and 6 socket E2E, including 16 streams × 512 KiB through 1 KiB
+  pipes) and the full suite (576 passed); 10/10 passes under 10 saturated
+  cores ([evidence](docs/evidence/v085-limits.md)).
+
+### Fixed
+
+- **HTTP/3 no longer resets a response that raced the client's request FIN.**
+  When the h1 engine answered early (a dead backend's 502) and closed its
+  pipe, a late `BodyEnd` tried to write the chunked terminator, failed and
+  sent `H3_REQUEST_INCOMPLETE` before the already-produced 502 reached the
+  client. A request body that can no longer be forwarded now ends quietly and
+  the relay delivers the engine's answer. Found by Veyra's `nextest` pass
+  (1 failure in 82 stress iterations) and verified with 300/300 after the fix;
+  assertions unchanged ([evidence](docs/evidence/v085-limits.md#4-bis-la-carrera-de-h3-que-destapó-veyra-y-su-arreglo)).
+
 ## [v0.8.0] — 2026-10-27
 
 ### Added

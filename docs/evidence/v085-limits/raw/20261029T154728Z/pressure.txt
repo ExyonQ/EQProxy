@@ -1,0 +1,191 @@
+== pass 1 ==
+   Compiling eqproxy-net v0.8.0 (/Volumes/Lexar/Cursor/EQProxy/eqproxy-net)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.77s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.88s
+
+
+real	0m19.712s
+user	0m3.199s
+sys	0m4.952s
+exit=0
+== pass 2 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.08s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test header_count_bound_is_configurable_and_explicit ... ok
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.16s
+
+
+real	0m6.607s
+user	0m0.510s
+sys	0m0.962s
+exit=0
+== pass 3 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.20s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.26s
+
+
+real	0m4.680s
+user	0m0.392s
+sys	0m0.841s
+exit=0
+== pass 4 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.77s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.14s
+
+
+real	0m6.275s
+user	0m0.496s
+sys	0m0.933s
+exit=0
+== pass 5 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.61s
+
+
+real	0m5.911s
+user	0m0.473s
+sys	0m0.936s
+exit=0
+== pass 6 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.96s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.86s
+
+
+real	0m4.107s
+user	0m0.335s
+sys	0m0.788s
+exit=0
+== pass 7 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.75s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.14s
+
+
+real	0m6.064s
+user	0m0.478s
+sys	0m0.880s
+exit=0
+== pass 8 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.87s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.32s
+
+
+real	0m5.399s
+user	0m0.446s
+sys	0m0.865s
+exit=0
+== pass 9 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.86s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test header_count_bound_is_configurable_and_explicit ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.46s
+
+
+real	0m5.544s
+user	0m0.418s
+sys	0m0.866s
+exit=0
+== pass 10 ==
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.41s
+     Running tests/e2e_limits.rs (target/debug/deps/e2e_limits-e82456bebf45ae1f)
+
+running 6 tests
+test header_count_bound_is_configurable_and_explicit ... ok
+test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+test response_head_over_the_bound_is_a_502_not_a_forward ... ok
+test chunked_body_over_the_cap_is_refused_with_413 ... ok
+test request_body_cap_also_holds_for_h2_chunked_translation ... ok
+test one_kib_stream_pipe_relays_large_bodies_under_pressure ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.18s
+
+
+real	0m5.763s
+user	0m0.439s
+sys	0m0.826s
+exit=0

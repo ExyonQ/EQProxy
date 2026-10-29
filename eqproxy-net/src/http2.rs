@@ -40,8 +40,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use eqproxy_core::Metrics;
 
 use crate::http1::{
-    BodyFraming, CopyError, FORBIDDEN_TRAILERS, MAX_LINE_BYTES, Prefixed, parse_chunk_size,
-    parse_header_line, parse_response_head, read_crlf_line, read_head,
+    BodyFraming, CopyError, FORBIDDEN_TRAILERS, HeadLimits, MAX_LINE_BYTES, Prefixed,
+    parse_chunk_size, parse_header_line, parse_response_head, read_crlf_line, read_head,
 };
 use crate::proxy::ResolvedListener;
 
@@ -119,6 +119,10 @@ pub(crate) fn copy_error(err: CopyError) -> StreamError {
         CopyError::Truncated => StreamError::Truncated,
         CopyError::Idle | CopyError::Io => StreamError::Io,
         CopyError::Framing(_) => StreamError::Framing,
+        // Only a request body can cross `max_body_bytes`, and the h1 engine
+        // answers that with a 413 before relaying it here; if it ever
+        // reaches the relay, cutting the stream is the only safe answer.
+        CopyError::TooLarge => StreamError::Framing,
     }
 }
 
@@ -171,6 +175,10 @@ pub async fn serve_h2<IO>(
 {
     let mut builder = h2::server::Builder::new();
     builder.max_concurrent_streams(MAX_CONCURRENT_STREAMS);
+    // The listener's head bound is also the protocol's header-list bound
+    // (B-N19): an h2 client learns the real limit instead of having its
+    // header block accepted here and refused later by the h1 parser.
+    builder.max_header_list_size(u32::try_from(cfg.limits.max_head_bytes).unwrap_or(u32::MAX));
     // RFC 8441: advertise that extended CONNECT is understood, so a client
     // may use `:protocol = websocket` on this connection.
     builder.enable_connect_protocol();
@@ -259,7 +267,8 @@ async fn exchange(
 
     // One h1 exchange on a bounded in-memory pipe. The engine owns the
     // server half; this task writes the request and reads the response.
-    let (pipe_ours, pipe_engine) = tokio::io::duplex(PIPE_BUFFER);
+    let (pipe_ours, pipe_engine) =
+        tokio::io::duplex(cfg.limits.stream_buffer_bytes.unwrap_or(PIPE_BUFFER));
     let (engine_read, engine_write) = tokio::io::split(pipe_engine);
     let engine_cfg = Arc::clone(&cfg);
     let engine_metrics = Arc::clone(&metrics);
@@ -489,13 +498,26 @@ where
             pos: 0,
             inner: &mut reader,
         };
-        let (head, rest) = match read_head(&mut source, cfg.server_header_timeout).await {
+        let (head, rest) = match read_head(
+            &mut source,
+            cfg.server_header_timeout,
+            cfg.limits.max_head_bytes,
+        )
+        .await
+        {
             Ok(pair) => pair,
             Err(_) => return Err(StreamError::Io),
         };
         carry = rest;
         carry.extend(source.prefix.split_off(source.pos));
-        let response = match parse_response_head(&head, head_request) {
+        let response = match parse_response_head(
+            &head,
+            head_request,
+            HeadLimits {
+                max_head_bytes: cfg.limits.max_head_bytes,
+                max_headers: cfg.limits.max_headers,
+            },
+        ) {
             Ok(response) => response,
             Err(reject) => {
                 eprintln!(

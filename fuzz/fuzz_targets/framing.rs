@@ -7,14 +7,14 @@
 //! requests with 400/431/501/505, responses with 502. Any panic or
 //! off-spec status fails the fuzzer.
 
-use eqproxy_net::http1::{parse_request_head, parse_response_head};
+use eqproxy_net::http1::{HeadLimits, parse_request_head, parse_response_head};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     // Cap the input so a run stays within the parser's threat model
     // (oversized heads are rejected by the read layer with 431 first).
     let input = &data[..data.len().min(64 * 1024)];
-    match parse_request_head(input) {
+    match parse_request_head(input, HeadLimits::default()) {
         Ok(_) => {}
         Err(reject) => {
             assert!(
@@ -24,7 +24,7 @@ fuzz_target!(|data: &[u8]| {
             );
         }
     }
-    match parse_response_head(input, false) {
+    match parse_response_head(input, false, HeadLimits::default()) {
         Ok(_) => {}
         Err(reject) => {
             assert_eq!(
@@ -35,5 +35,5 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     // HEAD-request mode shares the same no-panic contract.
-    let _ = parse_response_head(input, true);
+    let _ = parse_response_head(input, true, HeadLimits::default());
 });

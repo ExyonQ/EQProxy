@@ -1034,10 +1034,63 @@ pub struct ListenerConfig {
     /// request's `Accept-Encoding`. `http` mode only.
     #[serde(default)]
     pub compression: CompressionConfig,
+    /// Message limits and per-stream buffer sizing (B-N19/B-I17/B-E19).
+    /// Absent = the documented defaults, which are the previous behaviour.
+    #[serde(default)]
+    pub limits: LimitsConfig,
     /// Ordered routing rules (v0.6, B-H3/B-H4): first match wins, the
     /// `backend` above is the fallback. `http` mode only.
     #[serde(default)]
     pub rules: Vec<RuleConfig>,
+}
+
+/// Message limits and per-stream buffer sizing for one listener.
+///
+/// Every default is the constant the dataplane had before this section
+/// existed, so an absent `[listener.<name>.limits]` changes nothing. The
+/// head bound applies to the request head **and** to the response head the
+/// backend sends; the body bound is a request bound (`413`), matching the
+/// `client_max_body_size` class of limit rather than silently truncating a
+/// response.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LimitsConfig {
+    /// Maximum message-head size in bytes (request and response head).
+    /// Default 16384; 1024..=1048576.
+    #[serde(default = "default_max_head_bytes")]
+    pub max_head_bytes: usize,
+    /// Maximum header fields per message. Default 100; 1..=1000.
+    #[serde(default = "default_max_headers")]
+    pub max_headers: usize,
+    /// Maximum **request** body in bytes; `0` = unlimited (default).
+    /// A declared `Content-Length` over the bound is refused before the
+    /// backend is dialed; a chunked body is refused as soon as it crosses.
+    #[serde(default)]
+    pub max_body_bytes: u64,
+    /// Buffer of each internal h2/h3/WebSocket stream pipe, in bytes.
+    /// Absent = the protocol default (64 KiB; 16 KiB for h3), which is what
+    /// the dataplane used before this knob existed. Present: 1024..=1048576.
+    #[serde(default)]
+    pub stream_buffer_bytes: Option<usize>,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_head_bytes: default_max_head_bytes(),
+            max_headers: default_max_headers(),
+            max_body_bytes: 0,
+            stream_buffer_bytes: None,
+        }
+    }
+}
+
+fn default_max_head_bytes() -> usize {
+    16 * 1024
+}
+
+fn default_max_headers() -> usize {
+    100
 }
 
 /// Response compression (B-N6/H6): gzip and Brotli, opt-in per listener.

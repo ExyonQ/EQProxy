@@ -41,8 +41,8 @@ use tokio::sync::mpsc;
 use eqproxy_core::Metrics;
 
 use crate::http1::{
-    BodyFraming, FORBIDDEN_TRAILERS, MAX_LINE_BYTES, Prefixed, parse_chunk_size, parse_header_line,
-    parse_response_head, read_crlf_line, read_head,
+    BodyFraming, FORBIDDEN_TRAILERS, HeadLimits, MAX_LINE_BYTES, Prefixed, parse_chunk_size,
+    parse_header_line, parse_response_head, read_crlf_line, read_head,
 };
 use crate::http2::{ClientBody, StreamError, build_request_head, copy_error};
 use crate::proxy::{ResolvedListener, SharedCfg, current_cfg};
@@ -327,7 +327,8 @@ async fn exchange(
 
     // One h1 exchange on a bounded in-memory pipe; the engine owns the
     // server half and makes every routing/auth/compression decision.
-    let (pipe_ours, pipe_engine) = tokio::io::duplex(PIPE_BUFFER);
+    let (pipe_ours, pipe_engine) =
+        tokio::io::duplex(cfg.limits.stream_buffer_bytes.unwrap_or(PIPE_BUFFER));
     let (engine_read, engine_write) = tokio::io::split(pipe_engine);
     let engine_cfg = Arc::clone(&cfg);
     let engine_metrics = Arc::clone(&metrics);
@@ -353,14 +354,18 @@ async fn exchange(
     let idle = cfg.idle_timeout;
     let mut total = 0_u64;
     let mut body_done = framing == ClientBody::None;
+    // A request body can no longer be forwarded when the engine closed its
+    // half of the pipe — which happens as soon as it has an answer that does
+    // not need the body (a connect failure's 502 is the common case). The
+    // body must not reset a response that is already on its way: stop reading
+    // it and let the relay deliver what the engine produced.
+    let mut body_failed = false;
     if let Some(chunk) = first_chunk
         && write_body_chunk(&mut pipe_write, framing, &chunk, &mut total)
             .await
             .is_err()
     {
-        stream.stop_stream(h3::error::Code::H3_REQUEST_INCOMPLETE);
-        engine.abort();
-        return;
+        body_failed = true;
     }
 
     // A request whose head carried END_STREAM is complete in the pipe: no
@@ -403,7 +408,13 @@ async fn exchange(
         } else {
             cfg.server_header_timeout.max(idle)
         };
-        let event = next_event(&mut stream, &mut commands_rx, !body_done, wait).await;
+        let event = next_event(
+            &mut stream,
+            &mut commands_rx,
+            !body_done && !body_failed,
+            wait,
+        )
+        .await;
         match event {
             Event::Response(Command::Head { status, headers }) => {
                 head_seen = true;
@@ -440,23 +451,22 @@ async fn exchange(
                     .await
                     .is_err()
                 {
-                    stream.stop_stream(h3::error::Code::H3_REQUEST_INCOMPLETE);
-                    relay.abort();
-                    break;
+                    // The engine is gone; its answer (or EOF) is what the
+                    // relay has to deliver, so the body just ends here.
+                    body_failed = true;
+                    body_done = true;
                 }
             }
             // An empty DATA frame is legal and carries nothing.
             Event::Body(None) => {}
             Event::BodyEnd => {
+                body_done = true;
                 if finish_request_body(&mut stream, &mut pipe_write, framing, total, idle)
                     .await
                     .is_err()
                 {
-                    stream.stop_stream(h3::error::Code::H3_REQUEST_INCOMPLETE);
-                    relay.abort();
-                    break;
+                    body_failed = true;
                 }
-                body_done = true;
             }
             // Reading the body keeps the exchange alive; a response command
             // arrives within the same window when the backend answers. With
@@ -761,13 +771,26 @@ async fn relay_inner<R: AsyncRead + Unpin>(
             pos: 0,
             inner: &mut *reader,
         };
-        let (head, rest) = match read_head(&mut source, cfg.server_header_timeout).await {
+        let (head, rest) = match read_head(
+            &mut source,
+            cfg.server_header_timeout,
+            cfg.limits.max_head_bytes,
+        )
+        .await
+        {
             Ok(pair) => pair,
             Err(_) => return Err(StreamError::Io),
         };
         carry = rest;
         carry.extend(source.prefix.split_off(source.pos));
-        let response = match parse_response_head(&head, head_request) {
+        let response = match parse_response_head(
+            &head,
+            head_request,
+            HeadLimits {
+                max_head_bytes: cfg.limits.max_head_bytes,
+                max_headers: cfg.limits.max_headers,
+            },
+        ) {
             Ok(response) => response,
             Err(reject) => {
                 eprintln!(

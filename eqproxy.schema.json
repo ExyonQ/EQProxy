@@ -735,6 +735,44 @@
         "head"
       ]
     },
+    "LimitsConfig": {
+      "description": "Message limits and per-stream buffer sizing for one listener.\n\nEvery default is the constant the dataplane had before this section\nexisted, so an absent `[listener.<name>.limits]` changes nothing. The\nhead bound applies to the request head **and** to the response head the\nbackend sends; the body bound is a request bound (`413`), matching the\n`client_max_body_size` class of limit rather than silently truncating a\nresponse.",
+      "type": "object",
+      "properties": {
+        "max_body_bytes": {
+          "description": "Maximum **request** body in bytes; `0` = unlimited (default).\nA declared `Content-Length` over the bound is refused before the\nbackend is dialed; a chunked body is refused as soon as it crosses.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "max_head_bytes": {
+          "description": "Maximum message-head size in bytes (request and response head).\nDefault 16384; 1024..=1048576.",
+          "type": "integer",
+          "format": "uint",
+          "default": 16384,
+          "minimum": 0
+        },
+        "max_headers": {
+          "description": "Maximum header fields per message. Default 100; 1..=1000.",
+          "type": "integer",
+          "format": "uint",
+          "default": 100,
+          "minimum": 0
+        },
+        "stream_buffer_bytes": {
+          "description": "Buffer of each internal h2/h3/WebSocket stream pipe, in bytes.\nAbsent = the protocol default (64 KiB; 16 KiB for h3), which is what\nthe dataplane used before this knob existed. Present: 1024..=1048576.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "default": null,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "ListenerConfig": {
       "description": "A frontend: where to listen and which backend to send to.",
       "type": "object",
@@ -765,6 +803,10 @@
           "description": "Inactivity timeout per direction (no bytes in either direction).",
           "type": "string",
           "default": "60000ms"
+        },
+        "limits": {
+          "description": "Message limits and per-stream buffer sizing (B-N19/B-I17/B-E19).\nAbsent = the documented defaults, which are the previous behaviour.",
+          "$ref": "#/$defs/LimitsConfig"
         },
         "listen": {
           "description": "Listen `IP:PORT` address (port 0 = ephemeral, useful in tests).",

@@ -82,6 +82,11 @@ impl MirrorCopy {
                 connect: self.connect_timeout,
                 idle: self.idle_timeout,
                 http: true,
+                // The mirror is a detached copy with its own budget: it uses
+                // the historical head bounds and protocol-default pipes, never
+                // a client-visible limit it could not enforce.
+                limits: crate::http1::HeadLimits::default(),
+                pipe_buffer: None,
             },
             &backend,
             addr,

@@ -49,8 +49,8 @@ pub use pool::{DEFAULT_POOL_IDLE_TIMEOUT, IDLE_CEILING_PER_SERVER, IDLE_FLOOR_PE
 pub use proxy::{
     AffinityMode, BoundProxy, BoxRead, BoxWrite, HashKey, HashPolicy, MirrorPolicy, OutboundError,
     ProxyError, ProxyMode, READ_BUF, RateLimiter, ResolvedAffinity, ResolvedAuth, ResolvedBackend,
-    ResolvedCors, ResolvedHeaders, ResolvedListener, ResolvedRewrite, ResolvedRoute, RouteAction,
-    RouteDecision, SplitTarget, SplitTargets, SwapOutcome, SwapRequest, SwapSummary, bind,
-    connect_backend,
+    ResolvedCors, ResolvedHeaders, ResolvedLimits, ResolvedListener, ResolvedRewrite,
+    ResolvedRoute, RouteAction, RouteDecision, SplitTarget, SplitTargets, SwapOutcome, SwapRequest,
+    SwapSummary, bind, connect_backend,
 };
 pub use proxy_proto::ProxyProtocolMode;

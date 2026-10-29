@@ -47,8 +47,8 @@ use eqproxy_core::Metrics;
 pub(crate) type Unserved = Box<(Request<RecvStream>, h2::server::SendResponse<Bytes>)>;
 
 use crate::http1::{
-    BodyFraming, RequestHead, apply_forwarded, apply_header_actions, apply_rewrite, cookie_value,
-    parse_request_head,
+    BodyFraming, HeadLimits, RequestHead, apply_forwarded, apply_header_actions, apply_rewrite,
+    cookie_value, parse_request_head,
 };
 use crate::http2::{DATA_CHUNK, StreamError, build_request_head, capacity};
 use crate::proxy::{
@@ -112,7 +112,7 @@ pub(crate) async fn serve(
         // The h1 translation answers this with the precise refusal.
         return Err(Box::new((request, respond)));
     };
-    let Ok(head) = parse_head(&h1.head) else {
+    let Ok(head) = parse_head(&h1.head, grpc_head_limits(cfg)) else {
         return Err(Box::new((request, respond)));
     };
     let path = eqproxy_core::rules::path_of(&head.target).to_owned();
@@ -193,7 +193,7 @@ pub(crate) async fn serve(
         Some(rewrite) => apply_rewrite(&forwarded, rewrite, &head.target),
         None => forwarded,
     };
-    let forwarded = match parse_head(&forwarded) {
+    let forwarded = match parse_head(&forwarded, grpc_head_limits(cfg)) {
         Ok(forwarded) => forwarded,
         Err(_) => {
             metrics
@@ -394,12 +394,20 @@ enum First {
 
 /// Parses a head produced by the h1 renderer (which terminates the last line
 /// with CRLF) with the strict request parser (which expects no blank line).
-fn parse_head(head: &[u8]) -> Result<RequestHead, crate::http1::Reject> {
+fn parse_head(head: &[u8], limits: HeadLimits) -> Result<RequestHead, crate::http1::Reject> {
     let mut head = head;
     while let Some(stripped) = head.strip_suffix(b"\r\n") {
         head = stripped;
     }
-    parse_request_head(head)
+    parse_request_head(head, limits)
+}
+
+/// The listener's head bounds, in the shape the h1 parser takes (B-N19).
+fn grpc_head_limits(cfg: &ResolvedListener) -> HeadLimits {
+    HeadLimits {
+        max_head_bytes: cfg.limits.max_head_bytes,
+        max_headers: cfg.limits.max_headers,
+    }
 }
 
 /// `application/grpc`, `application/grpc+proto`, `application/grpc+json`, …
@@ -725,7 +733,7 @@ mod tests {
         let raw = format!(
             "POST {target} HTTP/1.1\r\nhost: api.example.test\r\ncontent-type: application/grpc\r\ntransfer-encoding: chunked\r\nx-trace: 42\r\n{extra}"
         );
-        parse_request_head(raw.as_bytes()).expect("valid head")
+        parse_request_head(raw.as_bytes(), HeadLimits::default()).expect("valid head")
     }
 
     #[test]
@@ -755,6 +763,7 @@ mod tests {
     fn outbound_request_keeps_a_declared_length_only() {
         let head = parse_request_head(
             b"POST /pkg.Service/Unary HTTP/1.1\r\nhost: api\r\ncontent-type: application/grpc\r\ncontent-length: 12\r\n",
+            HeadLimits::default(),
         )
         .expect("head");
         let out = outbound_request(&head, "http").expect("outbound");
@@ -769,6 +778,7 @@ mod tests {
     fn outbound_request_refuses_a_missing_authority() {
         let head = parse_request_head(
             b"POST /pkg.Service/Stream HTTP/1.0\r\ncontent-type: application/grpc\r\n",
+            HeadLimits::default(),
         )
         .expect("head");
         assert!(outbound_request(&head, "https").is_err());

@@ -68,7 +68,7 @@ use http::{HeaderMap, HeaderName, HeaderValue, Request, Response};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 use crate::http1::{
-    BodyFraming, FORBIDDEN_TRAILERS, HeadError, MAX_LINE_BYTES, Prefixed, RequestHead,
+    BodyFraming, FORBIDDEN_TRAILERS, HeadError, HeadLimits, MAX_LINE_BYTES, Prefixed, RequestHead,
     parse_chunk_size, parse_header_line, parse_request_head, phrase, read_crlf_line, read_head,
 };
 use crate::http2::{DATA_CHUNK, StreamError, capacity, copy_error, is_hop_by_hop};
@@ -520,6 +520,8 @@ pub fn open(
     dialer: Arc<dyn SessionDialer>,
     name: &str,
     idle: Duration,
+    limits: HeadLimits,
+    pipe_buffer: Option<usize>,
 ) -> Result<(BoxRead, BoxWrite), io::Error> {
     let (slot, send) = session
         .enter()
@@ -530,9 +532,10 @@ pub fn open(
         slot,
         send,
         idle,
+        limits,
         retried: false,
     };
-    let (engine, backend) = tokio::io::duplex(PIPE_BUFFER);
+    let (engine, backend) = tokio::io::duplex(pipe_buffer.unwrap_or(PIPE_BUFFER));
     let (engine_read, engine_write) = tokio::io::split(engine);
     let (pipe_read, pipe_write) = tokio::io::split(backend);
     let label = name.to_owned();
@@ -597,6 +600,8 @@ struct Exchange {
     slot: ExchangeSlot,
     send: h2::client::SendRequest<Bytes>,
     idle: Duration,
+    /// Head bounds of the h1 message the engine handed over (B-N19).
+    limits: HeadLimits,
     /// At most one replay, and only after a GOAWAY refusal.
     retried: bool,
 }
@@ -622,7 +627,8 @@ impl Exchange {
             pos: 0,
             inner: &mut reader,
         };
-        let (head, rest) = match read_head(&mut source, self.idle).await {
+        let (head, rest) = match read_head(&mut source, self.idle, self.limits.max_head_bytes).await
+        {
             Ok(pair) => pair,
             Err(HeadError::Timeout) => return Err(StreamError::Io),
             Err(_) => return Err(StreamError::Framing),
@@ -632,7 +638,7 @@ impl Exchange {
         let unread = source.prefix.split_off(source.pos);
         let mut prefix = rest;
         prefix.extend(unread);
-        let request = parse_request_head(&head).map_err(|_| StreamError::Framing)?;
+        let request = parse_request_head(&head, self.limits).map_err(|_| StreamError::Framing)?;
         let mut body = Prefixed {
             prefix,
             pos: 0,

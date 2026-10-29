@@ -14,7 +14,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use eqproxy_core::auth::{AuthUrl, BasicUsers, basic_credentials};
 
-use crate::http1::{RequestHead, parse_response_head, read_head};
+use crate::http1::{HeadLimits, RequestHead, parse_response_head, read_head};
 use crate::proxy::ResolvedAuth;
 
 /// Maximum deny-response body read from the auth service (bounded like
@@ -139,11 +139,15 @@ async fn subrequest(
     if stream.write_all(head.as_bytes()).await.is_err() {
         return AuthOutcome::Error(service_error());
     }
-    let (head, rest) = match read_head(&mut stream, total_timeout).await {
-        Ok(pair) => pair,
-        Err(_) => return AuthOutcome::Error(service_error()),
-    };
-    let response = match parse_response_head(&head, false) {
+    // The auth subrequest is internal and its answer is read into a fixed
+    // budget: it uses the historical head bounds, not a listener's.
+    let default_limits = HeadLimits::default();
+    let (head, rest) =
+        match read_head(&mut stream, total_timeout, default_limits.max_head_bytes).await {
+            Ok(pair) => pair,
+            Err(_) => return AuthOutcome::Error(service_error()),
+        };
+    let response = match parse_response_head(&head, false, default_limits) {
         Ok(response) => response,
         Err(_) => return AuthOutcome::Error(service_error()),
     };

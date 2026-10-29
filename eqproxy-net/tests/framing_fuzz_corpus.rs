@@ -13,7 +13,7 @@
 //! test is reproducible without libFuzzer. The live `cargo-fuzz` target in
 //! `fuzz/fuzz_targets/framing.rs` reuses the same seeds for open-ended runs.
 
-use eqproxy_net::http1::{MAX_HEADERS, parse_request_head, parse_response_head};
+use eqproxy_net::http1::{HeadLimits, MAX_HEADERS, parse_request_head, parse_response_head};
 
 /// Fixed seeds: valid traffic plus the T01-T03 attack corpus.
 fn request_seeds() -> Vec<Vec<u8>> {
@@ -182,7 +182,7 @@ fn request_parser_never_panics_and_rejects_explicitly() {
             inputs.push(next);
         }
         for input in &inputs {
-            match parse_request_head(input) {
+            match parse_request_head(input, HeadLimits::default()) {
                 Ok(_) => exercised_ok += 1,
                 Err(reject) => {
                     exercised_err += 1;
@@ -212,7 +212,7 @@ fn response_parser_never_panics_and_maps_to_502() {
             inputs.push(next);
         }
         for input in &inputs {
-            match parse_response_head(input, false) {
+            match parse_response_head(input, false, HeadLimits::default()) {
                 Ok(_) => exercised_ok += 1,
                 Err(reject) => {
                     exercised_err += 1;
@@ -224,7 +224,7 @@ fn response_parser_never_panics_and_maps_to_502() {
                 }
             }
             // HEAD-request mode must not panic either.
-            let _ = parse_response_head(input, true);
+            let _ = parse_response_head(input, true, HeadLimits::default());
         }
     }
     assert!(exercised_ok > 0, "no valid parse exercised");
@@ -247,17 +247,24 @@ fn known_attack_seeds_are_rejected_with_documented_status() {
         (b"GET http://x/a HTTP/1.1\r\nHost: x\r\n", 400),
     ];
     for (input, status) in cases {
-        let err = parse_request_head(input).expect_err("attack seed must be rejected");
+        let err = parse_request_head(input, HeadLimits::default())
+            .expect_err("attack seed must be rejected");
         assert_eq!(err.status, *status, "wrong status for {input:?}");
     }
     // A7/A8 (v0.6): CONNECT and Upgrade parse and route — the tunnel
     // opens only on backend acceptance, never at parse time.
-    let connect = parse_request_head(b"CONNECT x:443 HTTP/1.1\r\nHost: x\r\n")
-        .expect("connect parses and routes (A8)");
+    let connect = parse_request_head(
+        b"CONNECT x:443 HTTP/1.1\r\nHost: x\r\n",
+        HeadLimits::default(),
+    )
+    .expect("connect parses and routes (A8)");
     assert_eq!(connect.method, "CONNECT");
     assert_eq!(connect.host, "x");
-    let upgrade = parse_request_head(b"GET /a HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n")
-        .expect("upgrade parses and routes (A7)");
+    let upgrade = parse_request_head(
+        b"GET /a HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\n",
+        HeadLimits::default(),
+    )
+    .expect("upgrade parses and routes (A7)");
     assert!(upgrade.wants_upgrade);
 
     // Header-count boundary: exactly MAX_HEADERS parses, MAX_HEADERS+1 is 431.
@@ -265,8 +272,9 @@ fn known_attack_seeds_are_rejected_with_documented_status() {
     for i in 0..MAX_HEADERS - 1 {
         at_limit.extend_from_slice(format!("X-Pad-{i}: v\r\n").as_bytes());
     }
-    assert!(parse_request_head(&at_limit).is_ok());
+    assert!(parse_request_head(&at_limit, HeadLimits::default()).is_ok());
     at_limit.extend_from_slice(b"X-One-More: v\r\n");
-    let err = parse_request_head(&at_limit).expect_err("must reject over the header limit");
+    let err = parse_request_head(&at_limit, HeadLimits::default())
+        .expect_err("must reject over the header limit");
     assert_eq!(err.status, 431);
 }

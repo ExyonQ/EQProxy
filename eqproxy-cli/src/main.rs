@@ -2774,6 +2774,14 @@ fn resolve_with(
                 resolved = resolved.with_proxy_receive(allowlist);
             }
             resolved = resolved.with_max_stream_duration(listener.max_stream_duration);
+            // Message limits and per-stream buffers (B-N19/B-I17/B-E19): the
+            // runtime receives exactly the values the gate bounded.
+            resolved = resolved.with_limits(eqproxy_net::ResolvedLimits {
+                max_head_bytes: listener.limits.max_head_bytes,
+                max_headers: listener.limits.max_headers,
+                max_body_bytes: listener.limits.max_body_bytes,
+                stream_buffer_bytes: listener.limits.stream_buffer_bytes,
+            });
             resolved = resolved.with_forwarded_headers(match listener.forwarded_headers {
                 eqproxy_config::schema::ForwardedHeaders::Off => {
                     eqproxy_net::proxy::ForwardedMode::Off

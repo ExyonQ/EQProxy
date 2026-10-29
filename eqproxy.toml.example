@@ -96,6 +96,19 @@ server_header_timeout = "30s"  # response head (backend → proxy)
 # or a truncated stream after it.
 max_stream_duration = "0s"
 
+# Message limits and per-stream buffers (B-N19/B-I17/B-E19, mode = "http").
+# Every value defaults to the constant the dataplane used before this section,
+# so omitting it changes nothing. max_head_bytes and max_headers bound the
+# request head and the backend response head alike; max_body_bytes is a
+# request bound answered with 413 (a declared Content-Length before the dial,
+# a chunked body as soon as it crosses). stream_buffer_bytes sizes the pipe of
+# each h2/h3/WebSocket stream (absent = 64 KiB, 16 KiB for h3).
+#[listener.web.limits]
+#max_head_bytes = 16384      # 1024..=1048576
+#max_headers = 100           # 1..=1000
+#max_body_bytes = 0          # 0 = unlimited (default)
+#stream_buffer_bytes = 16384 # 1024..=1048576; omit for the protocol default
+
 # Response compression (v0.7, mode = "http" only): gzip and/or Brotli
 # negotiated from the request's Accept-Encoding. The body is compressed while
 # it is relayed, so the response is sent chunked (no Content-Length) and
