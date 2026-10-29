@@ -2958,6 +2958,79 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         }
     };
 
+    // The shutdown and reload signals are armed before any listener is bound
+    // or announced. `tokio::signal::unix::signal` installs the OS handler when
+    // it is called, so a SIGINT or SIGHUP arriving the instant the first
+    // socket is ready finds the handler instead of the default action, which
+    // terminates the process without a clean shutdown or a reload.
+    let (handle, signal) = shutdown::channel();
+    // One queue for every configuration mutation (ADR-0019): the admin API
+    // and SIGHUP both land here, so the revision check and the swap it
+    // authorizes are serialized in a single consumer.
+    let (apply_tx, apply_rx) = tokio::sync::mpsc::channel::<ApplyMessage>(8);
+
+    #[cfg(unix)]
+    {
+        let mut interrupt =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()) {
+                Ok(interrupt) => interrupt,
+                Err(err) => {
+                    eprintln!("ERROR SIGINT handler unavailable: {err}");
+                    return 1;
+                }
+            };
+        let signal_handle = handle.clone();
+        tokio::spawn(async move {
+            if interrupt.recv().await.is_some() {
+                eprintln!("INFO shutdown signal received; draining connections");
+                signal_handle.trigger();
+            }
+        });
+
+        // SIGHUP → hot config reload (S-CFG-01, unix). The signal does not
+        // touch the dataplane directly: it asks the same single configuration
+        // task that serves the API, which re-reads the file, validates it and
+        // swaps (or rejects) as one serialized generation. A reload that
+        // arrives before the applier starts waits in the bounded queue.
+        let mut hup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+            Ok(hup) => hup,
+            Err(err) => {
+                eprintln!("ERROR SIGHUP handler unavailable: {err}");
+                return 1;
+            }
+        };
+        let hup_apply = apply_tx.clone();
+        tokio::spawn(async move {
+            while hup.recv().await.is_some() {
+                let (reply, answer) = tokio::sync::oneshot::channel();
+                if hup_apply
+                    .send(ApplyMessage {
+                        change: ConfigChange::Reload,
+                        if_match: None,
+                        reply,
+                    })
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                // The task logs validation rejections; the swap outcome is
+                // logged by the dataplane when it commits or refuses.
+                let _ = answer.await;
+            }
+        });
+    }
+    #[cfg(not(unix))]
+    {
+        let signal_handle = handle.clone();
+        tokio::spawn(async move {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                eprintln!("INFO shutdown signal received; draining connections");
+                signal_handle.trigger();
+            }
+        });
+    }
+
     let bound = match bind(listeners, Arc::clone(&metrics)).await {
         Ok(bound) => bound,
         Err(err) => {
@@ -2968,12 +3041,6 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
     for (name, addr) in bound.local_addrs() {
         eprintln!("INFO listener {name} listening on {addr}");
     }
-
-    let (handle, signal) = shutdown::channel();
-    // One queue for every configuration mutation (ADR-0019): the admin API
-    // and SIGHUP both land here, so the revision check and the swap it
-    // authorizes are serialized in a single consumer.
-    let (apply_tx, apply_rx) = tokio::sync::mpsc::channel::<ApplyMessage>(8);
     // What the acceptors are serving now: the baseline a renewal reports
     // against (D7), read from the dataplane and never from the config files.
     let certificates: BTreeMap<String, String> = bound
@@ -3065,50 +3132,6 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         }
     });
 
-    // Ctrl-C / SIGINT → graceful shutdown.
-    let signal_handle = handle.clone();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            eprintln!("INFO shutdown signal received; draining connections");
-            signal_handle.trigger();
-        }
-    });
-
-    // SIGHUP → hot config reload (S-CFG-01, unix). The signal does not touch
-    // the dataplane directly: it asks the same single configuration task that
-    // serves the API, which re-reads the file, validates it and swaps (or
-    // rejects) as one serialized generation.
-    #[cfg(unix)]
-    {
-        let hup_apply = apply_tx.clone();
-        tokio::spawn(async move {
-            let mut hup =
-                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
-                    Ok(hup) => hup,
-                    Err(err) => {
-                        eprintln!("ERROR SIGHUP handler unavailable: {err}");
-                        return;
-                    }
-                };
-            while hup.recv().await.is_some() {
-                let (reply, answer) = tokio::sync::oneshot::channel();
-                if hup_apply
-                    .send(ApplyMessage {
-                        change: ConfigChange::Reload,
-                        if_match: None,
-                        reply,
-                    })
-                    .await
-                    .is_err()
-                {
-                    break;
-                }
-                // The task logs validation rejections; the swap outcome is
-                // logged by the dataplane when it commits or refuses.
-                let _ = answer.await;
-            }
-        });
-    }
     #[cfg(not(unix))]
     let _ = apply_tx;
 

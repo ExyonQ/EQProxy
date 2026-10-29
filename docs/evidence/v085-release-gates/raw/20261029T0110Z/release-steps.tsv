@@ -1,0 +1,10 @@
+1	Set up job	success	2026-10-29T01:02:26Z→2026-10-29T01:02:27Z
+2	Run actions/checkout@v7	success	2026-10-29T01:02:27Z→2026-10-29T01:02:28Z
+3	Run actions/download-artifact@v8	success	2026-10-29T01:02:28Z→2026-10-29T01:02:30Z
+4	Assemble dist/ (only after both builds verified)	success	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z
+5	Export and verify the source tarball of the released commit	success	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z
+6	Write SHA256SUMS.txt (the four binary lines unchanged, tarball appended)	success	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z
+7	Extract the release notes for this version	success	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z
+8	Create or refresh GitHub release	skipped	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z
+16	Post Run actions/checkout@v7	success	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z
+17	Complete job	success	2026-10-29T01:02:30Z→2026-10-29T01:02:30Z

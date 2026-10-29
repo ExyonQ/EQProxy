@@ -1,0 +1,23 @@
+1	Set up job	success
+2	Run actions/checkout@v7	success
+3	Run docker/setup-qemu-action@v4	success
+4	Run docker/setup-buildx-action@v4	success
+5	Run docker/login-action@v4	success
+6	Build and push the candidate manifest (linux/amd64 + linux/arm64)	skipped
+7	Record the candidate index digest	skipped
+8	Log in to Docker Hub (Scout indexing and mirror)	skipped
+9	Install Docker Scout CLI (pinned)	skipped
+10	Docker Scout gate (linux/amd64 and linux/arm64, critical/high = 0)	skipped
+11	Verify image artifact on both architectures (version + config gate + live traffic)	skipped
+12	Run actions/upload-artifact@v7	skipped
+13	Admin socket ACL E2E on both architectures (B-H14)	skipped
+14	Promote the scanned digest to the release tags	skipped
+15	Mirror the verified manifest to Docker Hub	skipped
+16	Verify the published tags carry the scanned digest	skipped
+17	Re-pull the published image and replay the journeys (2 registries × 2 architectures)	skipped
+18	Build multi-arch image (dry run, no push)	success
+33	Post Run docker/login-action@v4	success
+34	Post Run docker/setup-buildx-action@v4	success
+35	Post Run docker/setup-qemu-action@v4	success
+36	Post Run actions/checkout@v7	success
+37	Complete job	success

@@ -24,20 +24,89 @@ env:
 
 jobs:
   guard:
-    name: Tag matches the workspace version
+    name: Line gates pass before any build
     runs-on: ubuntu-latest
+    # The two suite runs and the gates must fit; a hung root test is a red
+    # build here, not a job squatting until the repository timeout.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
 
-      # Runs before every build: the evidence documents ship in the source
-      # tarball, so a citation of a test that does not exist must stop the
-      # pipeline here, not after the artifacts are published. The self-test
-      # proves the detector still detects before its verdict is trusted.
-      - name: Evidence citations point at tests that exist
+      # CI runs the three gates on every push. A tag push does not trigger CI,
+      # so a release cannot trust a commit whose gates only ran somewhere
+      # else: they run here, on the tag commit, before darwin/linux/image can
+      # build a byte or publish anything. The self-test of each detector runs
+      # first, because a gate whose detector rotted would otherwise pass by
+      # finding nothing.
+      - name: Install Rust toolchain (pinned in rust-toolchain.toml)
         run: |
           set -euo pipefail
-          python3 .github/scripts/check-evidence-test-citations.py --self-test
-          python3 .github/scripts/check-evidence-test-citations.py
+          channel=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Self-test the citation detector
+        run: python3 .github/scripts/check-evidence-test-citations.py --self-test
+
+      - name: Evidence citations point at tests that exist
+        run: python3 .github/scripts/check-evidence-test-citations.py
+
+      - name: Self-test the short health-probe gate
+        run: python3 .github/scripts/check-short-health-probes.py --self-test
+
+      - name: Health probes have 1 s of timeout
+        run: python3 .github/scripts/check-short-health-probes.py
+
+      - name: Self-test the uid-skip detector
+        run: python3 .github/scripts/check-uid-skips.py --self-test
+
+      # The uid gate reads a `cargo test` transcript, not the source: the
+      # suite of this commit, in both tiers, or the gate proves nothing.
+      # `--nocapture` is what puts a skip's `eprintln!` in the log instead of
+      # swallowing it for a passing test.
+      - name: Tests (unprivileged user)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          cargo test --workspace -- --nocapture 2>&1 | tee /tmp/suite-user.log
+
+      - name: UID-gated skips are declared (unprivileged run)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-uid-skips.py --user-log /tmp/suite-user.log
+
+      # Root run: same fd limit as CI (the 400-stream test holds ~820
+      # descriptors); build and registry under /tmp so the checkout keeps no
+      # root-owned target for the rest of the job.
+      - name: Tests as root (uid 0)
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+          sudo env \
+            PATH="$PATH" \
+            RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}" \
+            CARGO_HOME=/tmp/eqproxy-root-cargo \
+            CARGO_TARGET_DIR=/tmp/eqproxy-root-target \
+            bash -c '
+              set -euo pipefail
+              ulimit -Hn 65536 2>/dev/null || true
+              ulimit -n 65536
+              got="$(ulimit -n)"
+              if [ "$got" -lt 65536 ]; then
+                printf "root suite fd limit is %s, not 65536: raise it, the 400-stream test needs ~820\n" "$got" >&2
+                exit 1
+              fi
+              printf "root suite fd limit: %s\n" "$got"
+              exec cargo test --workspace -- --nocapture
+            ' 2>&1 | tee /tmp/suite-root.log
+
+      - name: UID-gated skips are declared (root run)
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/check-uid-skips.py --root-log /tmp/suite-root.log
 
       - name: Check version pin
         if: github.ref_type == 'tag'
@@ -995,7 +1064,9 @@ jobs:
         if: github.ref_type != 'tag'
         run: |
           set -euo pipefail
-          VERSION="${GITHUB_REF_NAME#v}"
+          # A branch name may contain `/`, which is not valid in a Docker
+          # tag; the dry run gets a valid, clearly non-release tag.
+          VERSION="dryrun-${GITHUB_SHA::12}"
           TAGS="--tag ghcr.io/exyonq/eqproxy:$VERSION"
           case "$VERSION" in *-*) ;; *) TAGS="$TAGS --tag ghcr.io/exyonq/eqproxy:latest" ;; esac
           docker buildx build --pull --file docker/Dockerfile \

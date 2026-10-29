@@ -1,0 +1,16 @@
+run 40776942154 guard: lines from the job log
+2026-10-28T22:03:40.6107559Z self-test ok: dangling citation detected, real and helper names accepted
+2026-10-28T22:03:40.7604665Z evidence citations: 71 documents, 164 cited identifiers, 561 #[test] functions in 60 files
+2026-10-28T22:03:40.8189409Z self-test ok: short, multi-line, non-literal, TOML, stale, duplicate and malformed input all rejected
+2026-10-28T22:03:40.9120765Z suite health probes: 18 found, 2 sub-second or unproven, 2 declared in short-health-probes.txt
+2026-10-28T22:03:40.9681689Z self-test ok: undeclared, missing, duplicated and malformed input all rejected
+2026-10-28T22:06:36.9556349Z uid-gated skips in an unprivileged run: 0 printed
+2026-10-28T22:06:36.9557534Z ok: the unprivileged run printed no uid-gated skip
+2026-10-28T22:09:49.7640461Z uid-gated skips as root: 2 printed, 2 declared in uid-skips.txt
+2026-10-28T22:09:49.7641155Z ok: every uid-gated skip of the root run is declared, with its reason
+
+run 40775542855 guard: failure
+Line gates pass before any build	Tests (unprivileged user)	2026-10-28T21:54:24.0757022Z assertion `left == right` failed: clean shutdown must exit with 0
+Line gates pass before any build	Tests (unprivileged user)	2026-10-28T21:54:24.0757786Z   left: None
+Line gates pass before any build	Tests (unprivileged user)	2026-10-28T21:54:24.0758326Z  right: Some(0)
+Line gates pass before any build	Tests (unprivileged user)	2026-10-28T21:54:28.5349375Z test result: FAILED. 77 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.84s
