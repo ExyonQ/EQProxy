@@ -1202,7 +1202,9 @@ async fn http_expect_check_marks_5xx_server_down() {
             1,
         )
         .with_health_check(
-            HealthCheck::tcp(Duration::from_millis(80), Duration::from_millis(80)).with_http(
+            // The origin answers 500 in microseconds; the 1 s timeout is
+            // headroom for the scheduler, not for the origin.
+            HealthCheck::tcp(Duration::from_millis(80), Duration::from_secs(1)).with_http(
                 HttpCheck {
                     method: HttpCheckMethod::Get,
                     path: "/healthz".to_owned(),
@@ -1333,7 +1335,9 @@ async fn http_check_interops_with_keep_alive_origins() {
             1, // rise
         )
         .with_health_check(
-            HealthCheck::tcp(Duration::from_millis(100), Duration::from_millis(150)).with_http(
+            // Both origins answer at once; the 1 s timeout only absorbs a
+            // scheduling hiccup, so a healthy origin cannot flap to DOWN.
+            HealthCheck::tcp(Duration::from_millis(100), Duration::from_secs(1)).with_http(
                 HttpCheck {
                     method: HttpCheckMethod::Get,
                     path: "/healthz".to_owned(),

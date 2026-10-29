@@ -1,0 +1,15 @@
+**The gate is `.github/scripts/check-short-health-probes.py`.** It scans the *test* code of every `eqproxy-*` crate for health-check probes whose timeout is under 1 s (or that cannot be proven to be a literal), and fails the run unless each such site is declared in the registry `.github/scripts/short-health-probes.txt`.
+
+**What it scans (`test_sources`, lines 110–135):** for each `eqproxy-*/` crate it takes every `.rs` file under `tests/` whole, and every `.rs` file under `src/` only from its last `#[cfg(test)]` line (via `test_module_start`). Production wiring that takes the operator's config value is deliberately excluded.
+
+**Two scanners run per file (`run`, lines 326–349):**
+- `rust_probes` (lines 200–229) — regex `CALL` over each non-`//` line, resolving the enclosing `fn` and the call's arguments. A probe must yield exactly two `Duration::from_millis`/`from_secs` literals (`ARG_DURATION`); the second one is the timeout, with `secs` multiplied by 1000. Anything else (constants like `HealthCheck::tcp(PROBE_INTERVAL, PROBE_TIMEOUT)`) is recorded with timeout `None`, i.e. "unproven". The API being matched is `HealthCheck::tcp(interval, timeout)` at `eqproxy-net/src/health.rs:89`, used by tests such as `eqproxy-net/tests/e2e_phase2b.rs:15` and `eqproxy-net/tests/e2e_balancer.rs:26`.
+- `toml_probes` (lines 232–258) — tracks the current `TABLE_HEADER` and only looks inside tables ending in `.health_check`; a `TIMEOUT_KEY` (`timeout = ...`, e.g. `"100ms"`) is converted by `timeout_ms`. Other tables (e.g. `[admin] timeout`) are ignored.
+
+**The verdict (`problems`, lines 297–323):** a probe is fine if its timeout is `>= MIN_TIMEOUT_MS`; otherwise its `path::fn` key must be in the registry read by `read_registry`. Failures are reported as: sub-second timeout ("timeout is N ms, below …"), unprovable timeout ("it cannot be proven, so it is rejected"), and stale declarations ("declared, but no sub-second probe was found there") so the registry cannot rot. `run` returns 1 and prints the remediation: raise the timeout to 1 s (the interval may stay short) or declare the site with a reason.
+
+**Self-check:** `self_test` (line 352 onward) feeds the detector fixtures — a 1 s probe, an 80 ms probe, a call split across lines, non-literal constants, a commented-out probe, a short TOML health-check, a 1 s TOML variant, and a non-`health_check` TOML table — and asserts each is classified correctly; it is invoked from `main`.
+
+**Why the 1 s threshold makes sense in this codebase:** `default_health_timeout()` in `eqproxy-config/src/schema.rs:91-93` is `Duration::from_secs(1)`, so a sub-second test probe is what could flip a healthy origin to DOWN in CI.
+
+Gaps: the tool budget ran out before I could read the literal definitions of `MIN_TIMEOUT_MS`, `CALL`, `TABLE_HEADER`, `TIMEOUT_KEY`, `ROOT` and `REGISTRY` (all module-level constants in the same script), and I could not confirm which `.github/workflows/*` file invokes the script. If you change the gate, read the script's header for those constants and grep the workflows for `check-short-health-probes.py`.

@@ -465,7 +465,11 @@ mod tests {
             async move {
                 run(
                     balancer,
-                    HealthCheck::tcp(Duration::from_millis(20), Duration::from_millis(200)),
+                    // The listener answers at once and the dead case is a
+                    // refused connect: 1 s is headroom for the scheduler, not
+                    // a wait for the origin, so one descheduled poll cannot
+                    // drop the live server (the 200 ms budget could).
+                    HealthCheck::tcp(Duration::from_millis(20), Duration::from_secs(1)),
                     signal,
                 )
                 .await;

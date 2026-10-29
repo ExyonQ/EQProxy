@@ -1,0 +1,9 @@
+suite health probes: 8 found, 7 sub-second or unproven, 2 declared in short-health-probes.txt
+short health-probe contract violated:
+  eqproxy-net/tests/e2e_balancer.rs:441 (slow_start_ramps_the_recovered_server_up): timeout is 100 ms, below 1000 ms
+  eqproxy-net/tests/e2e_phase2b.rs:459 (healthchecks_e2e): timeout is 80 ms, below 1000 ms
+  eqproxy-net/tests/e2e_resilience.rs:1205 (http_expect_check_marks_5xx_server_down): timeout is 80 ms, below 1000 ms
+  eqproxy-net/tests/e2e_resilience.rs:1336 (http_check_interops_with_keep_alive_origins): timeout is 150 ms, below 1000 ms
+  eqproxy-net/src/health.rs:468 (check_task_marks_server_down_and_up_again): timeout is 200 ms, below 1000 ms
+Raise the timeout to 1 s (the interval may stay short), or declare the site in .github/scripts/short-health-probes.txt with the reason it cannot mark a healthy origin DOWN.
+HEAD tree: exit 1 (expected 1)

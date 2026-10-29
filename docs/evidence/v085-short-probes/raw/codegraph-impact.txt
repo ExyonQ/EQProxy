@@ -1,0 +1,44 @@
+## Direct answer
+
+The change is confined: `health.rs`'s unit tests have **no code dependents** (`get_reverse_dependencies` on the tests module `nodes:\`07253dd9-...\`` with `Calls`, depth 2, returned an empty list), so nothing breaks. What is affected is (a) the runtime behaviour of the two check paths that consume `HealthCheck.timeout`, and (b) the CI lint `.github/scripts/check-short-health-probes.py`, which reads those timeout literals out of the test source text. I could **not** confirm from the graph that a literal `200 ms` exists inside `./eqproxy-net/src/health.rs` — see the caveat below.
+
+**Assumption:** "the suite health-check timeout" means the `timeout` argument passed to `HealthCheck::tcp(...)` / `HealthCheck::with_http(...)` in the `mod tests` block of `./eqproxy-net/src/health.rs`.
+
+## What consumes the value (direct dependencies of the timeout)
+
+- `HealthCheck.timeout` is a struct field at `./eqproxy-net/src/health.rs:73-84` ("Timeout of each attempt (connect + request + response)").
+- `check_one` at `./eqproxy-net/src/health.rs:134-144` is the only reader: it forwards `check.timeout` to `tcp_ok(addr, check.timeout)` or `http_ok(addr, http, check.timeout)`. A 5× longer timeout therefore changes only how long a failing probe is allowed to hang before `balancer.report_fail` fires (`report_fail` at `./eqproxy-net/src/balancer.rs`, `report_ok` likewise).
+- `HealthCheck::tcp` at `./eqproxy-net/src/health.rs:86-96` is the constructor the tests call.
+
+## What the change affects in the tests themselves
+
+The tests module `./eqproxy-net/src/health.rs::tests` starts at line 343 and includes a real-socket test, `http_check_over_real_sockets_follows_expectations` (around line 400-662), which uses `tokio::net::TcpListener` and an `AtomicBool` to flip 503 → 200. Tests of that shape are the ones where 200 ms → 1 s matters: any wait-for-down assertion bounded by sleep would need to grow, because a stuck/failing probe now consumes up to 1 s per attempt. Tests that only exercise pure matching (`expectations_match_status_and_raw_body`, same module) never touch the timeout and are unaffected.
+
+## The CI lint is the one real dependents chain
+
+`.github/scripts/check-short-health-probes.py` scrapes *source text* rather than calling anything, so it does not appear as a graph edge — it is the piece most likely to react:
+
+- `rust_probes` / `toml_probes` (the latter at `./.github/scripts/check-short-health-probes.py:232-258`) collect `(path, line, fn, timeout_ms)` for `HealthCheck::tcp(..)` calls and for `timeout = ".."` under a `.health_check` table.
+- `timeout_ms` at `./.github/scripts/check-short-health-probes.py:188-197` normalises units, so `"1s"` → 1000.
+- `self_test` at `./.github/scripts/check-short-health-probes.py:352-476` documents the intended policy: `HealthCheck::tcp(Duration::from_millis(100), Duration::from_secs(1))` is the "healthy"/`good` case that must pass *with no exemption* (failure message: `"a 1 s probe was rejected"`), while `Duration::from_millis(80)` is the "flaky"/`short` case that needs an explicit `{"tests.rs::flaky": "deliberate"}` exemption.
+
+So 1 s moves the probe from the flagged-short side to the accepted side — the lint gets *quieter*, not louder. Two caveats the same script spells out: a call split across lines is still detected (`split` example), and a call whose arguments are constants (`HealthCheck::tcp(PROBE_INTERVAL, PROBE_TIMEOUT)`) is treated as "unproven" — so if you refactor the 1 s into a shared constant instead of a literal, the lint can no longer verify it.
+
+## Consistency checks that pass
+
+- `default_health_timeout()` is already 1 s: `./eqproxy-config/src/schema.rs:91-93`, applied to `HealthCheckConfig.timeout` at `./eqproxy-config/src/schema.rs:354-391`. A 1 s test timeout matches the production default.
+- `health_check_values_must_be_positive` (`./eqproxy-config/src/validate.rs:2500-2518`) only rejects non-positive values, which 1 s is not.
+
+## Transitive dependents of `HealthCheck` (type-level, not value-level)
+
+These import/use the type but do not depend on the test's timeout literal, so they are unaffected:
+- `./eqproxy-net/src/lib.rs:46` (`pub use health::HealthCheck`), `./eqproxy-net/src/proxy.rs:42`
+- `./eqproxy-cli/src/main.rs:32`
+- `./eqproxy-net/tests/e2e_balancer.rs:26`, `./eqproxy-net/tests/e2e_phase2b.rs:15`, `./eqproxy-net/tests/e2e_resilience.rs:1099`, `:1179`, `:1308`
+
+## Gaps
+
+- I could not locate a `200 ms` health-check literal in `./eqproxy-net/src/health.rs` from the tool output. The only 200 ms literal returned by search is `connect_timeout_fails_fast_and_counts` at `./eqproxy-net/tests/e2e_tcp.rs:272-311`, where `Duration::from_millis(200)` is the *listener connect* timeout passed to `listener_cfg`, not a health probe — do not confuse the two when editing. The graph stores snippets, not constant values, so the exact set of affected test functions inside the health tests module could not be enumerated.
+- I did not get to run a cycle check (`detect_circular_dependencies`) before the result budget ran out, so I cannot state whether `health.rs` participates in a call cycle; nothing in the edges I did see (`check_one` → `tcp_ok`/`http_ok`/`report_*`) points back into the tests module.
+
+**Recommendation:** make the edit as a literal `Duration::from_secs(1)` (or keep the existing `from_millis` shape with 1000) rather than hoisting it into a constant, and re-run `.github/scripts/check-short-health-probes.py` — per its `self_test`, 1 s needs no exemption comment, while any remaining sub-second probe in the same file will need one.

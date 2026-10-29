@@ -1,0 +1,6 @@
+suite health probes: 1 found, 1 sub-second or unproven, 1 declared in short-health-probes.txt
+short health-probe contract violated:
+  eqproxy-net/tests/x.rs:2 (probe): timeout is 80 ms, below 1000 ms
+  eqproxy-net/tests/x.rs::other: declared, but no sub-second probe was found there
+Raise the timeout to 1 s (the interval may stay short), or declare the site in .github/scripts/short-health-probes.txt with the reason it cannot mark a healthy origin DOWN.
+synthetic undeclared probe: exit 1 (expected 1)

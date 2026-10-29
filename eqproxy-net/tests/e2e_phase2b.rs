@@ -458,7 +458,9 @@ async fn healthchecks_e2e() {
     )
     .with_health_check(HealthCheck::tcp(
         Duration::from_millis(80),
-        Duration::from_millis(80),
+        // B is a closed port: connect is refused at once. The 1 s timeout
+        // keeps a scheduling hiccup from counting as a failed check.
+        Duration::from_secs(1),
     ));
     let cfg = base_listener("web", Arc::new(backend));
     let (proxy_addr, handle, serve) = start_proxy(cfg, Arc::clone(&metrics)).await;

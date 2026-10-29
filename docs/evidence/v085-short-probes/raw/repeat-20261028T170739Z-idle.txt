@@ -1,0 +1,103 @@
+run: 20261028T170739Z
+mode: idle
+repo: /Volumes/Lexar/Cursor/EQProxy
+git: c39e1bf99b3a5e4eb189d6e5ebe8fc9ca1d00228 (dirty=yes)
+cores: 10
+toolchain: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+
+probe timeouts under test (source of truth):
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_resilience.rs:1128:            HealthCheck::tcp(Duration::from_secs(3600), Duration::from_secs(1)).with_passive(true),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_resilience.rs:1207:            HealthCheck::tcp(Duration::from_millis(80), Duration::from_secs(1)).with_http(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_resilience.rs:1340:            HealthCheck::tcp(Duration::from_millis(100), Duration::from_secs(1)).with_http(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_balancer.rs:443:            HealthCheck::tcp(Duration::from_millis(150), Duration::from_secs(1)).with_http(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs:459:    .with_health_check(HealthCheck::tcp(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-460-        Duration::from_millis(80),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs:644:    .with_health_check(HealthCheck::tcp(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-645-        Duration::from_millis(50),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-646-        Duration::from_millis(50),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs:696:    .with_health_check(HealthCheck::tcp(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-697-        Duration::from_millis(50),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-698-        Duration::from_millis(50),
+
+== rep 1/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:07:41Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.67s
+== rep 1/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:07:43Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.73s
+== rep 1/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:07:49Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.54s
+== rep 1/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:07:51Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.27s
+== rep 2/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:07:53Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.61s
+== rep 2/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:07:54Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.72s
+== rep 2/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:08:00Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.51s
+== rep 2/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:08:02Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 3/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:08:04Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.62s
+== rep 3/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:08:05Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.71s
+== rep 3/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:08:11Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.63s
+== rep 3/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:08:13Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 4/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:08:15Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.62s
+== rep 4/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:08:16Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.71s
+== rep 4/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:08:22Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.49s
+== rep 4/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:08:24Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 5/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:08:26Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.61s
+== rep 5/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:08:27Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.71s
+== rep 5/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:08:33Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.50s
+== rep 5/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:08:35Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 6/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:08:37Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.62s
+== rep 6/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:08:39Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.72s
+== rep 6/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:08:44Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.48s
+== rep 6/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:08:46Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 7/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:08:48Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.61s
+== rep 7/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:08:50Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.72s
+== rep 7/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:08:55Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.66s
+== rep 7/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:08:57Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.23s
+== rep 8/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:08:59Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.61s
+== rep 8/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:09:01Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.72s
+== rep 8/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:09:06Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.51s
+== rep 8/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:09:08Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 9/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:09:10Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.62s
+== rep 9/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:09:12Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.72s
+== rep 9/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:09:17Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.64s
+== rep 9/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:09:20Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.24s
+== rep 10/10 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:09:21Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.61s
+== rep 10/10 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:09:23Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.71s
+== rep 10/10 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:09:28Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.50s
+== rep 10/10 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:09:31Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.23s
+
+summary: 40 runs, 0 failed, mode=idle, log=/Volumes/Lexar/Cursor/EQProxy/docs/evidence/v085-short-probes/raw/repeat-20261028T170739Z-idle.txt

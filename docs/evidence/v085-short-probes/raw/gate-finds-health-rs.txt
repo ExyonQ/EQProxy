@@ -1,0 +1,4 @@
+suite health probes: 18 found, 3 sub-second or unproven, 2 declared in short-health-probes.txt
+short health-probe contract violated:
+  eqproxy-net/src/health.rs:468 (check_task_marks_server_down_and_up_again): timeout is 200 ms, below 1000 ms
+Raise the timeout to 1 s (the interval may stay short), or declare the site in .github/scripts/short-health-probes.txt with the reason it cannot mark a healthy origin DOWN.

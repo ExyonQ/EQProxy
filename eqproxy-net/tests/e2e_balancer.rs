@@ -438,7 +438,9 @@ async fn slow_start_ramps_the_recovered_server_up() {
             1,
         )
         .with_health_check(
-            HealthCheck::tcp(Duration::from_millis(150), Duration::from_millis(100)).with_http(
+            // B answers 500 at once; the 1 s timeout is scheduler headroom,
+            // not a wait for the origin.
+            HealthCheck::tcp(Duration::from_millis(150), Duration::from_secs(1)).with_http(
                 HttpCheck {
                     method: HttpCheckMethod::Get,
                     path: "/healthz".to_owned(),

@@ -1,0 +1,48 @@
+run: 20261028T170940Z
+mode: load
+repo: /Volumes/Lexar/Cursor/EQProxy
+git: c39e1bf99b3a5e4eb189d6e5ebe8fc9ca1d00228 (dirty=yes)
+cores: 10
+toolchain: rustc 1.99.1 (58cf8f9c3 2026-10-13)
+
+probe timeouts under test (source of truth):
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_resilience.rs:1128:            HealthCheck::tcp(Duration::from_secs(3600), Duration::from_secs(1)).with_passive(true),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_resilience.rs:1207:            HealthCheck::tcp(Duration::from_millis(80), Duration::from_secs(1)).with_http(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_resilience.rs:1340:            HealthCheck::tcp(Duration::from_millis(100), Duration::from_secs(1)).with_http(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_balancer.rs:443:            HealthCheck::tcp(Duration::from_millis(150), Duration::from_secs(1)).with_http(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs:459:    .with_health_check(HealthCheck::tcp(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-460-        Duration::from_millis(80),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs:644:    .with_health_check(HealthCheck::tcp(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-645-        Duration::from_millis(50),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-646-        Duration::from_millis(50),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs:696:    .with_health_check(HealthCheck::tcp(
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-697-        Duration::from_millis(50),
+/Volumes/Lexar/Cursor/EQProxy/eqproxy-net/tests/e2e_phase2b.rs-698-        Duration::from_millis(50),
+
+load: 10 `yes` processes (pids 90679 90680 90681 90682 90683 90684 90685 90686 90687 90688)
+== rep 1/3 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:09:43Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.75s
+== rep 1/3 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:09:44Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.78s
+== rep 1/3 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:09:50Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.98s
+== rep 1/3 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:09:53Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.60s
+== rep 2/3 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:09:55Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.70s
+== rep 2/3 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:09:57Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.76s
+== rep 2/3 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:10:03Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.94s
+== rep 2/3 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:10:06Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.55s
+== rep 3/3 e2e_resilience :: http_expect_check_marks_5xx_server_down (exit 0, 2026-10-28T17:10:07Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.65s
+== rep 3/3 e2e_resilience :: http_check_interops_with_keep_alive_origins (exit 0, 2026-10-28T17:10:09Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.77s
+== rep 3/3 e2e_balancer :: slow_start_ramps_the_recovered_server_up (exit 0, 2026-10-28T17:10:16Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 4.93s
+== rep 3/3 e2e_phase2b :: healthchecks_e2e (exit 0, 2026-10-28T17:10:18Z)
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 1.35s
+
+summary: 12 runs, 0 failed, mode=load, log=/Volumes/Lexar/Cursor/EQProxy/docs/evidence/v085-short-probes/raw/repeat-20261028T170940Z-load.txt

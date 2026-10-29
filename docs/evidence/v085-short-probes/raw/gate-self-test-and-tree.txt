@@ -1,0 +1,4 @@
+self-test ok: short, multi-line, non-literal, TOML, stale, duplicate and malformed input all rejected
+suite health probes: 18 found, 2 sub-second or unproven, 2 declared in short-health-probes.txt
+ok: every suite health probe has 1 s of timeout or a declared reason
+self-test and working tree: exit 0 (expected 0)
