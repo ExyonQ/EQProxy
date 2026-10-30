@@ -121,7 +121,11 @@ cargo test -p eqproxy-net --release --test e2e_cache   → 13 passed, 0 failed
 python3 .github/scripts/check-evidence-test-citations.py → exit 0, `ok: every cited test-shaped identifier exists`
 ```
 
-CI del commit publicado TBD (se rellena tras el push).
+CI del commit publicado `89ab013`
+([run 41091641217](https://github.com/ExyonQ/EQProxy/actions/runs/41091641217)):
+**verde, cinco jobs**: `Linux x86_64 (tier-1)` (fmt, Clippy y suite
+completa), `Suite as root (uid-gated skips declared)`, los dos `Admin
+socket ACL E2E` (nativo amd64 y arm64) y `Evidence test citations`.
 
 ## 5. Límites de la evidencia
 
