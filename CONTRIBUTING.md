@@ -112,28 +112,16 @@ said.
   experimental until their evidence says otherwise; do not present them as
   production-verified beyond what `docs/evidence/` documents.
 
-## Local-only paths (do not commit)
+## What never enters a commit
 
-Some material is maintainer-local and never published: internal roadmap and
-server notes, the release and benchmark harnesses, local analysis output and
-the agent instructions. It lives in the working tree but not in the
-repository — the maintainer's `.git/info/exclude` keeps it out of every
-commit, release, image and remote. Specific paths that must never enter a
-commit: `ROADMAP EQPROXY/`, `SERVIDORES.md`, `.dockerignore`, `scripts/`,
-`report/`, `AGENTS.md` and the local wizard scripts.
+Credentials, private notes and generated artifacts stay out of the diff.
 
-Before pushing, both checks must print nothing:
+Before pushing, this check must print nothing:
 
 ```bash
 # No AI/bot co-authorship trailers: the owner commits as a human author.
 git log origin/main..HEAD --format=%b | grep -iE '^co-authored-by:'
-
-# No added or modified local-only path (a deletion is how one leaves the tree).
-git log origin/main..HEAD --diff-filter=AM --name-only \
-  | grep -E '^(ROADMAP EQPROXY/|SERVIDORES\.md$|\.dockerignore$|scripts/|report/|AGENTS\.md$|USER_PAIN_POINTS\.md$|PARITY_MATRIX\.md$|\.gitignore$|\.cursor/|wizard-[^/]*\.sh$)'
 ```
-
-Also keep credentials, private notes and generated artifacts out of the diff.
 
 ## Commit style
 
@@ -182,9 +170,8 @@ assistant or bot as co-author is refused.
   `--nocapture`, or the marker never reaches the log.
 - `docs/` publishes documentation (`.md`) and the recorded data only, never
   code. The harnesses that produced the measurements live outside the
-  repository in the maintainer's tree (`scripts/evidence/<campaign>/`), and
-  the evidence names them by that path so a reader knows which program
-  produced each number and can ask for it.
+  repository, in the maintainer's tree, and the evidence names them so a
+  reader knows which program produced each number and can ask for it.
 
 ## Benchmarks
 
