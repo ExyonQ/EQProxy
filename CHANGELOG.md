@@ -7,6 +7,22 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
 ### Added
 
+- **Hot TLS secrets both directions and the multi-instance drift runbook
+  (B-E9/B-H10 fin, D10 detection; ADR-0035).** No SDS client: files plus
+  the existing reload action (`SIGHUP` / `POST /api/v1/certificates/reload`)
+  cover listener cert/key/SNI and backend `ca_file`/`verify`/`server_name`
+  through the same single writer and the same dataplane swap, failing closed
+  on both sides. Cipher suites and OCSP stapling are explicitly out
+  (rustls+AWS-LC negotiates modern suites only; `tls_fingerprint` in status
+  is the monitoring hook). Drift has no control plane: compare topology +
+  `tls_fingerprint` across instances — the revision orders generations on
+  one instance and never identifies content across them — and repair by
+  re-applying the shared file (`SIGHUP` drops runtime edits). Verified with
+  a backend-trust rotation E2E (three phases on the same socket) and a
+  13-check drift journey against the release binary (two instances, one
+  file; divergent `PUT`; `SIGHUP` repair with `v3` vs `v1` left standing as
+  the documented rule) ([evidence](docs/evidence/v085-hot-secrets-drift.md)).
+
 - **Message limits and per-stream buffers, per listener (B-N19/B-I17/B-E19,
   CE3).** `[listener.<name>.limits]` bounds the request and response head
   (`max_head_bytes`, `max_headers`), the request body (`max_body_bytes`, 413)

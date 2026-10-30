@@ -1066,6 +1066,169 @@ async fn hot_reload_swaps_tls_material_on_the_kept_socket() {
     stop_proxy(handle, serve).await;
 }
 
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn backend_tls_trust_rotation_applies_on_reload_without_restart() {
+    // SDS-equivalent for the upstream direction (B-E9/B-H10): the backend
+    // trust bundle is file material re-read on every reload, so rotating
+    // the CA the proxy trusts needs no restart and no new socket. The
+    // rotation fails closed: an untrusted backend answers no bytes.
+    async fn start_tls_backend(cert: &'static [u8], key: &'static [u8]) -> SocketAddr {
+        let server =
+            tls::server_config(cert, key, None, &[], TlsVersion::V1_2).expect("backend server tls");
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind tls backend");
+        let addr = listener.local_addr().expect("addr tls backend");
+        tokio::spawn(async move {
+            while let Ok((socket, _)) = listener.accept().await {
+                let server = server.clone();
+                tokio::spawn(async move {
+                    let Ok(stream) = server.acceptor.accept(socket).await else {
+                        return;
+                    };
+                    let (mut read, mut write) = tokio::io::split(stream);
+                    let mut buf = vec![0u8; 4096];
+                    loop {
+                        match read.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                if write.write_all(&buf[..n]).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    }
+
+    async fn tcp_roundtrip(proxy: SocketAddr, payload: &[u8]) {
+        let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+        client.write_all(payload).await.expect("write");
+        let mut received = vec![0u8; payload.len()];
+        tokio::time::timeout(WAIT, client.read_exact(&mut received))
+            .await
+            .expect("echo in time")
+            .expect("full echo");
+        assert_eq!(received, payload, "the backend echo must be intact");
+    }
+
+    let backend_addr = start_tls_backend(MTLS_SERVER, MTLS_SERVER_KEY).await;
+    let backend_with_trust = |trust: Option<&[u8]>| {
+        let client_tls =
+            tls::client_config(trust, true, None, &[], TlsVersion::V1_2).expect("backend tls");
+        Arc::new(
+            ResolvedBackend::new(
+                "api",
+                vec![ResolvedServer {
+                    addr: backend_addr.into(),
+                    weight: 1,
+                    backup: false,
+                    priority: 0,
+                }],
+                3,
+                2,
+            )
+            .with_tls(client_tls)
+            .with_retries(RetryPolicy {
+                max: 0,
+                non_idempotent: false,
+            }),
+        )
+    };
+
+    let metrics = Arc::new(Metrics::default());
+    let bound = bind(
+        vec![tcp_listener("secure", backend_with_trust(Some(MTLS_CA)))],
+        Arc::clone(&metrics),
+    )
+    .await
+    .expect("bind");
+    let proxy_addr = bound.local_addrs()[0].1;
+    let (handle, signal) = shutdown::channel();
+    let (reload_tx, reload_rx) = tokio::sync::mpsc::channel(4);
+    let serve = tokio::spawn(async move {
+        bound
+            .serve_with_reloads(signal, WAIT, reload_rx)
+            .await
+            .expect("serve");
+    });
+
+    // Phase 1: the configured CA signs the backend, so traffic flows.
+    tcp_roundtrip(proxy_addr, b"phase-one").await;
+
+    // Phase 2: rotate the trust to the Mozilla roots only. The private-CA
+    // backend is no longer trusted: the tunnel must die closed (EOF/RST,
+    // never proxied bytes) on the SAME proxy socket, and the refused
+    // handshake is counted. Retries are off, so one exchange is exactly
+    // one failure.
+    reload_tx
+        .send(SwapRequest::plain(vec![tcp_listener(
+            "secure",
+            backend_with_trust(None),
+        )]))
+        .await
+        .expect("send reload");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while metrics.snapshot().config_reloads == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the trust rotation must be applied"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut client = TcpStream::connect(proxy_addr).await.expect("connect proxy");
+    client.write_all(b"ping").await.expect("write");
+    let mut buf = [0u8; 16];
+    match tokio::time::timeout(WAIT, client.read(&mut buf)).await {
+        Ok(Ok(0)) => {}
+        Ok(Err(err)) if err.kind() == std::io::ErrorKind::ConnectionReset => {}
+        other => panic!("the tunnel must close without data when backend trust fails: {other:?}"),
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let snap = metrics.snapshot();
+    assert_eq!(
+        snap.config_reloads, 1,
+        "exactly one swap, no restart: {snap:?}"
+    );
+    assert_eq!(
+        snap.tls_handshake_failures, 1,
+        "the refused backend handshake is counted: {snap:?}"
+    );
+
+    // Phase 3: rotate the trust back. Traffic flows again on the same socket.
+    reload_tx
+        .send(SwapRequest::plain(vec![tcp_listener(
+            "secure",
+            backend_with_trust(Some(MTLS_CA)),
+        )]))
+        .await
+        .expect("send reload");
+    let deadline = tokio::time::Instant::now() + WAIT;
+    while metrics.snapshot().config_reloads < 2 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the trust restoration must be applied"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tcp_roundtrip(proxy_addr, b"phase-three").await;
+    let snap = metrics.snapshot();
+    assert_eq!(
+        snap.tls_handshake_failures, 1,
+        "no new backend failure after restoring trust: {snap:?}"
+    );
+
+    drop(reload_tx);
+    stop_proxy(handle, serve).await;
+}
+
 // -------------------------------------------- B-N10: passive detection ------
 
 #[cfg_attr(
