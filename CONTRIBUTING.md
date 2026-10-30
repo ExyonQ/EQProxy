@@ -125,12 +125,12 @@ commit: `ROADMAP EQPROXY/`, `SERVIDORES.md`, `.dockerignore`, `scripts/`,
 Before pushing, both checks must print nothing:
 
 ```bash
-# No co-authorship trailers: commits are authored by Doken-Tokuyama only.
+# No AI/bot co-authorship trailers: the owner commits as a human author.
 git log origin/main..HEAD --format=%b | grep -iE '^co-authored-by:'
 
 # No added or modified local-only path (a deletion is how one leaves the tree).
 git log origin/main..HEAD --diff-filter=AM --name-only \
-  | grep -E '^(ROADMAP EQPROXY/|SERVIDORES\.md$|\.dockerignore$|scripts/)'
+  | grep -E '^(ROADMAP EQPROXY/|SERVIDORES\.md$|\.dockerignore$|scripts/|report/|AGENTS\.md$|USER_PAIN_POINTS\.md$|PARITY_MATRIX\.md$|\.gitignore$|\.cursor/|wizard-[^/]*\.sh$)'
 ```
 
 Also keep credentials, private notes and generated artifacts out of the diff.
@@ -147,8 +147,10 @@ docs: record the backend HTTP/2 session lifecycle slice
 ```
 
 Use `feat`, `fix`, `docs`, `ci`, `test` or `refactor` as the prefix and the
-crate or area in the scope. Do not add AI co-authorship footers; commits are
-authored by the contributor alone.
+crate or area in the scope. Do not add AI co-authorship footers or
+"Generated with …" attribution: the commit is signed by its human author. The
+owner's human identities (`Doken-Tokuyama`, `ExyonQ`) are both valid; only an
+assistant or bot as co-author is refused.
 
 ## Documentation and changelog
 
