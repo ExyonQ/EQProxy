@@ -53,6 +53,10 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   the 50 ms default deadline, 22 of 825 294 requests were answered 503 by the
   fail-closed policy under a saturated host (0.0027 %); with `timeout =
   "500ms"` the same run answered 0/87 493 ([evidence](docs/evidence/v085-wasm-plugins.md)).
+  This closes **Q2**: the flexibility-vs.-CVE dilemma (CVE-2021-25742, the
+  ingress-nginx 1.12.0 incident) is resolved by deny-by-default extensions —
+  no WASI/network/filesystem capability exists to grant, framing headers are
+  reserved, and every bound is enforced with a test.
 - **Per-listener HTTP response cache (B-N7/H1, ADR-0034).**
   `[listener.<name>.cache]` (`mode = "http"` only, absent = disabled) stores
   `GET` responses (200/301/308/404/410) with a TTL (`default_ttl`, 1 s..=1 day;
