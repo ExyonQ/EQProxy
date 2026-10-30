@@ -53,6 +53,29 @@ Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
   the 50 ms default deadline, 22 of 825 294 requests were answered 503 by the
   fail-closed policy under a saturated host (0.0027 %); with `timeout =
   "500ms"` the same run answered 0/87 493 ([evidence](docs/evidence/v085-wasm-plugins.md)).
+- **Per-listener HTTP response cache (B-N7/H1, ADR-0034).**
+  `[listener.<name>.cache]` (`mode = "http"` only, absent = disabled) stores
+  `GET` responses (200/301/308/404/410) with a TTL (`default_ttl`, 1 s..=1 day;
+  `s-maxage`/`max-age` shorten, never extend), a RAM budget (`max_memory_bytes`,
+  LRU eviction) and a per-entry cap (`max_entry_bytes`; larger bodies stream
+  through uncached, never truncated), plus optional write-through disk
+  persistence (`disk_path`, relative to the config file; expired or corrupt
+  files are skipped and counted). The H1 honesty contract is structural: requests
+  with `Cookie`/`Authorization`/`Range`/`no-store`, responses with `Set-Cookie`
+  (plus 206/302), `Vary: *` or `Vary` over session headers, and backends with
+  cookie affinity never touch the store; the key is method + scheme + host +
+  target + `Vary` values. Stale entries revalidate with `If-None-Match` /
+  `If-Modified-Since` and an origin `304` refreshes headers without touching the
+  body; one origin fetch per key at a time (cache-lock). Every served response
+  carries `X-Cache: HIT | MISS | REVALIDATED`, `GET /api/v1/cache` lists entries
+  with age/TTL/hits/size, and label-free counters track the whole lifecycle.
+  Verified with 13 socket E2E (sessions, `Set-Cookie`, `Vary`, ETag/304, TTL,
+  lock, HEAD, bypasses, oversized, affinity, disk restart) plus store unit tests
+  and the config gate; the revalidation journey caught a real bug (the
+  conditional glued onto the last forwarded header, so origins never saw the
+  validator). Deliberately out of v1: `stale-while-revalidate`, `stale-if-error`,
+  `only-if-cached`, client `If-Modified-Since`
+  ([evidence](docs/evidence/v085-http-cache.md)).
 
 ### Fixed
 

@@ -1,0 +1,25 @@
+**`Cache::lookup` has no production callers outside `eqproxy-net/src/http1.rs`: removing or changing it breaks the two request-planning functions `plan_cache` and `resolve_cache_wait` there (plus three unit tests in `cache.rs`). Nothing else in the graph reaches it, and it takes part in no call cycle.**
+
+The target is `impl Cache::lookup` at `eqproxy-net/src/cache.rs:333-373` (node `nodes:\`5fef3d5b-...\``), signature `(&self, key: &CacheKey, req_headers: &[(String, String)], force_revalidate: bool) -> Lookup`.
+
+**Direct dependents (break on any signature change)**
+- `plan_cache`, `eqproxy-net/src/http1.rs:1790-1847` — calls `cache.lookup(&fetch.key, &fetch.headers, fetch.force_revalidate)` and matches four `Lookup` arms (`Hit`, `Fetch`, `Revalidate`, plus a truncated tail that continues past line 1847).
+- `resolve_cache_wait`, `eqproxy-net/src/http1.rs:1851-1887` — calls `cache.lookup(...)` after `cache.wait(shared).await` and matches all four arms, including `Lookup::Wait(_) => CacheAction::Direct(fetch)`.
+- Tests in `eqproxy-net/src/cache.rs`: `miss_then_hit` (1456-1469), `failure_drops_the_stale_entry` (1472-1491), `disk_round_trip_restores_unexpired_entries` (1548-1581). These assert the exact return variants (`Lookup::Fetch`, `Lookup::Wait`, `Lookup::Hit`, `Lookup::Revalidate`), so behavioral changes to in-flight registration break them as surely as a signature change.
+
+**Transitive dependents**
+Both `plan_cache` and `resolve_cache_wait` are called by `serve_http` (`eqproxy-net/src/http1.rs`, node `nodes:\`56f8d77a-...\``), which is the only path above them in the graph. Beyond that, `Lookup` is publicly re-exported at `eqproxy-net/src/lib.rs:47-50` (`pub use cache::{... Lookup ...}`), so the variant set is part of the crate's public API — no in-repo consumer of that re-export was found, but an out-of-repo consumer could break if you change the enum.
+
+**Contract details that matter for a change**
+`Lookup` is defined at `cache.rs:207-218` with exactly four variants (`Hit(Arc<StoredEntry>)`, `Fetch`, `Revalidate(Arc<StoredEntry>)`, `Wait(Arc<SharedFetch>)`). The critical side effect is that `lookup` *registers* in-flight fetches (`inner.inflight.insert(key.clone(), Arc::clone(&shared))` before returning `Fetch` or `Revalidate`) and hands the `Arc<SharedFetch>` to `Wait` callers, who then block in `cache.wait` (`cache.rs:378`) — so changing the return shape without preserving that registration silently breaks the single-flight/dedupe behavior that `resolve_cache_wait` depends on.
+
+**Dependencies of `lookup` (what it needs to work)**
+`calculate_coupling_metrics` reports Ce=9, Ca=2, instability 0.818. The meaningful callees are `lock` (`cache.rs:553`), `wait` (`cache.rs:378`), `fresh` (`cache.rs:164`), `note_use` (`cache.rs:187`), `insert` (`cache.rs:559`) and `vary_values` (`cache.rs:923`). Three of the nine reported edges look like name-collision noise, not real dependencies: `lookup` at `eqproxy-net/src/backend_h2.rs:387`, `find` at `tests/e2e_http3.rs:146`, and `iter` at `eqproxy-core/src/maps.rs:394` — the `backend_h2.rs` one is a *different* `lookup` function and should not be confused with the target.
+
+**Cycles**
+A `Calls`-cycle scan over the codebase returned only unrelated pairs (`balancer.rs:350/357`, `tests/migration.rs:220/246`) and was truncated by the result budget; it surfaced nothing involving `lookup`. From the code itself there is no loop: `lookup` calls `wait`, and `wait` is never seen calling `lookup`. `References`-based reverse lookup at depth 2 returned empty. I found no cycle the target participates in.
+
+**Gaps**
+The graph's reverse-dependency query returned only the two `cache.rs` test callers as direct dependents, omitting `plan_cache` and `resolve_cache_wait` even though both visibly call `cache.lookup(...)` at `http1.rs:1826` and `http1.rs:1858` — so the call edges for this symbol are under-indexed, and I listed those callers from the source snippets rather than from the edge data. I also could not confirm whether an HTTP/3 request path (e.g. `http3.rs`) performs its own lookup; the last search for that was cut off by the budget, and the only HTTP/3 cache evidence found was a test helper in `tests/e2e_http3.rs`.
+
+**Recommendation:** treat this as a small, cheap-to-change function — only two production call sites, both in one file. If you must change the return type or drop a `Lookup` variant, update the exhaustive matches at `http1.rs:1826-1847` and `http1.rs:1858-1884` in the same commit and keep the `inflight` registration intact, since `resolve_cache_wait` relies on it.

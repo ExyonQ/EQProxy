@@ -125,6 +125,19 @@ max_stream_duration = "0s"
 #max_header_ops = 16        # 1..=64 mutations per request
 #on_error = "closed"        # "closed" (503) | "open" (forward unchanged)
 
+# HTTP response cache (B-N7/H1, ADR-0034; mode = "http" only). Absent =
+# disabled. Only GET responses (200/301/308/404/410) without Set-Cookie are
+# stored; Cookie/Authorization/Range/no-store, 206/302, Vary: * (or over
+# session headers) and cookie-affinity backends bypass. Stale entries
+# revalidate with If-None-Match/If-Modified-Since; an origin 304 refreshes
+# headers without re-downloading the body. Served responses carry
+# X-Cache: HIT | MISS | REVALIDATED; inspect with GET /api/v1/cache.
+#[listener.web.cache]
+#default_ttl = "60s"      # 1s..=24h; s-maxage/max-age shorten, never extend
+#max_memory_bytes = 67108864  # 1 MiB..=1 GiB; LRU eviction past it
+#max_entry_bytes = 1048576    # 64 KiB..=64 MiB and <= memory; larger streams through
+#disk_path = "cache/web"    # relative to this file; absent = memory only
+
 # Response compression (v0.7, mode = "http" only): gzip and/or Brotli
 # negotiated from the request's Accept-Encoding. The body is compressed while
 # it is relayed, so the response is sent chunked (no Content-Length) and

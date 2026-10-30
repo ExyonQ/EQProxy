@@ -151,6 +151,23 @@ pub struct Metrics {
     /// Plugin invocations that failed at runtime (trap, fuel, deadline,
     /// memory, host validation); `on_error` decided what the client saw.
     pub plugin_errors: AtomicU64,
+    /// Cacheable requests served from a stored entry (B-N7/H1).
+    pub cache_hits: AtomicU64,
+    /// Origin fetches for cacheable requests (miss or expired entry).
+    pub cache_misses: AtomicU64,
+    /// Requests that bypassed the cache (session material, affinity,
+    /// unstorable method or framing).
+    pub cache_bypasses: AtomicU64,
+    /// Stale entries refreshed by a `304` revalidation (B-N7/H1).
+    pub cache_revalidations: AtomicU64,
+    /// Entries written to the store (memory, plus disk when configured).
+    pub cache_stores: AtomicU64,
+    /// Stored entries evicted (expiry or memory pressure).
+    pub cache_evictions: AtomicU64,
+    /// Entries restored from disk at startup (B-N7/H1 persistence).
+    pub cache_disk_loads: AtomicU64,
+    /// Disk files skipped at startup (expired, corrupt or oversized).
+    pub cache_disk_skipped: AtomicU64,
     /// Opt-in per-server/per-route series (CE4): disabled and empty until the
     /// configuration asks for it.
     pub detail: DetailMetrics,
@@ -539,6 +556,14 @@ pub struct MetricsSnapshot {
     pub plugin_requests: u64,
     pub plugin_denied: u64,
     pub plugin_errors: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_bypasses: u64,
+    pub cache_revalidations: u64,
+    pub cache_stores: u64,
+    pub cache_evictions: u64,
+    pub cache_disk_loads: u64,
+    pub cache_disk_skipped: u64,
 }
 
 impl MetricsSnapshot {
@@ -619,6 +644,14 @@ impl MetricsSnapshot {
             ("plugin_requests", self.plugin_requests),
             ("plugin_denied", self.plugin_denied),
             ("plugin_errors", self.plugin_errors),
+            ("cache_hits", self.cache_hits),
+            ("cache_misses", self.cache_misses),
+            ("cache_bypasses", self.cache_bypasses),
+            ("cache_revalidations", self.cache_revalidations),
+            ("cache_stores", self.cache_stores),
+            ("cache_evictions", self.cache_evictions),
+            ("cache_disk_loads", self.cache_disk_loads),
+            ("cache_disk_skipped", self.cache_disk_skipped),
         ];
         let mut out = String::with_capacity(4096);
         for (name, value) in counters {
@@ -718,6 +751,14 @@ impl Metrics {
             plugin_requests: self.plugin_requests.load(Ordering::Relaxed),
             plugin_denied: self.plugin_denied.load(Ordering::Relaxed),
             plugin_errors: self.plugin_errors.load(Ordering::Relaxed),
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            cache_bypasses: self.cache_bypasses.load(Ordering::Relaxed),
+            cache_revalidations: self.cache_revalidations.load(Ordering::Relaxed),
+            cache_stores: self.cache_stores.load(Ordering::Relaxed),
+            cache_evictions: self.cache_evictions.load(Ordering::Relaxed),
+            cache_disk_loads: self.cache_disk_loads.load(Ordering::Relaxed),
+            cache_disk_skipped: self.cache_disk_skipped.load(Ordering::Relaxed),
         }
     }
 
@@ -843,6 +884,18 @@ impl fmt::Display for MetricsSnapshot {
             self.compression_brotli_responses,
             self.compression_bytes_in,
             self.compression_bytes_out
+        )?;
+        write!(
+            f,
+            " cache[hits={} misses={} bypasses={} revalidations={} stores={} evictions={} disk_loads={} disk_skipped={}]",
+            self.cache_hits,
+            self.cache_misses,
+            self.cache_bypasses,
+            self.cache_revalidations,
+            self.cache_stores,
+            self.cache_evictions,
+            self.cache_disk_loads,
+            self.cache_disk_skipped
         )
     }
 }

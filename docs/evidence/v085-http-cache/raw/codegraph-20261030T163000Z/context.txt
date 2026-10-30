@@ -1,0 +1,18 @@
+**Where it's set:** the `x-cache` marker for cache hits is written in `serve_cached` in `eqproxy-net/src/http1.rs` (function starts at line 1970, snippet spans 1970–2110). It appends the header literally at the end of the head it is building:
+
+- `b"\r\nx-cache: REVALIDATED"` when `revalidated` is true
+- `b"\r\nx-cache: HIT"` otherwise
+- immediately followed by `format!("\r\nage: {}", entry.age_secs())` when the response is not a client `304`.
+
+The header name appears lowercase (`x-cache`) because it is written straight into the HTTP/1.1 head bytes rather than through a typed header map; readers in `eqproxy-net/tests/e2e_cache.rs` look it up case-insensitively as `"x-cache"` (e.g. lines 408, 414, 455, 467, 482, 526, 544, 589, 611, 622, 657, 659, 678, 757).
+
+**What feeds that function.** `serve_cached` takes a `cache::StoredEntry` and builds the base head two ways: a hand-assembled `304` head from `entry.headers`, or `cache::render_head(entry)` (`eqproxy-net/src/cache.rs`, node `09b23fb3-…`). On top of that it appends rule headers via `render_header_lines` / `cors_response_lines` and `append_response_headers` *before* the `x-cache` line, so the marker is always the tail of the head. Its only incoming edge is `serve_http` (`eqproxy-net/src/http1.rs`, node `56f8d77a-…`).
+
+**Neighbouring code a change must account for** (all in `eqproxy-net/src/http1.rs`):
+- `serve_http` (node `56f8d77a-…`), the single caller.
+- `plan_cache` (line 1790) and `resolve_cache_wait` (line 1851), which produce the `CacheAction` (`Serve` / `Origin` / `Direct` / `Off`, enum node `c0abe286-…`) that decides whether the hit path is reached at all.
+- `cache::lookup` (`eqproxy-net/src/cache.rs:333`) and `cache::Cache::wait` / `lookup` internals that classify `Hit` vs `Fetch` vs `Revalidate` vs `Wait`.
+
+**What I could not establish:** the `x-cache: MISS` writer. Tests require `MISS` on the first origin-served response (`eqproxy-net/tests/e2e_cache.rs:408`, `467`, `657`) and *no* header at all on bypass (`:611`, `:678`), but the search never returned the origin-path function in `http1.rs` that emits it — so if you change how the marker is emitted, grep the origin/`CacheAction::Origin` branch of `http1.rs` for the `MISS` case before editing `serve_cached`. I also found no evidence about whether the h2/http3 listeners write their own `x-cache` header; treat that as unverified.
+
+**Recommendation:** since the hit marker is a raw byte literal inside `serve_cached` (unlike `age`, which is formatted adjacent to it), any change to spelling, casing, or the `304` variant has to be mirrored in the `MISS`/`REVALIDATED` expectations across `eqproxy-net/tests/e2e_cache.rs` and in whichever origin-path function emits `MISS`.

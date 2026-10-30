@@ -748,6 +748,78 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
             }
         }
 
+        // HTTP response cache (B-N7/H1, ADR-0034): the file is loaded at
+        // resolution, but the bounds belong to the gate so a typo is
+        // reported with field, line and example instead of a silent
+        // misbehaviour (a zero TTL would revalidate every request; an
+        // entry larger than memory would never fit).
+        if let Some(cache) = &listener.cache {
+            if listener.mode == ListenerMode::Tcp {
+                err(
+                    field("cache"),
+                    "a response cache needs HTTP semantics and requires mode = \"http\"".to_owned(),
+                    "mode = \"http\"".to_owned(),
+                    &section,
+                );
+            }
+            if cache.default_ttl < Duration::from_secs(1)
+                || cache.default_ttl > Duration::from_secs(86_400)
+            {
+                err(
+                    field("cache.default_ttl"),
+                    format!(
+                        "{:?} is outside 1s..=1day (origins can only shorten it)",
+                        cache.default_ttl
+                    ),
+                    "default_ttl = \"60s\"".to_owned(),
+                    &section,
+                );
+            }
+            if !(1_048_576..=1_073_741_824).contains(&cache.max_memory_bytes) {
+                err(
+                    field("cache.max_memory_bytes"),
+                    format!(
+                        "{} is outside 1048576..=1073741824 bytes",
+                        cache.max_memory_bytes
+                    ),
+                    "max_memory_bytes = 67108864".to_owned(),
+                    &section,
+                );
+            }
+            if !(65_536..=67_108_864).contains(&cache.max_entry_bytes) {
+                err(
+                    field("cache.max_entry_bytes"),
+                    format!(
+                        "{} is outside 65536..=67108864 bytes",
+                        cache.max_entry_bytes
+                    ),
+                    "max_entry_bytes = 1048576".to_owned(),
+                    &section,
+                );
+            }
+            if cache.max_entry_bytes > cache.max_memory_bytes {
+                err(
+                    field("cache.max_entry_bytes"),
+                    format!(
+                        "{} exceeds max_memory_bytes ({}): no entry would ever fit",
+                        cache.max_entry_bytes, cache.max_memory_bytes
+                    ),
+                    "max_entry_bytes = 1048576 (at most max_memory_bytes)".to_owned(),
+                    &section,
+                );
+            }
+            if let Some(disk) = &cache.disk_path
+                && disk.as_os_str().is_empty()
+            {
+                err(
+                    field("cache.disk_path"),
+                    "disk_path is empty".to_owned(),
+                    "disk_path = \"cache/web\" (omit for memory only)".to_owned(),
+                    &section,
+                );
+            }
+        }
+
         // HTTP/3 (B-H2): QUIC terminates HTTP over TLS 1.3 on the same
         // address, over UDP. There is no connection preamble to carry a
         // PROXY v1 line, and a byte tunnel never parses HTTP.
@@ -2005,6 +2077,7 @@ mod tests {
                     local_response: None,
                     compression: crate::schema::CompressionConfig::default(),
                     plugin: None,
+                    cache: None,
                     rules: Vec::new(),
                 },
             );

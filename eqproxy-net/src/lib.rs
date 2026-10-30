@@ -12,6 +12,7 @@ pub mod admin;
 pub mod auth;
 pub mod backend_h2;
 pub mod balancer;
+pub mod cache;
 pub mod compression;
 pub mod grpc;
 pub mod health;
@@ -42,6 +43,10 @@ pub use admin::{
 pub use auth::{AuthOutcome, DenyResponse, check_basic};
 pub use balancer::{
     ActiveGuard, Balance, Balancer, ResolvedServer, ServerAddr, ServerMode, ServerModes, ServerView,
+};
+pub use cache::{
+    Bypass, Cache, CacheKey, CacheSettings, Decision, FetchOutcome, Lookup, SharedFetch,
+    StoredParts,
 };
 pub use dns::{DnsSettings, Resolving, SystemResolver};
 pub use health::HealthCheck;

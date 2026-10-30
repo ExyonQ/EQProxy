@@ -39,12 +39,14 @@ use tokio::io::{
 use eqproxy_core::Metrics;
 
 use crate::balancer::ServerMode;
+use crate::cache;
 use crate::compression;
 
 use crate::mirror;
 use crate::proxy::{
-    AffinityMode, ForwardedMode, OutboundError, READ_BUF, ResolvedCors, ResolvedHeaders,
-    ResolvedListener, ResolvedRewrite, RetryContext, RouteDecision, checkout_or_connect,
+    AffinityMode, BoxRead, BoxWrite, ForwardedMode, OutboundError, READ_BUF, ResolvedBackend,
+    ResolvedCors, ResolvedHeaders, ResolvedListener, ResolvedRewrite, RetryContext, RouteDecision,
+    checkout_or_connect,
 };
 
 /// Maximum message-head size (final line included) (T03).
@@ -1732,6 +1734,449 @@ fn log_unparsed(
     record.status(status);
 }
 
+/// Response-cache state for one exchange (B-N7/H1, ADR-0034). The lookup
+/// runs after routing and the plugin, before any backend byte: a hit
+/// answers without dialing, a miss or stale entry registers the fetch
+/// under the cache lock, and anything else streams exactly as before.
+enum CacheAction {
+    /// Cache disabled, tunnel/upgrade, or bypassed: the origin path.
+    Off,
+    /// Serve the stored entry without dialing.
+    Serve(Arc<cache::StoredEntry>),
+    /// Fetch from origin, then store (or refresh when `stale` is set).
+    Origin(CacheFetch),
+    /// A lock waiter whose owner is gone or stuck: fetch without
+    /// registering, so waiters never pile up behind a dead fetch.
+    Direct(CacheFetch),
+    /// Another task owns the fetch: resolved (wait, then hit or fetch)
+    /// before the dial.
+    Wait(CacheFetch, Arc<cache::SharedFetch>),
+}
+
+/// What an origin fetch remembers to complete the cache bookkeeping.
+struct CacheFetch {
+    key: cache::CacheKey,
+    /// Forwarded headers (rules, rewrites and plugin mutations applied):
+    /// the backend-visible values the `Vary` key and the conditional
+    /// headers come from.
+    headers: Vec<(String, String)>,
+    /// The client sent `Cache-Control: no-cache`.
+    force_revalidate: bool,
+    /// Stale entry being revalidated (`None` = cold miss).
+    stale: Option<Arc<cache::StoredEntry>>,
+}
+
+/// A storable origin response, fully assembled in memory (B-N7/H1): only
+/// `Content-Length` bodies under the entry bound assemble; chunked and
+/// close-delimited responses stream through uncached, never re-framed.
+struct StorePlan {
+    key: cache::CacheKey,
+    /// A lock waiter's fallback fetch stores without touching the
+    /// in-flight table (the owner already published).
+    direct: bool,
+    vary: Vec<String>,
+    vary_values: Vec<String>,
+    status: u16,
+    reason: String,
+    headers: Vec<(String, String)>,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    ttl: Duration,
+    len: u64,
+}
+
+/// Decides the cache action for one parsed request. Pure except for the
+/// lookup registration and the bypass counter.
+fn plan_cache(
+    cache: &cache::Cache,
+    backend_affinity_cookie: bool,
+    request: &RequestHead,
+    forwarded_head: &[u8],
+    head_limits: HeadLimits,
+    scheme: &str,
+    metrics: &Metrics,
+) -> CacheAction {
+    let bypass = || {
+        metrics.cache_bypasses.fetch_add(1, Ordering::Relaxed);
+        CacheAction::Off
+    };
+    // Tunnels never cache: an `Upgrade` handshake becomes a raw byte
+    // pipe, not a storable exchange.
+    if request.wants_upgrade {
+        return bypass();
+    }
+    // The key uses the forwarded head (rules, rewrites and plugin
+    // mutations applied): two requests that reach the backend differently
+    // never share an entry. A rule-injected session header bypasses here,
+    // exactly like a client-sent one.
+    let forwarded = match parse_request_head(forwarded_head, head_limits) {
+        Ok(forwarded) => forwarded,
+        Err(_) => return bypass(),
+    };
+    let framing_none = matches!(request.framing, BodyFraming::None);
+    let decision = match cache::decide(
+        &request.method,
+        framing_none,
+        &forwarded.headers,
+        backend_affinity_cookie,
+    ) {
+        Ok(decision) => decision,
+        Err(_) => return bypass(),
+    };
+    let fetch = CacheFetch {
+        key: cache::base_key(&request.method, scheme, &forwarded.host, &forwarded.target),
+        headers: forwarded.headers,
+        force_revalidate: decision.force_revalidate,
+        stale: None,
+    };
+    match cache.lookup(&fetch.key, &fetch.headers, fetch.force_revalidate) {
+        cache::Lookup::Hit(entry) => CacheAction::Serve(entry),
+        cache::Lookup::Fetch => {
+            metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            CacheAction::Origin(fetch)
+        }
+        cache::Lookup::Revalidate(stale) => {
+            metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            CacheAction::Origin(CacheFetch {
+                stale: Some(stale),
+                ..fetch
+            })
+        }
+        cache::Lookup::Wait(shared) => CacheAction::Wait(fetch, shared),
+    }
+}
+
+/// Resolves a lock wait before the dial: a published fetch becomes a hit
+/// (or the new owner), a failed or timed-out one a direct fetch.
+async fn resolve_cache_wait(
+    cache: &cache::Cache,
+    fetch: CacheFetch,
+    shared: &cache::SharedFetch,
+    metrics: &Metrics,
+) -> CacheAction {
+    match cache.wait(shared).await {
+        Some(cache::FetchResult::Ready) => {
+            match cache.lookup(&fetch.key, &fetch.headers, fetch.force_revalidate) {
+                cache::Lookup::Hit(entry) => CacheAction::Serve(entry),
+                cache::Lookup::Fetch => {
+                    metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+                    CacheAction::Origin(fetch)
+                }
+                cache::Lookup::Revalidate(stale) => {
+                    metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+                    CacheAction::Origin(CacheFetch {
+                        stale: Some(stale),
+                        ..fetch
+                    })
+                }
+                // Another fetch started while this waiter woke: fetch
+                // alone rather than queue behind it.
+                cache::Lookup::Wait(_) => {
+                    metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+                    CacheAction::Direct(fetch)
+                }
+            }
+        }
+        // Failed, unstorable or stuck fetch: fetch directly (exactly one
+        // extra origin load, never a wrong byte).
+        Some(cache::FetchResult::Gone) | None => {
+            metrics.cache_misses.fetch_add(1, Ordering::Relaxed);
+            CacheAction::Direct(fetch)
+        }
+    }
+}
+
+/// Guard arming the owner's fetch: any error return after the plan
+/// publishes `Gone` (waiters fetch directly) and drops a stale entry,
+/// unless the success path disarmed it first. Spawned, never awaited:
+/// the error path must not wait on disk I/O.
+struct CacheGuard {
+    cache: Option<Arc<cache::Cache>>,
+    key: Option<cache::CacheKey>,
+}
+
+impl CacheGuard {
+    fn armed(cache: &Arc<cache::Cache>, key: &cache::CacheKey) -> Self {
+        Self {
+            cache: Some(Arc::clone(cache)),
+            key: Some(key.clone()),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.key = None;
+        self.cache = None;
+    }
+}
+
+impl Drop for CacheGuard {
+    fn drop(&mut self) {
+        if let (Some(cache), Some(key)) = (self.cache.take(), self.key.take()) {
+            tokio::spawn(async move {
+                cache.complete(key, cache::FetchOutcome::Gone).await;
+            });
+        }
+    }
+}
+
+/// Whether the parsed origin response may assemble into a store entry.
+/// `None` streams through untouched (chunked and close-delimited bodies
+/// are never re-framed; oversized and unstorable responses never store).
+fn store_plan(
+    cache: &cache::Cache,
+    fetch: &CacheFetch,
+    direct: bool,
+    method: &str,
+    framing: BodyFraming,
+    response_head: &[u8],
+) -> Option<StorePlan> {
+    // `HEAD` populates nothing (served from `GET` entries); only
+    // `Content-Length` bodies under the entry bound assemble.
+    if method != "GET" {
+        return None;
+    }
+    let BodyFraming::ContentLength(len) = framing else {
+        return None;
+    };
+    if len > cache.max_entry_bytes() as u64 {
+        return None;
+    }
+    let facts = cache::parse_origin_head(response_head)?;
+    let vary = cache::storable_vary(&facts)?;
+    let ttl = cache::effective_ttl(cache.default_ttl(), &facts.cache_control);
+    if ttl.is_zero() && facts.etag.is_none() && facts.last_modified.is_none() {
+        return None;
+    }
+    Some(StorePlan {
+        key: fetch.key.clone(),
+        direct,
+        vary_values: cache::vary_values(&fetch.headers, &vary),
+        vary,
+        status: facts.status,
+        reason: facts.reason,
+        headers: cache::end_to_end(&facts.headers),
+        etag: facts.etag,
+        last_modified: facts.last_modified,
+        ttl,
+        len,
+    })
+}
+
+/// Serves a stored entry without dialing (B-N7/H1): rule response headers
+/// and CORS re-apply per request, compression re-negotiates from the
+/// client's `Accept-Encoding`, and the answer carries `X-Cache` plus its
+/// age. A matching client `If-None-Match` earns a `304` with no body.
+#[allow(clippy::too_many_arguments)]
+async fn serve_cached<CW: AsyncWrite + Unpin>(
+    client_write: &mut CW,
+    cfg: &ResolvedListener,
+    rule_headers: Option<&ResolvedHeaders>,
+    peer: SocketAddr,
+    host: &str,
+    scheme: &str,
+    request: &RequestHead,
+    entry: &cache::StoredEntry,
+    access: &mut Option<crate::access::AccessRecord>,
+    metrics: &Metrics,
+    revalidated: bool,
+) {
+    let client_304 = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "if-none-match")
+        .is_some_and(|(_, value)| cache::client_fresh(value, entry.etag.as_deref()));
+    let status = if client_304 { 304 } else { entry.status };
+    let mut head = if client_304 {
+        let mut head = format!("HTTP/1.1 304 {}", phrase(304)).into_bytes();
+        for (name, value) in &entry.headers {
+            if name == "content-encoding" || name == "content-range" {
+                continue;
+            }
+            head.extend_from_slice(b"\r\n");
+            head.extend_from_slice(name.as_bytes());
+            head.extend_from_slice(b": ");
+            head.extend_from_slice(value.as_bytes());
+        }
+        head
+    } else {
+        cache::render_head(entry)
+    };
+    let mut extra = rule_headers
+        .map(|actions| render_header_lines(&actions.response, peer, host, scheme))
+        .unwrap_or_default();
+    if let Some(cors) = rule_headers.and_then(|actions| actions.cors.as_ref()) {
+        extra.extend(cors_response_lines(cors, false));
+    }
+    if !extra.is_empty() {
+        head = append_response_headers(&head, &extra);
+    }
+    head.extend_from_slice(if revalidated {
+        b"\r\nx-cache: REVALIDATED"
+    } else {
+        b"\r\nx-cache: HIT"
+    });
+    if !client_304 {
+        head.extend_from_slice(format!("\r\nage: {}", entry.age_secs()).as_bytes());
+    }
+    let accept_encoding = request
+        .headers
+        .iter()
+        .find(|(name, _)| name == "accept-encoding")
+        .map(|(_, value)| value.as_str());
+    let settings = cfg.compression.as_ref();
+    let encoding = if client_304 {
+        None
+    } else {
+        settings.and_then(|settings| {
+            compression::eligible(
+                &request.method,
+                request.version,
+                accept_encoding,
+                &compression::ResponseFacts {
+                    status: entry.status,
+                    no_body: entry.framing_none(),
+                    declared_len: entry.declared_len(),
+                    head: &head,
+                },
+                settings,
+            )
+        })
+    };
+    if let Some(encoding) = encoding {
+        head = compression::rewrite_head(&head, encoding);
+        match encoding {
+            compression::Encoding::Gzip => metrics
+                .compression_gzip_responses
+                .fetch_add(1, Ordering::Relaxed),
+            compression::Encoding::Brotli => metrics
+                .compression_brotli_responses
+                .fetch_add(1, Ordering::Relaxed),
+        };
+    }
+    if let Some(record) = access.as_mut() {
+        record.status(status);
+        let bytes = if client_304 || request.method == "HEAD" {
+            Some(0)
+        } else if encoding.is_some() {
+            None
+        } else {
+            Some(entry.body_len() as u64)
+        };
+        if let Some(bytes) = bytes {
+            record.bytes(bytes);
+        }
+    }
+    metrics
+        .http_requests_proxied
+        .fetch_add(1, Ordering::Relaxed);
+    if write_with_timeout(client_write, &head, cfg.idle_timeout)
+        .await
+        .is_err()
+        || write_with_timeout(client_write, HEAD_END, cfg.idle_timeout)
+            .await
+            .is_err()
+    {
+        return;
+    }
+    if client_304 || request.method == "HEAD" {
+        return;
+    }
+    let body: &[u8] = &entry.body;
+    match encoding {
+        Some(encoding) => {
+            let Some(settings) = settings else { return };
+            let mut reader = body;
+            let _ = copy_compressed_body(
+                &mut reader,
+                client_write,
+                CompressPlan {
+                    framing: BodyFraming::ContentLength(body.len() as u64),
+                    encoding,
+                    settings,
+                    pipe: cfg
+                        .limits
+                        .stream_buffer_bytes
+                        .unwrap_or(DEFAULT_COMPRESSION_PIPE),
+                },
+                cfg.idle_timeout,
+                metrics,
+            )
+            .await;
+        }
+        None => {
+            let _ = write_with_timeout(client_write, body, cfg.idle_timeout).await;
+        }
+    }
+}
+
+/// Closes one origin exchange: counts it, attributes it to the serving
+/// server (CE4) and the passive health machine (B-N10), then pools the
+/// backend connection under the A16 reuse contract or drops it.
+/// Returns `true` when the client connection closes with it.
+#[allow(clippy::too_many_arguments)]
+fn finish_exchange(
+    metrics: &Metrics,
+    listener: &str,
+    backend: &ResolvedBackend,
+    served_addr: SocketAddr,
+    route_name: Option<&str>,
+    maintenance: bool,
+    status: u16,
+    poolable: bool,
+    req_close: bool,
+    resp_close: bool,
+    clean_boundary: bool,
+    backend_alive: bool,
+    conn_addr: SocketAddr,
+    backend_read: BufReader<BoxRead>,
+    backend_write: BoxWrite,
+) -> bool {
+    metrics
+        .http_requests_proxied
+        .fetch_add(1, Ordering::Relaxed);
+    // Opt-in detail (CE4): the exchange is attributed to the server that
+    // served it and to the rule that matched (if any). Disabled, this is
+    // one relaxed load and no allocation.
+    if metrics.detail.enabled() {
+        let failed = status >= 500;
+        metrics
+            .detail
+            .record_server(&backend.name, &served_addr.to_string(), failed);
+        if let Some(route) = route_name {
+            metrics.detail.record_route(listener, route, failed);
+        }
+    }
+    // Passive detection (B-N10): with `passive = true`, real-traffic
+    // verdicts feed the fall/rise machine — 5xx = failure (the
+    // "500 → DOWN" acceptance criterion), anything else = success.
+    if backend.health_check.as_ref().is_some_and(|h| h.passive) {
+        if status >= 500 {
+            backend.balancer.report_fail(conn_addr);
+        } else {
+            backend.balancer.report_ok(conn_addr);
+        }
+    }
+    // Reuse-safety contract (A16): a pooled connection must end the
+    // exchange byte-aligned at a message boundary.
+    if poolable && !req_close && !resp_close && clean_boundary && backend_alive && !maintenance {
+        backend
+            .pool
+            .checkin(conn_addr, backend_read, backend_write, Instant::now());
+        return false;
+    }
+    if !clean_boundary {
+        // Counted, not logged: the counter is what operators alert on
+        // (bounded cardinality, no labels).
+        metrics
+            .backend_connections_discarded
+            .fetch_add(1, Ordering::Relaxed);
+    }
+    drop((backend_read, backend_write));
+    // `false` falls through to the keep-alive loop with no backend
+    // connection held, exactly like the pre-cache path.
+    req_close || resp_close
+}
+
 /// Serves a full HTTP/1.1 client connection (keep-alive included).
 ///
 /// Takes the client stream halves (plain TCP or already-accepted TLS) and the
@@ -2091,7 +2536,7 @@ pub async fn serve_http<CR, CW>(
             Some(rewrite) => apply_rewrite(&forwarded_base, rewrite, &request.target),
             None => forwarded_base,
         };
-        let forwarded_head = if plugin_set.is_empty() && plugin_remove.is_empty() {
+        let mut forwarded_head = if plugin_set.is_empty() && plugin_remove.is_empty() {
             forwarded_base
         } else {
             let mutated = apply_plugin_headers(&forwarded_base, &plugin_set, &plugin_remove);
@@ -2186,6 +2631,86 @@ pub async fn serve_http<CR, CW>(
             }
             write_error(&mut client_write, 413, "request body too large").await;
             return;
+        }
+
+        // Response cache lookup (B-N7/H1, ADR-0034): after routing, auth
+        // and the plugin, before any backend byte. A hit answers here
+        // without dialing; anything else falls through to the origin path.
+        // The guard publishes `Gone` on any error return past this point,
+        // so waiters never hang on a fetch that died mid-exchange.
+        let mut cache_guard: Option<CacheGuard> = None;
+        let mut cache_action = match cfg.cache.as_ref() {
+            Some(cache) => {
+                let affinity_cookie = backend
+                    .affinity
+                    .as_ref()
+                    .is_some_and(|affinity| affinity.mode == AffinityMode::Cookie);
+                plan_cache(
+                    cache,
+                    affinity_cookie,
+                    &request,
+                    &forwarded_head,
+                    head_limits,
+                    scheme,
+                    &metrics,
+                )
+            }
+            None => CacheAction::Off,
+        };
+        if let CacheAction::Wait(fetch, shared) = cache_action {
+            // Planned from `Some`, so the cache is there; `None` degrades
+            // to the uncached path instead of panicking the exchange.
+            cache_action = match cfg.cache.as_ref() {
+                Some(cache) => resolve_cache_wait(cache, fetch, &shared, &metrics).await,
+                None => CacheAction::Off,
+            };
+        }
+        if let CacheAction::Serve(entry) = &cache_action {
+            metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+            entry.hits.fetch_add(1, Ordering::Relaxed);
+            serve_cached(
+                &mut client_write,
+                cfg,
+                rule_headers,
+                peer,
+                &request.host,
+                scheme,
+                &request,
+                entry,
+                &mut access,
+                &metrics,
+                false,
+            )
+            .await;
+            client_carry = from_client.prefix.split_off(from_client.pos);
+            if request.wants_close {
+                let _ = tokio::time::timeout(Duration::from_secs(5), client_write.shutdown()).await;
+                return;
+            }
+            continue;
+        }
+        // A stale entry earns conditional headers; the `304` below
+        // refreshes it without touching the body.
+        if let CacheAction::Origin(fetch) = &cache_action {
+            if let Some(cache) = cfg.cache.as_ref() {
+                cache_guard = Some(CacheGuard::armed(cache, &fetch.key));
+            }
+            if let Some(stale) = &fetch.stale {
+                // The head carries no trailing terminator (`HEAD_END` goes
+                // on the wire separately), so conditional lines join with
+                // a leading CRLF — a trailing one would glue them onto
+                // the last header line and the origin would never see
+                // the validator.
+                if let Some(etag) = &stale.etag {
+                    forwarded_head
+                        .extend_from_slice(format!("\r\nif-none-match: {etag}").as_bytes());
+                }
+                if let Some(last_modified) = &stale.last_modified {
+                    forwarded_head.extend_from_slice(
+                        format!("\r\nif-modified-since: {last_modified}").as_bytes(),
+                    );
+                }
+            }
         }
 
         // B-H11/B-E12 (`max_stream_duration`, Q5): one total cap for the
@@ -2452,6 +2977,9 @@ pub async fn serve_http<CR, CW>(
         // exchange that reuses it from the pool).
         let mut carry: Vec<u8> = Vec::new();
         let mut interim_count = 0u32;
+        // Set when a `304` refreshed the stored entry: the tail below is
+        // skipped and the entry serves instead.
+        let mut refreshed: Option<(bool, Arc<cache::StoredEntry>)> = None;
         let (response_head_bytes, response) = loop {
             let mut source = Prefixed {
                 prefix: std::mem::take(&mut carry),
@@ -2515,6 +3043,46 @@ pub async fn serve_http<CR, CW>(
             // for us — the tunnel opens after the loop. A CONNECT `2xx`
             // breaks out the same way (A8).
             if response.status >= 200 || (response.status == 101 && request.wants_upgrade) {
+                // Revalidation answer (B-N7/H1): a `304` to our conditional
+                // refreshes the stored headers without touching the body.
+                // The waiters were already published by `refresh`; the
+                // connection returns to the pool under the same contract
+                // as a clean origin exchange.
+                if let CacheAction::Origin(fetch) = &cache_action
+                    && fetch.stale.is_some()
+                    && response.status == 304
+                    && let Some(stale) = &fetch.stale
+                    && let Some(facts_304) = cache::parse_origin_head(&head_bytes)
+                {
+                    if let Some(guard) = cache_guard.as_mut() {
+                        guard.disarm();
+                    }
+                    // Planned from `Some`; `None` serves the stale bytes
+                    // without a refresh instead of panicking.
+                    let entry = match cfg.cache.as_ref() {
+                        Some(cache) => {
+                            let ttl =
+                                cache::effective_ttl(cache.default_ttl(), &facts_304.cache_control);
+                            cache
+                                .refresh(fetch.key.clone(), stale, &facts_304.headers, ttl)
+                                .await;
+                            // No backend stream is moved here: the check-in
+                            // (or drop) happens in the `refreshed` block
+                            // below, whose `continue`/`return` keeps the tail
+                            // from touching the moved connection.
+                            match cache.lookup(&fetch.key, &fetch.headers, false) {
+                                cache::Lookup::Hit(entry) => entry,
+                                // Evicted between lookup and refresh: the
+                                // stale bytes are still correct, only the
+                                // headers aged.
+                                _ => Arc::clone(stale),
+                            }
+                        }
+                        None => Arc::clone(stale),
+                    };
+                    refreshed = Some((carry.is_empty(), entry));
+                    break (head_bytes, response);
+                }
                 break (head_bytes, response);
             }
             // Interim: an unsolicited `101` (the client never asked for a
@@ -2557,6 +3125,49 @@ pub async fn serve_http<CR, CW>(
                 return;
             }
         };
+
+        // A revalidated entry serves from the store: the 304 connection
+        // returns to the pool under the same contract as a clean origin
+        // exchange. This block diverges (`continue`/`return`), so the
+        // tail below never touches the moved connection.
+        if let Some((clean, entry)) = refreshed.take() {
+            let backend_alive = !peer_gone(&mut backend_read).await;
+            if poolable
+                && !request.wants_close
+                && !response.wants_close
+                && clean
+                && backend_alive
+                && active.mode() != ServerMode::Maintenance
+            {
+                backend
+                    .pool
+                    .checkin(conn.addr, backend_read, backend_write, Instant::now());
+            } else {
+                drop((backend_read, backend_write));
+            }
+            metrics.cache_hits.fetch_add(1, Ordering::Relaxed);
+            entry.hits.fetch_add(1, Ordering::Relaxed);
+            serve_cached(
+                &mut client_write,
+                cfg,
+                rule_headers,
+                peer,
+                &request.host,
+                scheme,
+                &request,
+                &entry,
+                &mut access,
+                &metrics,
+                true,
+            )
+            .await;
+            client_carry = from_client.prefix.split_off(from_client.pos);
+            if request.wants_close {
+                let _ = tokio::time::timeout(Duration::from_secs(5), client_write.shutdown()).await;
+                return;
+            }
+            continue;
+        }
 
         if let Some(record) = access.as_mut() {
             record.status(response.status);
@@ -2676,6 +3287,190 @@ pub async fn serve_http<CR, CW>(
                 record.bytes(bytes);
             }
         }
+        // B-N7/H1: a cacheable miss is marked like a hit (visibility for
+        // operators and tests), on both the assembled and the streamed
+        // path. Never stored: `end_to_end` strips it.
+        if matches!(
+            cache_action,
+            CacheAction::Origin(_) | CacheAction::Direct(_)
+        ) {
+            response_head_bytes.extend_from_slice(b"\r\nx-cache: MISS");
+        }
+        // Storable responses (B-N7/H1) assemble fully in memory — bounded
+        // by the entry bound — then forward from the slice and store.
+        // Chunked and close-delimited bodies never assemble (no
+        // re-framing): they stream through uncached below. The guard
+        // stays armed until the store completes, so any failure here
+        // publishes `Gone` for the waiters.
+        // Planned from `Some`; `None` skips the store instead of
+        // panicking the exchange.
+        let store_plan = match &cache_action {
+            CacheAction::Origin(fetch) | CacheAction::Direct(fetch) => {
+                let direct = matches!(cache_action, CacheAction::Direct(_));
+                cfg.cache.as_ref().and_then(|cache| {
+                    store_plan(
+                        cache,
+                        fetch,
+                        direct,
+                        &request.method,
+                        response.framing,
+                        &response_head_bytes,
+                    )
+                })
+            }
+            CacheAction::Off | CacheAction::Serve(_) | CacheAction::Wait(_, _) => None,
+        };
+        if let Some(plan) = store_plan {
+            let mut from_backend = Prefixed {
+                prefix: carry,
+                pos: 0,
+                inner: &mut backend_read,
+            };
+            // Exact-length read with per-chunk idle timeout: the same
+            // contract as `copy_exact` (a slow trickle trips idle, a
+            // short close truncates), with the same counters.
+            let mut body = vec![0u8; plan.len as usize];
+            let mut read = 0usize;
+            let mut clean_read = true;
+            while read < body.len() {
+                match tokio::time::timeout(cfg.idle_timeout, from_backend.read(&mut body[read..]))
+                    .await
+                {
+                    Ok(Ok(0)) => {
+                        clean_read = false;
+                        break;
+                    }
+                    Ok(Ok(n)) => {
+                        read += n;
+                        metrics
+                            .bytes_backend_to_client
+                            .fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                    Ok(Err(_)) => {
+                        clean_read = false;
+                        break;
+                    }
+                    Err(_) => {
+                        metrics.idle_timeouts.fetch_add(1, Ordering::Relaxed);
+                        clean_read = false;
+                        break;
+                    }
+                }
+            }
+            if !clean_read {
+                // Truncated, I/O or idle: exactly like the copy path, the
+                // exchange ends here with no store and no pool return.
+                return;
+            }
+            let mut head_forwarded = false;
+            let send = until_deadline(stream_deadline, async {
+                write_with_timeout(&mut client_write, &response_head_bytes, cfg.idle_timeout)
+                    .await?;
+                write_with_timeout(&mut client_write, HEAD_END, cfg.idle_timeout).await?;
+                head_forwarded = true;
+                match encoding {
+                    Some(encoding) => {
+                        let settings = compression_settings.ok_or(CopyError::Io)?;
+                        let mut slice = &body[..];
+                        copy_compressed_body(
+                            &mut slice,
+                            &mut client_write,
+                            CompressPlan {
+                                framing: BodyFraming::ContentLength(plan.len),
+                                encoding,
+                                settings,
+                                pipe: limits
+                                    .stream_buffer_bytes
+                                    .unwrap_or(DEFAULT_COMPRESSION_PIPE),
+                            },
+                            cfg.idle_timeout,
+                            &metrics,
+                        )
+                        .await
+                    }
+                    None => {
+                        let mut slice = &body[..];
+                        copy_exact(
+                            &mut slice,
+                            &mut client_write,
+                            plan.len,
+                            cfg.idle_timeout,
+                            &metrics.bytes_backend_to_client,
+                            &metrics.idle_timeouts,
+                        )
+                        .await
+                    }
+                }
+            })
+            .await;
+            match send {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => return,
+                Err(()) => {
+                    if !head_forwarded {
+                        if let Some(record) = access.as_mut() {
+                            record.status(504);
+                        }
+                        write_error(&mut client_write, 504, "gateway timeout").await;
+                    }
+                    return;
+                }
+            }
+            // Success: disarm first (a spawned `Gone` would drop the fresh
+            // entry), then publish. Waiters wake with `Ready`.
+            if let Some(guard) = cache_guard.as_mut() {
+                guard.disarm();
+            }
+            // Planned from `Some`; `None` skips the publish (the guard
+            // was never armed, so no waiter hangs on it) instead of
+            // panicking the exchange.
+            if let Some(cache) = cfg.cache.as_ref() {
+                let parts = cache::StoredParts {
+                    status: plan.status,
+                    reason: plan.reason,
+                    headers: plan.headers,
+                    body,
+                    etag: plan.etag,
+                    last_modified: plan.last_modified,
+                    vary: plan.vary,
+                    vary_values: plan.vary_values,
+                    framing_none: false,
+                    has_declared_len: true,
+                    ttl: plan.ttl,
+                    stored_at_unix: cache::unix_now(),
+                };
+                if plan.direct {
+                    cache.store_direct(plan.key, parts).await;
+                } else {
+                    cache
+                        .complete(plan.key, cache::FetchOutcome::Stored(parts))
+                        .await;
+                }
+            }
+            let clean_boundary = from_backend.pos == from_backend.prefix.len();
+            let backend_alive = !peer_gone(&mut backend_read).await;
+            if finish_exchange(
+                &metrics,
+                &cfg.name,
+                backend,
+                served_addr,
+                route_name,
+                active.mode() == ServerMode::Maintenance,
+                response.status,
+                poolable,
+                request.wants_close,
+                response.wants_close,
+                clean_boundary,
+                backend_alive,
+                conn.addr,
+                backend_read,
+                backend_write,
+            ) {
+                let _ = client_write.shutdown().await;
+                return;
+            }
+            continue;
+        }
         let mut from_backend = Prefixed {
             prefix: carry,
             pos: 0,
@@ -2770,75 +3565,29 @@ pub async fn serve_http<CR, CW>(
             Err(_) => return,
         }
 
-        metrics
-            .http_requests_proxied
-            .fetch_add(1, Ordering::Relaxed);
-        // Opt-in detail (CE4): the exchange is attributed to the server that
-        // served it and to the rule that matched (if any). Disabled, this is
-        // one relaxed load and no allocation.
-        if metrics.detail.enabled() {
-            let failed = response.status >= 500;
-            metrics
-                .detail
-                .record_server(&backend.name, &served_addr.to_string(), failed);
-            if let Some(route) = route_name {
-                metrics.detail.record_route(&cfg.name, route, failed);
-            }
-        }
-        // Passive detection (B-N10): with `passive = true`, real-traffic
-        // verdicts feed the fall/rise machine — 5xx = failure (the
-        // "500 → DOWN" acceptance criterion), anything else = success.
-        if backend.health_check.as_ref().is_some_and(|h| h.passive) {
-            if response.status >= 500 {
-                backend.balancer.report_fail(conn.addr);
-            } else {
-                backend.balancer.report_ok(conn.addr);
-            }
-        }
-        // Reuse-safety contract (A16): a pooled connection must end the
-        // exchange byte-aligned at a message boundary. Bytes the backend
-        // sent past the body land in the carry; silently discarding them
-        // and pooling would hand the next exchange a connection whose
-        // stream disagrees with ours (and hide the over-send).
-        let clean_boundary = from_backend.pos == from_backend.prefix.len();
-        let backend_alive = !peer_gone(&mut backend_read).await;
         // A16 reuse contract, extended: never pool a connection whose
         // forwarded request carried `Connection: close` (or lacked
-        // keep-alive in HTTP/1.0). The client's hop-by-hop header reaches
-        // the backend verbatim, so the backend will close too: pooling it
-        // would hand the next exchange a dead connection.
-        // ... and never pool a connection to a server taken out for a patch
-        // window (ADR-0028): the exchange that ends there would otherwise
-        // re-park it after the maintenance declaration closed the pool.
-        if poolable
-            && !request.wants_close
-            && !response.wants_close
-            && clean_boundary
-            && backend_alive
-            && active.mode() != ServerMode::Maintenance
-        {
-            // Clean exchange and server on keep-alive: the connection returns
-            // to the pool message-aligned (A16). Every error path
-            // returns early without it: after a framing failure, cut,
-            // server timeout or close it is never reused.
-            backend
-                .pool
-                .checkin(conn.addr, backend_read, backend_write, Instant::now());
-            // The backend connection is no longer ours: the rest of the loop only
-            // touches the client.
-            continue;
-        }
-        if !clean_boundary {
-            // Counted, not logged: the counter is what operators alert on
-            // (bounded cardinality, no labels).
-            metrics
-                .backend_connections_discarded
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        // The server closed or broke framing (UntilEof): the backend
-        // connection dies here and never returns to the pool.
-        drop((backend_read, backend_write));
-        if request.wants_close || response.wants_close {
+        // keep-alive in HTTP/1.0), nor one to a server taken out for a
+        // patch window (ADR-0028). See `finish_exchange`.
+        let clean_boundary = from_backend.pos == from_backend.prefix.len();
+        let backend_alive = !peer_gone(&mut backend_read).await;
+        if finish_exchange(
+            &metrics,
+            &cfg.name,
+            backend,
+            served_addr,
+            route_name,
+            active.mode() == ServerMode::Maintenance,
+            response.status,
+            poolable,
+            request.wants_close,
+            response.wants_close,
+            clean_boundary,
+            backend_alive,
+            conn.addr,
+            backend_read,
+            backend_write,
+        ) {
             let _ = client_write.shutdown().await;
             return;
         }

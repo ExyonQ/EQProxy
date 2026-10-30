@@ -2050,6 +2050,7 @@ fn admin_topology(
     config: &Config,
     bound: &[(String, SocketAddr)],
     backends: Vec<Arc<ResolvedBackend>>,
+    caches: Vec<Arc<eqproxy_net::Cache>>,
     revision: String,
     certificates: &BTreeMap<String, String>,
 ) -> AdminTopology {
@@ -2057,6 +2058,7 @@ fn admin_topology(
         revision,
         listeners: listener_infos(config, bound, certificates),
         backends,
+        caches,
     }
 }
 
@@ -2214,6 +2216,7 @@ impl ConfigApplier {
             base_dir(&self.path),
             &self.modes,
             self.access.as_ref(),
+            &self.metrics,
         ) {
             Ok(resolved) => resolved,
             Err(message) => {
@@ -2227,6 +2230,12 @@ impl ConfigApplier {
                 message: "the configuration defines no listeners; nothing to serve".to_owned(),
             };
         }
+        // The swap below consumes the listeners: keep the serving cache
+        // instances, so the API reports what is actually stored.
+        let caches: Vec<Arc<eqproxy_net::Cache>> = listeners
+            .iter()
+            .filter_map(|listener| listener.cache.clone())
+            .collect();
         // The admin socket policy moves before the dataplane swap and is put
         // back if the swap is refused: a rejected generation leaves neither
         // a new socket mode nor a new allowlist behind.
@@ -2279,10 +2288,13 @@ impl ConfigApplier {
         }
         self.revision += 1;
         let revision = format!("v{}", self.revision);
+        // The swap consumed the listeners: collect the serving cache
+        // instances first, so the API reports what is actually stored.
         let view = admin_topology(
             &candidate,
             &outcome.listeners,
             backends,
+            caches,
             revision.clone(),
             &self.certificates,
         );
@@ -2410,12 +2422,15 @@ impl ConfigApplier {
 fn resolve(config: &Config, base_dir: &Path) -> Result<Vec<ResolvedListener>, String> {
     // One-off registry: the check paths (`config validate`, `plan`) only need
     // the listeners, and no state can be declared there. No access sink: a
-    // validation command never opens a log file (ADR-0020).
+    // validation command never opens a log file (ADR-0020). The cache gets
+    // a throwaway registry: validation still loads the disk (a bad
+    // directory rejects the candidate) but counts nothing live.
     resolve_with(
         config,
         base_dir,
         &Arc::new(eqproxy_net::ServerModes::new()),
         None,
+        &Arc::new(Metrics::default()),
     )
     .map(|(listeners, _)| listeners)
 }
@@ -2428,6 +2443,7 @@ fn resolve_with(
     base_dir: &Path,
     modes: &Arc<eqproxy_net::ServerModes>,
     access: Option<&Arc<eqproxy_net::AccessLog>>,
+    metrics: &Arc<Metrics>,
 ) -> Result<
     (
         Vec<ResolvedListener>,
@@ -2808,6 +2824,29 @@ fn resolve_with(
                 .map_err(|why| format!("listener.{name}.plugin: {why}"))?;
                 resolved = resolved.with_plugin(std::sync::Arc::new(host));
             }
+            // HTTP response cache (B-N7/H1, ADR-0034): built here, so a
+            // bad directory rejects the snapshot (check/apply/startup)
+            // instead of failing per request. Relative paths resolve from
+            // the config file's directory, like certificates and maps.
+            if let Some(cache_cfg) = &listener.cache {
+                let disk_dir = cache_cfg
+                    .disk_path
+                    .as_ref()
+                    .map(|relative| base_dir.join(relative));
+                let cache = eqproxy_net::Cache::load(
+                    eqproxy_net::CacheSettings {
+                        listener: name.clone(),
+                        default_ttl: cache_cfg.default_ttl,
+                        max_memory_bytes: cache_cfg.max_memory_bytes,
+                        max_entry_bytes: cache_cfg.max_entry_bytes,
+                        disk_dir,
+                        lock_wait: std::time::Duration::from_secs(60),
+                    },
+                    Arc::clone(metrics),
+                )
+                .map_err(|why| format!("listener.{name}.cache: {why}"))?;
+                resolved = resolved.with_cache(cache);
+            }
             resolved = resolved.with_forwarded_headers(match listener.forwarded_headers {
                 eqproxy_config::schema::ForwardedHeaders::Off => {
                     eqproxy_net::proxy::ForwardedMode::Off
@@ -2973,7 +3012,7 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
     // every balancer (startup and each SIGHUP reload) reads it (ADR-0018).
     let modes = Arc::new(eqproxy_net::ServerModes::new());
     let (listeners, live_backends) =
-        match resolve_with(&config, base_dir(&path), &modes, access.as_ref()) {
+        match resolve_with(&config, base_dir(&path), &modes, access.as_ref(), &metrics) {
             Ok(resolved) => resolved,
             Err(msg) => {
                 eprintln!("error: inconsistent configuration after validation: {msg}");
@@ -3065,6 +3104,12 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         });
     }
 
+    // The bind consumes the listeners: keep the serving cache instances,
+    // so the API reports what is actually stored (H1 visibility).
+    let live_caches: Vec<Arc<eqproxy_net::Cache>> = listeners
+        .iter()
+        .filter_map(|listener| listener.cache.clone())
+        .collect();
     let bound = match bind(listeners, Arc::clone(&metrics)).await {
         Ok(bound) => bound,
         Err(err) => {
@@ -3086,6 +3131,7 @@ async fn run(path: PathBuf, metrics_interval: String) -> u8 {
         &config,
         &bound.local_addrs(),
         live_backends,
+        live_caches,
         "v1".to_owned(),
         &certificates,
     )));

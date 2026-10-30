@@ -64,6 +64,7 @@ fn state(metrics: Arc<Metrics>, modes: Arc<ServerModes>, panel: bool) -> AdminSt
                 tls_fingerprint: None,
             }],
             backends: vec![backend(&modes)],
+            caches: Vec::new(),
         })),
         modes,
         metrics,

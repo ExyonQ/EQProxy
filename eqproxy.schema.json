@@ -395,6 +395,40 @@
         }
       ]
     },
+    "CacheConfig": {
+      "description": "HTTP response cache attached to one listener (B-N7/H1, ADR-0034).\n\nDisabled unless present. The cache only ever stores `GET` responses\nwithout `Set-Cookie`, never keys on session material (`Cookie`,\n`Authorization`) and revalidates stale entries with `ETag`/`304`.",
+      "type": "object",
+      "properties": {
+        "default_ttl": {
+          "description": "Fresh lifetime of a stored entry when the origin gives no tighter\nbound (`s-maxage`/`max-age` can only shorten it, never extend it).\nDefault `\"60s\"`; 1 s..=1 day.",
+          "type": "string",
+          "default": "60000ms"
+        },
+        "disk_path": {
+          "description": "Optional on-disk persistence directory: entries are written through\nand reloaded at startup (expired or corrupt files are skipped and\ncounted). Relative paths resolve from the config file's directory,\nlike certificates and maps. Absent = memory only.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "max_entry_bytes": {
+          "description": "Largest single response body kept. Default 1 MiB; 64 KiB..=64 MiB.\nLarger bodies stream through uncached, never truncated.",
+          "type": "integer",
+          "format": "uint",
+          "default": 1048576,
+          "minimum": 0
+        },
+        "max_memory_bytes": {
+          "description": "RAM budget for stored entries (bodies plus heads). Default 64 MiB;\n1 MiB..=1 GiB. Past it the least-recently-used entries go first.",
+          "type": "integer",
+          "format": "uint",
+          "default": 67108864,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "CompressionConfig": {
       "description": "Response compression (B-N6/H6): gzip and Brotli, opt-in per listener.",
       "type": "object",
@@ -780,6 +814,17 @@
         "backend": {
           "description": "Backend name ([`BackendConfig`] in `Config::backend`).",
           "type": "string"
+        },
+        "cache": {
+          "description": "HTTP response cache (B-N7/H1, ADR-0034). `http` mode only.\nAbsent = disabled; every request goes to the backend.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CacheConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "client_header_timeout": {
           "description": "Client phase: maximum to receive the request head (`http` only).",

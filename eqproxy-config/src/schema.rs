@@ -1042,6 +1042,10 @@ pub struct ListenerConfig {
     /// Absent = no plugin runs; the request path is untouched.
     #[serde(default)]
     pub plugin: Option<PluginConfig>,
+    /// HTTP response cache (B-N7/H1, ADR-0034). `http` mode only.
+    /// Absent = disabled; every request goes to the backend.
+    #[serde(default)]
+    pub cache: Option<CacheConfig>,
     /// Ordered routing rules (v0.6, B-H3/B-H4): first match wins, the
     /// `backend` above is the fallback. `http` mode only.
     #[serde(default)]
@@ -1167,6 +1171,59 @@ fn default_plugin_memory() -> usize {
 
 fn default_plugin_max_header_ops() -> usize {
     16
+}
+
+/// HTTP response cache attached to one listener (B-N7/H1, ADR-0034).
+///
+/// Disabled unless present. The cache only ever stores `GET` responses
+/// without `Set-Cookie`, never keys on session material (`Cookie`,
+/// `Authorization`) and revalidates stale entries with `ETag`/`304`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CacheConfig {
+    /// Fresh lifetime of a stored entry when the origin gives no tighter
+    /// bound (`s-maxage`/`max-age` can only shorten it, never extend it).
+    /// Default `"60s"`; 1 s..=1 day.
+    #[serde(default = "default_cache_ttl", with = "duration")]
+    #[schemars(with = "String")]
+    pub default_ttl: Duration,
+    /// RAM budget for stored entries (bodies plus heads). Default 64 MiB;
+    /// 1 MiB..=1 GiB. Past it the least-recently-used entries go first.
+    #[serde(default = "default_cache_memory")]
+    pub max_memory_bytes: usize,
+    /// Largest single response body kept. Default 1 MiB; 64 KiB..=64 MiB.
+    /// Larger bodies stream through uncached, never truncated.
+    #[serde(default = "default_cache_entry")]
+    pub max_entry_bytes: usize,
+    /// Optional on-disk persistence directory: entries are written through
+    /// and reloaded at startup (expired or corrupt files are skipped and
+    /// counted). Relative paths resolve from the config file's directory,
+    /// like certificates and maps. Absent = memory only.
+    #[serde(default)]
+    pub disk_path: Option<PathBuf>,
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            default_ttl: default_cache_ttl(),
+            max_memory_bytes: default_cache_memory(),
+            max_entry_bytes: default_cache_entry(),
+            disk_path: None,
+        }
+    }
+}
+
+fn default_cache_ttl() -> Duration {
+    Duration::from_secs(60)
+}
+
+fn default_cache_memory() -> usize {
+    64 * 1024 * 1024
+}
+
+fn default_cache_entry() -> usize {
+    1024 * 1024
 }
 
 /// Response compression (B-N6/H6): gzip and Brotli, opt-in per listener.

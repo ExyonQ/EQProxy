@@ -868,6 +868,9 @@ pub struct ResolvedListener {
     /// Compiled WASM request filter (B-I5/B-E4, ADR-0031). `None` = no
     /// plugin, and the request path is exactly the pre-plugin one.
     pub plugin: Option<Arc<crate::plugin::PluginHost>>,
+    /// HTTP response cache (B-N7/H1, ADR-0034). `None` = disabled; every
+    /// request goes to the backend.
+    pub cache: Option<Arc<crate::cache::Cache>>,
     /// Data maps in force (C10/PP-02): what `map` rule conditions
     /// consult; the file watchers swap their data in hot.
     pub maps: Arc<eqproxy_core::maps::MapRegistry>,
@@ -916,6 +919,7 @@ impl ResolvedListener {
             compression: None,
             limits: ResolvedLimits::default(),
             plugin: None,
+            cache: None,
             maps: Arc::new(eqproxy_core::maps::MapRegistry::new()),
             access: None,
         }
@@ -949,6 +953,13 @@ impl ResolvedListener {
     #[must_use]
     pub fn with_plugin(mut self, plugin: Arc<crate::plugin::PluginHost>) -> Self {
         self.plugin = Some(plugin);
+        self
+    }
+
+    /// Attaches the HTTP response cache (B-N7/H1, ADR-0034).
+    #[must_use]
+    pub fn with_cache(mut self, cache: Arc<crate::cache::Cache>) -> Self {
+        self.cache = Some(cache);
         self
     }
 

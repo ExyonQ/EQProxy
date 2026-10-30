@@ -283,6 +283,11 @@ pub struct AdminTopology {
     /// One entry per validated backend, in configuration order. The balancer
     /// inside each one answers with its live health and in-flight count.
     pub backends: Vec<Arc<ResolvedBackend>>,
+    /// Live response caches, one per listener with `[listener.*.cache]`
+    /// (B-N7/H1). The `Arc` is the serving instance, so `GET /api/v1/cache`
+    /// reports what is actually stored, not the configuration that asked
+    /// for it.
+    pub caches: Vec<Arc<crate::cache::Cache>>,
 }
 
 /// What the API serves. The counters and the per-server state are live
@@ -1435,6 +1440,20 @@ fn respond<'a>(
                     )
                     .into_bytes(),
                 },
+                // Cache contents (B-N7/H1, H1 visibility): entries with
+                // age, TTL, hits and size, plus the listener totals. The
+                // counters live in the shared snapshot and `/metrics`.
+                "/api/v1/cache" => {
+                    let snapshots: Vec<crate::cache::CacheSnapshot> = topology
+                        .caches
+                        .iter()
+                        .map(|cache| cache.snapshot())
+                        .collect();
+                    match serde_json::to_vec(&snapshots) {
+                        Ok(body) => Response::json(200, body),
+                        Err(_) => Response::error(500, "internal_error"),
+                    }
+                }
                 _ => Response::error(404, "not_found"),
             };
             Outcome::done(response)
@@ -1996,6 +2015,7 @@ mod tests {
                     tls_fingerprint: None,
                 }],
                 backends: vec![backend(&modes)],
+                caches: Vec::new(),
             })),
             modes,
             metrics: Arc::new(Metrics::default()),

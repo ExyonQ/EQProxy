@@ -82,6 +82,7 @@ fn state(
                 tls_fingerprint: None,
             }],
             backends,
+            caches: Vec::new(),
         })),
         modes,
         metrics,
