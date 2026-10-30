@@ -100,3 +100,7 @@ fase; los `.log` de cada instancia quedan junto al journey local).
 | Rust Audit | `python3.13 <rust-ai-audit>/scripts/rust_audit.py scan . --format md --out report --fail-on high` (0.2.7) | exit 0; **0 critical / 3 high**; los 3 high son los R16 ya revisados en `cache.rs` (falsos positivos, guard en bloque léxico antes del `.await`); el incremento no añade ningún high/critical nuevo (el R08 del test nuevo es el `Instant::now` de deadline que usan todos los E2E) | [`report/rust-audit-20261030-180527.md`](../../report/rust-audit-20261030-180527.md) |
 | CodeGraph Rust | `codegraph-rust index . --stats-json /tmp/cg-index-secrets.json --batch-size 16` | **NOT EXECUTED**: el índice no completa en el presupuesto de 600 s de la herramienta (el árbol necesita ~11–17 min según las mediciones del ADR-proceso; el fichero de stats quedó vacío y el proceso se mató). Una consulta contra un índice rancio no es evidencia. El slice toca un solo fichero de tests (`e2e_resilience.rs` +163) y sus llamadas se comprobaron en el fuente (§2) | — |
 | Hindsight | `hindsight-note --title ... --project EQProxy` | TBD tras el push (la nota cita el run de CI) | banco `eqproxy` |
+
+CI del commit publicado `7058654`
+([run 41099054219](https://github.com/ExyonQ/EQProxy/actions/runs/41099054219)):
+**verde, cinco jobs**, 17:27:57→17:32:41 UTC.
