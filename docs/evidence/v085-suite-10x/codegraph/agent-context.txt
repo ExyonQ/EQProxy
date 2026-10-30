@@ -1,0 +1,23 @@
+**Short answer: I could not pin the exact line — the origin listener that owns the 400-connection backlog is created inside the helper `start_keepalive_origin`, and its body was not returned by any tool call in this run (the result budget ran out before I could read it). What I can establish is the test that depends on it, the proxy-side backlog value used alongside it, and why the number matters.**
+
+**The test in question** is `pool_sizing_keeps_a_400_stream_burst_without_churn` at `./eqproxy-net/tests/e2e_http2.rs:707-779` (node `nodes:\`b42a1b2f-88fe-7166-b177-45b03aa75107\``). It opens with:
+
+```
+let (origin, origin_connections, origin_requests) =
+    start_keepalive_origin(Duration::from_millis(750)).await;
+```
+
+So the origin socket, and any `listen(backlog)` applied to it, live in `start_keepalive_origin` (`nodes:\`6a19d942-9602-e8a7-11fd-2b6cd11c4912\``), a helper in the same file that returns `(SocketAddr, Arc<Atomic…>, …)` counters. That is the function to open first; it is the only place the origin listener is constructed for this test.
+
+**Why the backlog is load-bearing here.** The test drives 400 concurrent streams over 4 client h2 connections (`for _ in 0..4 { clients.push(h2_connect(proxy_addr).await) }`), then asserts on the origin counters:
+
+- `assert_eq!(after_first.backend_connections_opened, 400, "with an empty pool the whole first wave dials one connection each")` — `./eqproxy-net/tests/e2e_http2.rs:737-740`
+- `assert_eq!(origin_after_first, 400, "the origin accepted exactly the connections the proxy dialled")`
+
+That second assertion only holds if the origin's accept queue absorbs a simultaneous burst of 400 dials. With a smaller backlog the kernel would drop SYNs, `origin_connections` would land under 400, and the "no churn" premise would be untestable — hence the backlog must be at least 400, and it is set on the origin side, not on the proxy side.
+
+**Which backlog is *not* the one you want.** The proxy's own listener backlog is a positional argument in the `ResolvedListener::new(...)` test helpers, and it is hard-coded to `64` in every e2e helper: `./eqproxy-net/tests/e2e_sni.rs:59-73` (`base_listener`), `./eqproxy-net/tests/e2e_phase2b.rs:109-123`, `./eqproxy-net/tests/e2e_balancer.rs:153-167` (`http_listener`), `./eqproxy-net/tests/e2e_resilience.rs:218-232`, `./eqproxy-net/tests/e2e_limits.rs:43-57`, `./eqproxy-net/tests/e2e_backend_h2.rs:1043-1056`, `./eqproxy-net/tests/e2e_ws_h2.rs:48-61`. The `64` sits between `ProxyMode` and the first `Duration`. That is the front-door backlog (only 4 client connections arrive), not the origin backlog.
+
+**Pool-side context the test is exercising**, in case the change touches sizing rather than the listener: `./eqproxy-net/src/pool.rs` raises the idle cap to the peak in-flight count the balancer reports, bounded by `IDLE_CEILING_PER_SERVER`; the unit test comment at `./eqproxy-net/src/pool.rs:264-275` explicitly names "the churn measured at 400 streams in flight" as the motivation. Constants `DEFAULT_POOL_IDLE_TIMEOUT`, `IDLE_CEILING_PER_SERVER`, `IDLE_FLOOR_PER_SERVER`, `Pool` are re-exported at `./eqproxy-net/src/lib.rs:50`, and relevant tests are `idle_cap_drops_excess_at_the_floor` (`pool.rs:250`), `idle_cap_never_exceeds_the_ceiling` (`pool.rs:284`), `roundtrip_hands_back_a_clean_connection` (`pool.rs:237`), `servers_are_keyed_independently` (`pool.rs:372`).
+
+**Gaps:** the body of `start_keepalive_origin` and therefore the literal backlog value and line number; whether it uses `tokio::net::TcpListener::bind`, a raw `TcpSocket` + explicit `listen(n)`, or `std::net::TcpListener`; and whether the 750 ms keep-alive argument interacts with the backlog. Recommendation: read `start_keepalive_origin` in `./eqproxy-net/tests/e2e_http2.rs` before changing anything — if you need to raise the burst above 400, that helper's backlog and the two `assert_eq!(…, 400)` lines at `e2e_http2.rs:737` and `:749` must move together.

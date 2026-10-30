@@ -1,0 +1,11 @@
+[tier user rep 1] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 92s
+[tier user rep 2] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 92s
+[tier user rep 3] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 93s
+[tier user rep 4] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 93s
+[tier user rep 5] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 93s
+[tier user rep 6] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 92s
+[tier user rep 7] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 92s
+[tier user rep 8] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 92s
+[tier user rep 9] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 93s
+[tier user rep 10] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=0 94s
+== tier user summary: 10/10 green, 0 failed ==

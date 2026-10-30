@@ -1,0 +1,22 @@
+**Short answer:** very little breaks. `pool_sizing_keeps_a_400_stream_burst_without_churn` (`./eqproxy-net/tests/e2e_http2.rs:707-779`) has **no dependents at all** — nothing calls it — so it is a pure entry point, an integration test. The blast radius of changing it runs inward, to the helpers it shares with sibling tests in the same file, and to the pool-sizing behaviour it asserts against.
+
+**Direct dependencies of the test** (Calls, depth 1):
+- `start_keepalive_origin` — `./eqproxy-net/tests/e2e_http2.rs:605-664` (node `nodes:`6a19d942-9602-e8a7-11fd-2b6cd11c4912``). This is the origin listener; it returns `(SocketAddr, Arc<AtomicUsize> connections, Arc<AtomicUsize> requests)`.
+- `stop_proxy` — `./eqproxy-net/tests/e2e_http2.rs:65-73`, the shutdown harness.
+- `local_addrs` — `./eqproxy-net/src/proxy.rs:1580-1585` (`impl BoundProxy`), used to get the proxy's listen address.
+- `h2_connect` — `./eqproxy-net/tests/e2e_http2.rs` (node `nodes:`022bc1d7-f60b-74f0-558c-e62c2e776638``).
+- `bind(vec![http_listener(origin)], …)` at `e2e_http2.rs:713`, i.e. `BoundProxy::bind` / `http_listener` from `eqproxy-net`.
+
+**Transitive dependencies** (depth 2, from the same trace):
+- `bind_keepalive_origin` — `./eqproxy-net/tests/e2e_http2.rs:592-603`. Its only caller is `start_keepalive_origin`, so it is private to this path (it does `socket.listen(4096)` and non-blocking bind via socket2).
+- `send_wave` — `./eqproxy-net/tests/e2e_http2.rs:669-692`, which opens 100 streams per client across 4 clients (the 400).
+- `read_response` (used inside `send_wave`), plus the metrics path the assertions read: `backend_connections_opened` / `backend_connections_reused` from `metrics.snapshot()`.
+- Two low-confidence edges that look like name-resolution artifacts rather than real coupling: `Expect` in `./eqproxy-cli/tests/migration.rs:39-46` and `MetricsConfig::default` in `./eqproxy-config/src/schema.rs:460`. I would not treat these as real dependencies of the test.
+
+**Dependents:** the reverse-dependency query for the test returned an empty set, confirming nothing depends on it. The reverse query for `start_keepalive_origin` (to see whether other tests in `e2e_http2.rs` share the origin helper) was not answered — the result was dropped when the run's result budget was exhausted — so I cannot state which sibling tests reuse it. That is the one real gap; if `start_keepalive_origin` is changed, the other callers in `e2e_http2.rs` are the risk, not this test's consumers.
+
+**Behaviour the assertions are pinned to:** the 400-connection expectation mirrors unit tests in `./eqproxy-net/src/pool.rs` — `idle_cap_follows_the_peak_in_flight` at `pool.rs:266-279` ("400 exchanges in flight must keep 400 connections, not 64"), `idle_cap_never_exceeds_the_ceiling` at `pool.rs:284-293`, and `close_idle_drops_what_is_parked_and_keeps_the_peak` at `pool.rs:341-369`. The constants those tests use, `IDLE_FLOOR_PER_SERVER` / `IDLE_CEILING_PER_SERVER`, are re-exported at `./eqproxy-net/src/lib.rs:50`. If the pool's adaptive cap semantics change, this e2e test and those three unit tests must move together.
+
+**Cycle check:** not performed — no `detect_circular_dependencies` call could be made before the budget ran out. Since the test is a leaf with no inbound edges, it cannot itself be part of a call cycle.
+
+**Recommendation:** the test is cheap to change in isolation. Treat `start_keepalive_origin` (`e2e_http2.rs:605`) and `bind_keepalive_origin` (`e2e_http2.rs:592`) as the shared surface — editing their signature or the `hold` duration touches every other test in that file that uses them (unverified, see gap above) — and keep any change to the 400 figure consistent with `pool.rs:266`.

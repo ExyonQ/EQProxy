@@ -1,0 +1,11 @@
+[tier root rep 1] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 245s
+[tier root rep 2] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 92s
+[tier root rep 3] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 91s
+[tier root rep 4] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 93s
+[tier root rep 5] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 91s
+[tier root rep 6] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 91s
+[tier root rep 7] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 91s
+[tier root rep 8] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 92s
+[tier root rep 9] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 92s
+[tier root rep 10] ok exit=0 targets=32 passed=596 failed=0 ignored=2 skips=2 91s
+== tier root summary: 10/10 green, 0 failed ==

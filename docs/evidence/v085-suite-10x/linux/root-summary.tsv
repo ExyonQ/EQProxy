@@ -1,0 +1,11 @@
+tier	rep	exit	targets	passed	failed	ignored	skips	elapsed_s	load1
+root	1	0	32	596	0	2	2	245	8.82
+root	2	0	32	596	0	2	2	92	9.90
+root	3	0	32	596	0	2	2	91	8.61
+root	4	0	32	596	0	2	2	93	8.31
+root	5	0	32	596	0	2	2	91	8.36
+root	6	0	32	596	0	2	2	91	8.35
+root	7	0	32	596	0	2	2	91	8.08
+root	8	0	32	596	0	2	2	92	8.25
+root	9	0	32	596	0	2	2	92	8.24
+root	10	0	32	596	0	2	2	91	8.37

@@ -1,0 +1,11 @@
+tier	rep	exit	targets	passed	failed	ignored	skips	elapsed_s	load1
+user	1	0	32	595	0	2	0	102	314.80
+user	2	0	32	595	0	2	0	100	345.03
+user	3	0	32	595	0	2	0	98	351.94
+user	4	0	32	595	0	2	0	99	337.56
+user	5	0	32	595	0	2	0	105	424.10
+user	6	0	32	595	0	2	0	104	398.94
+user	7	0	32	595	0	2	0	103	380.13
+user	8	0	32	595	0	2	0	107	362.17
+user	9	0	32	595	0	2	0	116	361.88
+user	10	0	32	595	0	2	0	111	414.46
