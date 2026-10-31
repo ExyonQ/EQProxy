@@ -124,6 +124,11 @@ fn default_content_type() -> String {
     "text/plain; charset=utf-8".to_owned()
 }
 
+/// Upper bound of a server's `maxconn` (B-H16: HAProxy `server … maxconn`).
+/// HAProxy caps it at 2^31-1; this is the resource budget instead: a value
+/// that high cannot describe a real machine and only hides a typo.
+pub const MAX_SERVER_MAXCONN: u32 = 1_000_000;
+
 /// Maximum weight per server (HAProxy `weight` range, cfg 3.4 "server").
 pub const MAX_SERVER_WEIGHT: u32 = 256;
 
@@ -327,6 +332,16 @@ pub struct ServerConfig {
     /// wait for a probe to discover it is alive.
     #[serde(default)]
     pub backup: bool,
+    /// Concurrent exchanges this server will take (B-H16: HAProxy
+    /// `server … maxconn`). `0` (default) = bounded only by the listener
+    /// `maxconn`. At the cap the balancer stops selecting the server, exactly
+    /// like a `weight = 0` one, so the load moves to its siblings; if every
+    /// server is at its cap the request fails explicitly with
+    /// `no_available_server`; with a bounded backend queue configured
+    /// (`maxqueue > 0`, B-H7) it waits there up to `timeout_queue` instead.
+    #[serde(default)]
+    #[schemars(range(min = 0, max = 1_000_000))]
+    pub maxconn: u32,
     /// Failover order among backup servers (EQProxy extension, 0..=255):
     /// higher first, ties follow configuration order. Only the first
     /// operational rung serves at a time, so a recovered higher rung takes
@@ -345,6 +360,9 @@ pub struct ServerEntry<'a> {
     pub weight: u32,
     pub backup: bool,
     pub priority: u32,
+    /// `0` = bounded only by the listener `maxconn` (see
+    /// [`ServerConfig::maxconn`]).
+    pub maxconn: u32,
 }
 
 /// Active TCP health check (B11 TCP): `fall` consecutive failures drop the
@@ -1381,6 +1399,7 @@ impl BackendConfig {
                 weight: 1,
                 backup: false,
                 priority: 0,
+                maxconn: 0,
             }],
             (None, Some(servers)) => servers
                 .iter()
@@ -1389,6 +1408,7 @@ impl BackendConfig {
                     weight: s.weight,
                     backup: s.backup,
                     priority: s.priority,
+                    maxconn: s.maxconn,
                 })
                 .collect(),
             (None, None) => Vec::new(),

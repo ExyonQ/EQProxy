@@ -455,6 +455,7 @@ mod tests {
                 weight: 1,
                 backup: false,
                 priority: 0,
+                maxconn: 0,
             }],
             1,
             1,

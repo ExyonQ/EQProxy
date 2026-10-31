@@ -156,14 +156,24 @@ enum ConfigCommand {
     },
     /// Restores the most recent backup into current (Phase 3, offline)
     Rollback,
-    /// Reference-proxy to EQProxy configuration converter (Phase 8)
+    /// Converts a reference-proxy configuration (Phase 8, CE6/Q9/CE8):
+    /// nginx, HAProxy, ingress-nginx or Envoy → eqproxy.toml plus a report
+    /// that classifies every source directive. Exit 0 = clean conversion,
+    /// 2 = converted with rejected directives (read the report), 1 = the
+    /// source could not be read or produced an invalid configuration
     Import {
+        /// Source dialect; omit to detect it from the file
+        #[arg(long, value_name = "nginx|haproxy|ingress|envoy")]
+        from: Option<String>,
         /// Source file (reference-proxy configuration)
         #[arg(long)]
         input: PathBuf,
         /// Destination file (eqproxy.toml)
         #[arg(long)]
         output: PathBuf,
+        /// Write the Markdown conversion report to this file
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
 }
 
@@ -206,7 +216,12 @@ fn config_command(command: ConfigCommand) -> u8 {
         ConfigCommand::Apply { config } => apply(&config),
         ConfigCommand::Schema { output } => schema(output.as_deref()),
         ConfigCommand::Rollback => rollback(),
-        ConfigCommand::Import { .. } => not_implemented("config import", "Phase 8"),
+        ConfigCommand::Import {
+            from,
+            input,
+            output,
+            report,
+        } => import(from.as_deref(), &input, &output, report.as_deref()),
     }
 }
 
@@ -237,12 +252,6 @@ fn schema(output: Option<&std::path::Path>) -> u8 {
             0
         }
     }
-}
-
-/// Explicit failure for unimplemented functionality: never fakes success.
-fn not_implemented(feature: &str, phase: &str) -> u8 {
-    eprintln!("error: \"{feature}\" is not implemented yet (planned for {phase})");
-    2
 }
 
 /// Reads, parses and validates. The parse error already carries line, field and example.
@@ -1043,6 +1052,82 @@ fn apply(path: &Path) -> u8 {
 fn absolute_base(path: &Path) -> PathBuf {
     let base = base_dir(path);
     std::path::absolute(base).unwrap_or_else(|_| base.to_path_buf())
+}
+
+/// Converts a reference-proxy configuration (Phase 8, CE6/Q9/CE8).
+///
+/// Exit codes: 0 = the generated `eqproxy.toml` passed this crate's parser
+/// and validator and no source directive was rejected; 2 = the file is valid
+/// but at least one directive has no equivalent (the report names it); 1 =
+/// unreadable source, failed conversion or unwritable destination, and then
+/// nothing is written.
+fn import(from: Option<&str>, input: &Path, output: &Path, report_path: Option<&Path>) -> u8 {
+    let text = match std::fs::read_to_string(input) {
+        Ok(text) => text,
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", input.display());
+            return 1;
+        }
+    };
+    let source = match from {
+        Some(name) => match eqproxy_config::import::Source::parse(name) {
+            Some(source) => source,
+            None => {
+                eprintln!(
+                    "error: unknown source dialect \"{name}\" (expected nginx, haproxy, ingress or envoy)"
+                );
+                return 1;
+            }
+        },
+        None => eqproxy_config::import::Source::detect(&text),
+    };
+    let outcome = match eqproxy_config::import::convert(source, &text) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            eprintln!(
+                "error: {} is not a convertible {} configuration: {err}",
+                input.display(),
+                source.as_str()
+            );
+            return 1;
+        }
+    };
+    if let Err(e) = std::fs::write(output, &outcome.toml) {
+        eprintln!("error: cannot write {}: {e}", output.display());
+        return 1;
+    }
+    let report = eqproxy_config::import::report_with_paths(
+        &outcome.report,
+        &input.display().to_string(),
+        &output.display().to_string(),
+    );
+    match report_path {
+        Some(path) => {
+            if let Err(e) = std::fs::write(path, &report) {
+                eprintln!("error: cannot write {}: {e}", path.display());
+                return 1;
+            }
+        }
+        None => print!("{report}"),
+    }
+    let counts = outcome.counts;
+    println!(
+        "import: {} ({}) → {}: {} converted, {} to review, {} rejected",
+        input.display(),
+        source.as_str(),
+        output.display(),
+        counts.converted,
+        counts.review,
+        counts.rejected
+    );
+    if counts.rejected > 0 {
+        println!(
+            "  the generated file is valid; {} directive(s) have no EQProxy equivalent yet (see the report)",
+            counts.rejected
+        );
+        return 2;
+    }
+    0
 }
 
 /// Restores the most recent backup into current (Phase 3, offline).
@@ -2475,6 +2560,8 @@ fn resolve_with(
                     weight: entry.weight,
                     backup: entry.backup,
                     priority: entry.priority,
+                    // B-H16 (`server … maxconn`): 0 = only the listener cap.
+                    maxconn: entry.maxconn,
                 })
             })
             .collect::<Result<_, String>>()?;
@@ -3257,12 +3344,14 @@ mod tests {
                         weight: 3,
                         backup: false,
                         priority: 0,
+                        maxconn: 0,
                     },
                     eqproxy_config::schema::ServerConfig {
                         addr: "127.0.0.1:9001".to_owned(),
                         weight: 1,
                         backup: false,
                         priority: 0,
+                        maxconn: 0,
                     },
                 ]),
                 ..eqproxy_config::schema::BackendConfig::default()
@@ -3286,12 +3375,14 @@ mod tests {
                     weight: 3,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
                 ResolvedServer {
                     addr: eqproxy_net::ServerAddr::Ip("127.0.0.1:9001".parse().expect("addr")),
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
             ],
             3,

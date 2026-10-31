@@ -67,16 +67,16 @@ expect_failure = true
 expect_exit = 1
 expect_stderr_regex = "could not read the file"
 
-# Unimplemented functionality: explicit exit 2 (never fakes success).
-# (Every Phase 3 CLI command is now implemented — `explain`, `plan`,
-# `apply`/`rollback` and `doctor` each left this list in their slice;
-# only `config import` (Phase 8) still holds the contract.)
+# Phase 8a: `config import` is implemented, so nothing holds the old
+# "not implemented, exit 2" contract any more. Its failure path exits 1 and
+# names the cause; the exit-2 case is now "converted with refused
+# directives", covered by `eqproxy-cli/tests/cli_e2e.rs`.
 [[e2e.scenarios]]
-name = "unimplemented-command-exits-2"
+name = "config-import-unreadable-source-exits-1"
 argv = ["config", "import", "--input", "a.cfg", "--output", "b.toml"]
 expect_failure = true
-expect_exit = 2
-expect_stderr_regex = "not implemented yet"
+expect_exit = 1
+expect_stderr_regex = "cannot read a.cfg"
 
 # Phase 3: `doctor` passes pre-flight on a free port (each scenario runs
 # in a fresh sandbox cwd; port 0 always binds; warnings never fail).

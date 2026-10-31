@@ -1,0 +1,40 @@
+# Generado por `eqproxy config import`.
+# Revise el informe de conversión antes de usarlo en producción.
+schema_version = 1
+
+[backend.api_v2]
+servers = [{ addr = "10.0.1.20:9000", weight = 5 }, { addr = "10.0.1.21:9000", weight = 2 }]
+
+[backend.app]
+servers = [{ addr = "10.0.0.10:8080", weight = 3 }, { addr = "10.0.0.11:8080" }, { addr = "10.0.0.12:8080", backup = true }]
+balance = "leastconn"
+
+[listener.web_ejemplo_com]
+listen = "0.0.0.0:443"
+mode = "http"
+backend = "app"
+idle_timeout = "65s"
+client_header_timeout = "10s"
+forwarded_headers = "append"
+
+[listener.web_ejemplo_com.tls]
+cert = "/etc/ssl/certs/ejemplo.pem"
+key = "/etc/ssl/private/ejemplo.key"
+alpn = ["h2", "http/1.1"]
+min_version = "1.2"
+
+[listener.web_ejemplo_com.compression]
+gzip = true
+
+[[listener.web_ejemplo_com.rules]]
+name = "server ejemplo.com location /api/"
+use_backend = "api_v2"
+path_prefix = "/api/"
+set_headers = [{ name = "Host", value = "$host" }]
+response_headers = [{ name = "X-Frame-Options", value = "SAMEORIGIN" }]
+
+[[listener.web_ejemplo_com.rules]]
+name = "server ejemplo.com location /"
+use_backend = "app"
+path_prefix = "/"
+set_headers = [{ name = "Host", value = "$host" }, { name = "X-Real-IP", value = "$remote_addr" }]

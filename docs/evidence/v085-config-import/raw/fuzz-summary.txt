@@ -1,0 +1,7 @@
+cargo +nightly fuzz run --fuzz-dir fuzz config_import -- -seed_inputs=docs/evidence/v085-config-import/raw -runs=20000 -max_total_time=120
+fecha: 2026-10-30T23:28:34Z
+toolchain: cargo 1.101.0-nightly (15be64aa0 2026-10-20)
+seed corpus: 4 configs de docs/evidence/v085-config-import/raw
+Done 20000 runs in 18 second(s)
+artefactos de crash:        0
+exit=0

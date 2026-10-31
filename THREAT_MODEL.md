@@ -103,9 +103,10 @@ defined at high level; detail in its phase) / *Pending* (no mitigation yet).
 
 ## 6. Vulnerability reporting procedure
 
-1. Private channel (to be defined with the project: security email +
-   GitHub/GitLab advisories) — **pending setup in Phase 1** (we do not invent a
-   channel that does not exist).
+1. Private channel: **<security@exyonq.org>**, documented in
+   [SECURITY.md](SECURITY.md) together with the scope, the information a
+   report must carry and the response times below. Public issues are never
+   the channel for a suspected vulnerability.
 2. Acknowledged within ≤ 5 working days; assessment and fix plan within ≤ 30 days.
 3. Disclosure coordination with the reporter; advisory publication with CVE
    when applicable.

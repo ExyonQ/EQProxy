@@ -1,5 +1,19 @@
 # Migration matrix — real source configs vs the EQProxy translation
 
+To translate your own file, use the built-in converter (v0.8.5):
+
+```bash
+eqproxy config import --input haproxy.cfg --output eqproxy.toml --report report.md
+```
+
+It reads nginx, HAProxy, ingress-nginx and Envoy (detected, or `--from`),
+classifies every directive as converted / to-review / rejected, and validates
+the result with the product's own parser. Exit `0` clean, `2` valid with
+refused directives named in the report, `1` nothing written. What the matrix
+below proves is a different, stronger claim: that the four hand-written
+translations route traffic identically. See
+[docs/evidence/v085-config-import.md](../evidence/v085-config-import.md).
+
 Gate criterion of v0.6 («migración demostrada»): the **same demo deployment**
 expressed in the four source formats EQProxy migrates, plus its translation to
 EQProxy, routing **case by case exactly the same**.

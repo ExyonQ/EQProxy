@@ -1,0 +1,3 @@
+served: converted-and-serving
+with the origin down: HTTP 502
+OK

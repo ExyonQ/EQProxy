@@ -1,0 +1,20 @@
+# eqproxy config validate sobre el TOML generado (rutas resueltas contra el disco)
+$ eqproxy config validate --config raw/ingress-nginx.eqproxy.toml
+warning: listener "tcp_9000" listens on 0.0.0.0:9000 without TLS: expose it only on trusted networks or enable [listener.tcp_9000.tls]
+config OK: 2 listener(s), 5 backend(s) in docs/evidence/v085-config-import/raw/ingress-nginx.eqproxy.toml
+exit=0
+
+$ eqproxy config validate --config raw/haproxy.eqproxy.toml
+warning: listener "fe_tcp_ssh" listens on 0.0.0.0:2222 without TLS: expose it only on trusted networks or enable [listener.fe_tcp_ssh.tls]
+error: inconsistent configuration after validation: listener.fe_https.tls.cert "/etc/haproxy/certs/ejemplo.pem": could not read /etc/haproxy/certs/ejemplo.pem — No such file or directory (os error 2)
+exit=1
+
+$ eqproxy config validate --config raw/nginx.eqproxy.toml
+error: inconsistent configuration after validation: listener.web_ejemplo_com.tls.cert "/etc/ssl/certs/ejemplo.pem": could not read /etc/ssl/certs/ejemplo.pem — No such file or directory (os error 2)
+exit=1
+
+$ eqproxy config validate --config raw/envoy.eqproxy.toml
+warning: listener "listener_tcp" listens on 0.0.0.0:5432 without TLS: expose it only on trusted networks or enable [listener.listener_tcp.tls]
+error: inconsistent configuration after validation: backend.svc_api.tls.ca_file "/etc/envoy/certs/ca.pem": could not read /etc/envoy/certs/ca.pem — No such file or directory (os error 2)
+exit=1
+

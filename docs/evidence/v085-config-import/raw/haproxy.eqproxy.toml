@@ -1,0 +1,105 @@
+# Generado por `eqproxy config import`.
+# Revise el informe de conversión antes de usarlo en producción.
+schema_version = 1
+
+[backend.app_tcp]
+server = "10.0.3.5:3306"
+
+[backend.app_tcp.health_check]
+interval = "5s"
+timeout = "1s"
+fall = 2
+rise = 2
+
+[backend.app_tcp.tls]
+verify = false
+server_name = "db.interno"
+
+[backend.bk_ssh]
+servers = [{ addr = "10.0.0.30:22" }, { addr = "10.0.0.31:22" }]
+
+[backend.bk_ssh.health_check]
+interval = "2s"
+timeout = "1s"
+fall = 3
+rise = 2
+
+[backend.bk_ssh.affinity]
+mode = "source"
+
+[backend.bk_web]
+servers = [{ addr = "10.0.0.10:8080", weight = 100 }, { addr = "10.0.0.11:8080", weight = 50 }, { addr = "10.0.0.12:8080", backup = true }, { addr = "ejemplocpuerta.local:8080" }]
+balance = "leastconn"
+proxy_protocol = "v1"
+
+[backend.bk_web.health_check]
+interval = "2s"
+timeout = "1s"
+fall = 3
+rise = 2
+type = "http"
+
+[backend.bk_web.affinity]
+mode = "cookie"
+cookie = "SERVERID"
+
+[listener.app_tcp]
+listen = "0.0.0.0:3306"
+mode = "tcp"
+backend = "app_tcp"
+maxconn = 50000
+connect_timeout = "5s"
+idle_timeout = "30s"
+client_header_timeout = "10s"
+server_header_timeout = "30s"
+
+[listener.fe_https]
+listen = "0.0.0.0:443"
+mode = "http"
+backend = "bk_web"
+maxconn = 20000
+connect_timeout = "4s"
+idle_timeout = "30s"
+client_header_timeout = "10s"
+server_header_timeout = "30s"
+forwarded_headers = "append"
+
+[listener.fe_https.tls]
+cert = "/etc/haproxy/certs/ejemplo.pem"
+key = "/etc/haproxy/certs/ejemplo.pem.key"
+alpn = ["h2", "http/1.1"]
+
+[[listener.fe_https.rules]]
+name = "deny"
+ip = ["10.9.9.9/32"]
+direct_response = { status = 403 }
+
+[listener.fe_https_2]
+listen = "0.0.0.0:8443"
+mode = "http"
+backend = "bk_web"
+maxconn = 20000
+connect_timeout = "4s"
+idle_timeout = "30s"
+client_header_timeout = "10s"
+server_header_timeout = "30s"
+forwarded_headers = "append"
+
+[listener.fe_https_2.tls]
+cert = "/etc/haproxy/certs/ejemplo.pem"
+key = "/etc/haproxy/certs/ejemplo.pem.key"
+
+[[listener.fe_https_2.rules]]
+name = "deny"
+ip = ["10.9.9.9/32"]
+direct_response = { status = 403 }
+
+[listener.fe_tcp_ssh]
+listen = "0.0.0.0:2222"
+mode = "tcp"
+backend = "bk_ssh"
+maxconn = 50000
+connect_timeout = "4s"
+idle_timeout = "10m"
+client_header_timeout = "10s"
+server_header_timeout = "30s"

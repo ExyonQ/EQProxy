@@ -254,12 +254,14 @@ async fn leastconn_routes_new_exchanges_to_the_least_loaded_server() {
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
                 ResolvedServer {
                     addr: b.addr.into(),
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
             ],
             3,
@@ -340,12 +342,14 @@ async fn leastconn_weights_share_in_flight_load_by_conns_over_weight() {
                     weight: 2,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
                 ResolvedServer {
                     addr: b.addr.into(),
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
             ],
             3,
@@ -426,12 +430,14 @@ async fn slow_start_ramps_the_recovered_server_up() {
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
                 ResolvedServer {
                     addr: b.addr.into(),
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
             ],
             1,
@@ -517,6 +523,109 @@ async fn slow_start_ramps_the_recovered_server_up() {
         late,
         (10, 10),
         "after the slow-start window the split is exactly 1:1"
+    );
+
+    stop_proxy(handle, serve).await;
+}
+
+// ------------------------------- B-H16: per-server maxconn ---------------
+
+/// Status code of one exchange on its own connection.
+async fn get_status(proxy: SocketAddr) -> u16 {
+    let mut client = TcpStream::connect(proxy).await.expect("connect proxy");
+    client
+        .write_all(b"GET /x HTTP/1.1\r\nhost: t\r\nconnection: close\r\n\r\n")
+        .await
+        .expect("write");
+    let mut response = Vec::new();
+    let mut buf = [0u8; 1024];
+    loop {
+        let got = tokio::time::timeout(WAIT, client.read(&mut buf))
+            .await
+            .expect("response in time")
+            .expect("read");
+        if got == 0 {
+            break;
+        }
+        response.extend_from_slice(&buf[..got]);
+        if response.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let head = String::from_utf8_lossy(&response);
+    head.split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("no status line in {head:?}"))
+}
+
+/// `server … maxconn 1` (B-H16): while the only server holds its one
+/// allowed exchange, the request fails explicitly with 503 (this fixture
+/// configures no `maxqueue`, so there is no queue to wait in) and does not
+/// oversubscribe the server; serving resumes as soon as the slot frees.
+#[cfg_attr(
+    miri,
+    ignore = "needs TCP sockets: miri does not support networking (rust-lang/miri#3449)"
+)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_server_maxconn_caps_concurrency_and_answers_503() {
+    let a = start_origin("a", true, false).await;
+    let metrics = Arc::new(Metrics::default());
+    let backend = Arc::new(ResolvedBackend::new(
+        "api",
+        vec![ResolvedServer {
+            addr: a.addr.into(),
+            weight: 1,
+            backup: false,
+            priority: 0,
+            maxconn: 1,
+        }],
+        3,
+        2,
+    ));
+    let (proxy_addr, handle, serve) = start_proxy(
+        http_listener("web", Arc::clone(&backend)),
+        Arc::clone(&metrics),
+    )
+    .await;
+
+    // First exchange occupies the only slot (held at the origin).
+    let held_proxy = proxy_addr;
+    let held = tokio::spawn(async move { get_body(held_proxy).await });
+    eventually(
+        || backend.balancer.active_count(a.addr) == 1,
+        "the first exchange in flight on the capped slot",
+    )
+    .await;
+
+    // At the cap: explicit 503, nothing reaches the origin.
+    assert_eq!(
+        get_status(proxy_addr).await,
+        503,
+        "a saturated server must fail explicitly, never queue"
+    );
+    assert_eq!(
+        a.served.load(Ordering::SeqCst),
+        1,
+        "no extra request may reach the origin past its maxconn"
+    );
+
+    // Release: the slot frees and the same server serves again.
+    a.release();
+    let body = tokio::time::timeout(WAIT, held)
+        .await
+        .expect("held exchange on time")
+        .expect("join");
+    assert_eq!(body, "a");
+    eventually(
+        || backend.balancer.active_count(a.addr) == 0,
+        "the capped slot released at exchange end",
+    )
+    .await;
+    assert_eq!(
+        get_status(proxy_addr).await,
+        200,
+        "the same server serves again once its slot is free"
     );
 
     stop_proxy(handle, serve).await;

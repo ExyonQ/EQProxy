@@ -7,6 +7,7 @@
 
 pub mod duration;
 pub mod error;
+pub mod import;
 pub mod schema;
 pub mod validate;
 

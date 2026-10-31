@@ -1,0 +1,220 @@
+# Manifiestos de ejemplo de ingress-nginx para probar eqproxy_migrate.py
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ingress-nginx-controller
+  namespace: ingress-nginx
+data:
+  enable-http2: "true"
+  use-proxy-protocol: "false"
+  ssl-protocols: "TLSv1.2 TLSv1.3"
+  proxy-body-size: "8m"
+  keep-alive: "75"
+  upstream-keepalive-connections: "64"
+  max-connections: "20000"
+  load-balance: "round_robin"
+  log-format-upstream: '$remote_addr - $remote_user [$time_local]'
+  enable-metrics: "true"
+  allow-snippet-annotations: "true"
+  default-ssl-certificate: "ingress-nginx/wildcard-tls"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tcp-services
+  namespace: ingress-nginx
+data:
+  "9000": "default/tcp-svc:9000"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: udp-services
+  namespace: ingress-nginx
+data:
+  "5353": "default/dns-svc:53"
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: web
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "3s"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "30s"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/load-balance: "round_robin"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "https://ejemplo.com"
+    nginx.ingress.kubernetes.io/limit-rps: "20"
+    nginx.ingress.kubernetes.io/whitelist-source-range: "10.0.0.0/8,192.168.0.0/16"
+    nginx.ingress.kubernetes.io/affinity: "cookie"
+    nginx.ingress.kubernetes.io/session-cookie-name: "route"
+    nginx.ingress.kubernetes.io/rewrite-target: "/"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-App: web";
+    nginx.ingress.kubernetes.io/proxy-body-size: "4m"
+    nginx.ingress.kubernetes.io/enable-hsts: "true"
+    nginx.ingress.kubernetes.io/hsts-max-age: "31536000"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - ejemplo.com
+    secretName: ejemplo-tls
+  rules:
+  - host: ejemplo.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web-svc
+            port:
+              number: 80
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: api-svc
+            port:
+              number: 8080
+  - host: panel.ejemplo.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: panel-svc
+            port:
+              number: 3000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: grpc
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "GRPC"
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"
+spec:
+  ingressClassName: nginx
+  tls:
+  - hosts:
+    - grpc.ejemplo.com
+    secretName: grpc-tls
+  rules:
+  - host: grpc.ejemplo.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grpc-svc
+            port:
+              number: 50051
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: passthrough
+  namespace: default
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: segura.ejemplo.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: segura-svc
+            port:
+              number: 8443
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-svc
+  namespace: default
+spec:
+  clusterIP: 10.96.0.10
+  ports:
+  - port: 80
+    targetPort: 8080
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: web-svc
+  namespace: default
+subsets:
+- addresses:
+  - ip: 10.0.0.10
+  - ip: 10.0.0.11
+  ports:
+  - port: 8080
+    name: http
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: api-svc
+  namespace: default
+subsets:
+- addresses:
+  - ip: 10.0.1.20
+  ports:
+  - port: 8080
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: grpc-svc
+  namespace: default
+subsets:
+- addresses:
+  - ip: 10.0.2.5
+  ports:
+  - port: 50051
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: segura-svc
+  namespace: default
+subsets:
+- addresses:
+  - ip: 10.0.3.5
+  ports:
+  - port: 8443
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: tcp-svc
+  namespace: default
+subsets:
+- addresses:
+  - ip: 10.0.4.5
+  ports:
+  - port: 9000
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: dns-svc
+  namespace: default
+subsets:
+- addresses:
+  - ip: 10.0.5.5
+  ports:
+  - port: 53

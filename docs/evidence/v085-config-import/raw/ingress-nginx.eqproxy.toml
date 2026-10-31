@@ -1,0 +1,74 @@
+# Generado por `eqproxy config import`.
+# Revise el informe de conversión antes de usarlo en producción.
+schema_version = 1
+
+[backend.api-svc_8080]
+server = "10.0.1.20:8080"
+
+[backend.grpc-svc_50051]
+server = "10.0.2.5:50051"
+
+[backend.panel-svc_3000]
+server = "panel-svc.default.svc.cluster.local:3000"
+
+[backend.tcp-svc_9000]
+server = "10.0.4.5:9000"
+
+[backend.web-svc_80]
+servers = [{ addr = "10.0.0.10:8080" }, { addr = "10.0.0.11:8080" }]
+
+[listener.ingress_0_0_0_0_443]
+listen = "0.0.0.0:443"
+mode = "http"
+backend = "web-svc_80"
+maxconn = 20000
+connect_timeout = "3s"
+idle_timeout = "75s"
+server_header_timeout = "30s"
+
+[listener.ingress_0_0_0_0_443.limits]
+max_body_bytes = 4194304
+
+[[listener.ingress_0_0_0_0_443.rules]]
+name = "ejemplo.com/api"
+use_backend = "api-svc_8080"
+path_prefix = "/api"
+host = "ejemplo.com"
+ip = ["10.0.0.0/8", "192.168.0.0/16"]
+response_headers = [{ name = "Strict-Transport-Security", value = "max-age=31536000" }]
+cors = { allow_origin = "*" }
+rate_limit = { rate = 20, per = "1s" }
+rewrite = { path_prefix_rewrite = "/" }
+
+[[listener.ingress_0_0_0_0_443.rules]]
+name = "ejemplo.com/"
+use_backend = "web-svc_80"
+path_prefix = "/"
+host = "ejemplo.com"
+ip = ["10.0.0.0/8", "192.168.0.0/16"]
+response_headers = [{ name = "Strict-Transport-Security", value = "max-age=31536000" }]
+cors = { allow_origin = "*" }
+rate_limit = { rate = 20, per = "1s" }
+rewrite = { path_prefix_rewrite = "/" }
+
+[[listener.ingress_0_0_0_0_443.rules]]
+name = "grpc.ejemplo.com/"
+use_backend = "grpc-svc_50051"
+path_prefix = "/"
+host = "grpc.ejemplo.com"
+
+[[listener.ingress_0_0_0_0_443.rules]]
+name = "panel.ejemplo.com/"
+use_backend = "panel-svc_3000"
+path_prefix = "/"
+host = "panel.ejemplo.com"
+ip = ["10.0.0.0/8", "192.168.0.0/16"]
+response_headers = [{ name = "Strict-Transport-Security", value = "max-age=31536000" }]
+cors = { allow_origin = "*" }
+rate_limit = { rate = 20, per = "1s" }
+rewrite = { path_prefix_rewrite = "/" }
+
+[listener.tcp_9000]
+listen = "0.0.0.0:9000"
+mode = "tcp"
+backend = "tcp-svc_9000"

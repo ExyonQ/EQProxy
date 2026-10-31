@@ -1,0 +1,64 @@
+# Generado por `eqproxy config import`.
+# Revise el informe de conversión antes de usarlo en producción.
+schema_version = 1
+
+[backend.svc_api]
+server = "10.0.1.20:8080"
+balance = "leastconn"
+
+[backend.svc_api.health_check]
+interval = "5s"
+timeout = "1s"
+fall = 2
+rise = 2
+type = "http"
+http_path = "/healthz"
+
+[backend.svc_api.tls]
+verify = true
+ca_file = "/etc/envoy/certs/ca.pem"
+server_name = "api.interno"
+alpn = ["h2"]
+
+[backend.svc_db]
+server = "10.0.3.5:5432"
+
+[backend.svc_web]
+servers = [{ addr = "10.0.0.10:8080", weight = 2 }, { addr = "10.0.0.11:8080" }]
+
+[backend.svc_web.health_check]
+interval = "2s"
+timeout = "1s"
+fall = 3
+rise = 2
+
+[listener.listener_https]
+listen = "0.0.0.0:443"
+mode = "http"
+backend = "svc_web"
+idle_timeout = "1m"
+client_header_timeout = "5s"
+forwarded_headers = "append"
+
+[listener.listener_https.tls]
+cert = "/etc/envoy/certs/fullchain.pem"
+key = "/etc/envoy/certs/privkey.pem"
+alpn = ["h2", "http/1.1"]
+min_version = "1.2"
+
+[[listener.listener_https.rules]]
+name = "ejemplo.com/api"
+use_backend = "svc_api"
+path_prefix = "/api"
+host = "ejemplo.com"
+
+[[listener.listener_https.rules]]
+name = "ejemplo.com/"
+use_backend = "svc_web"
+path_prefix = "/"
+host = "ejemplo.com"
+
+[listener.listener_tcp]
+listen = "0.0.0.0:5432"
+mode = "tcp"
+backend = "svc_db"

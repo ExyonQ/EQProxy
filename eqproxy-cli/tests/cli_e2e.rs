@@ -446,32 +446,107 @@ fn validate_reports_syntax_errors_with_line() {
     assert!(stderr.contains("example:"), "stderr:\n{stderr}");
 }
 
+/// `config import` (Phase 8a) replaced the old exit-2 "not implemented"
+/// contract: the three outcomes are now part of it, and they are checked
+/// against the real binary.
 #[cfg_attr(
     miri,
-    ignore = "needs processes and TCP sockets: miri does not support them (rust-lang/miri#3449)"
+    ignore = "needs processes and files: miri does not support them (rust-lang/miri#3449)"
 )]
 #[test]
-fn unimplemented_commands_fail_explicitly_with_exit_2() {
-    // `config explain`/`plan`/`apply`/`rollback` and now `doctor` used to
-    // be in this list; all are implemented (Phase 3 slices) and covered
-    // by explain_*/plan_*/apply_*/rollback_*/doctor_* tests below. Only
-    // `config import` (Phase 8) still holds the exit-2 contract.
-    let cases: &[(&[&str], &str)] = &[(
-        &["config", "import", "--input", "a.cfg", "--output", "b.toml"],
-        "config import",
-    )];
-    for (args, name) in cases {
-        let output = bin().args(*args).output().expect("run eqproxy");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert_eq!(
-            output.status.code(),
-            Some(2),
-            "{name} must exit with code 2; stderr: {stderr}"
-        );
-        assert!(
-            stderr.contains("not implemented yet"),
-            "{name} must fail explicitly; stderr: {stderr}"
-        );
+fn config_import_converts_and_names_what_it_refuses() {
+    // Clean source: exit 0, the file carries the translated cap, and the
+    // report is written where it was asked for.
+    let source = temp_config(
+        "import-clean",
+        "http {\n  upstream app {\n    server 10.0.0.1:8080 max_conns=50;\n  }\n  server {\n    listen 8080;\n    location / { proxy_pass http://app; }\n  }\n}\n",
+    );
+    let output_path = source.with_extension("converted.toml");
+    let report_path = source.with_extension("report.md");
+    let output = bin()
+        .args(["config", "import", "--input"])
+        .arg(&source)
+        .arg("--output")
+        .arg(&output_path)
+        .arg("--report")
+        .arg(&report_path)
+        .output()
+        .expect("run eqproxy config import");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "stdout: {stdout}");
+    assert!(stdout.contains("0 rejected"), "stdout:\n{stdout}");
+    let converted = std::fs::read_to_string(&output_path).expect("read converted file");
+    assert!(
+        converted.contains("maxconn = 50"),
+        "the nginx max_conns cap must be translated:\n{converted}"
+    );
+    let report = std::fs::read_to_string(&report_path).expect("read report");
+    assert!(
+        report.contains("Directivas leídas:"),
+        "the report must show its completeness counters:\n{report}"
+    );
+
+    // A source with a directive EQProxy cannot express: the file is still
+    // valid, the exit code says "converted with gaps" (2) and the directive
+    // is named — never dropped in silence.
+    let gappy = temp_config(
+        "import-gappy",
+        "http {\n  upstream app {\n    server 10.0.0.1:8080;\n  }\n  server {\n    listen 8080;\n    location / { proxy_pass http://app; }\n    root /var/www;\n  }\n}\n",
+    );
+    let gappy_out = gappy.with_extension("converted.toml");
+    let output = bin()
+        .args(["config", "import", "--input"])
+        .arg(&gappy)
+        .arg("--output")
+        .arg(&gappy_out)
+        .output()
+        .expect("run eqproxy config import");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "a conversion with refused directives exits 2; stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("rejected"),
+        "the summary must name the refusals:\n{stdout}"
+    );
+    assert!(
+        gappy_out.exists(),
+        "the valid file is still written, so the operator can start from it"
+    );
+
+    // Failures are exit 1 and write nothing.
+    let missing_out = std::env::temp_dir().join(format!(
+        "eqproxy-cli-e2e-{}-import-missing.toml",
+        std::process::id()
+    ));
+    let output = bin()
+        .args([
+            "config",
+            "import",
+            "--input",
+            "does-not-exist.cfg",
+            "--output",
+        ])
+        .arg(&missing_out)
+        .output()
+        .expect("run eqproxy config import");
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        !missing_out.exists(),
+        "nothing may be written when the source cannot be read"
+    );
+
+    for path in [
+        source,
+        output_path,
+        report_path,
+        gappy,
+        gappy_out,
+        missing_out,
+    ] {
+        remove_temp(&path);
     }
 }
 

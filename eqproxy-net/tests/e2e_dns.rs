@@ -134,6 +134,7 @@ fn named_backend(host: &str, port: u16, interval: Duration) -> Arc<ResolvedBacke
                 weight: 1,
                 backup: false,
                 priority: 0,
+                maxconn: 0,
             }],
             1,
             1,

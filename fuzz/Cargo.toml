@@ -18,6 +18,9 @@ path = "../eqproxy-net"
 [dependencies.eqproxy-core]
 path = "../eqproxy-core"
 
+[dependencies.eqproxy-config]
+path = "../eqproxy-config"
+
 [[bin]]
 name = "framing"
 path = "fuzz_targets/framing.rs"
@@ -28,6 +31,13 @@ bench = false
 [[bin]]
 name = "rules"
 path = "fuzz_targets/rules.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config_import"
+path = "fuzz_targets/config_import.rs"
 test = false
 doc = false
 bench = false

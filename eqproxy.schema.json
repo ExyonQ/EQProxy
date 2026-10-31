@@ -1492,6 +1492,14 @@
           "type": "boolean",
           "default": false
         },
+        "maxconn": {
+          "description": "Concurrent exchanges this server will take (B-H16: HAProxy\n`server … maxconn`). `0` (default) = bounded only by the listener\n`maxconn`. At the cap the balancer stops selecting the server, exactly\nlike a `weight = 0` one, so the load moves to its siblings; if every\nserver is at its cap the request fails explicitly with\n`no_available_server`; with a bounded backend queue configured\n(`maxqueue > 0`, B-H7) it waits there up to `timeout_queue` instead.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "maximum": 1000000,
+          "minimum": 0
+        },
         "priority": {
           "description": "Failover order among backup servers (EQProxy extension, 0..=255):\nhigher first, ties follow configuration order. Only the first\noperational rung serves at a time, so a recovered higher rung takes\nthe traffic back. Rejected unless `backup = true`, and ignored by the\nreference, which has no such keyword (HAProxy 3.4 `server`).",
           "type": "integer",

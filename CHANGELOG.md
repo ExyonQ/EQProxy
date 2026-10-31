@@ -3,10 +3,35 @@
 Language: **English**. Format follows "Keep a Changelog" (Added / Changed /
 Fixed); versions are `vMAJOR.MINOR.PATCH` git tags.
 
-## [Unreleased] — v0.8.5
+## [v0.8.5] — 2026-10-31
 
 ### Added
 
+- **Official configuration converter: `eqproxy config import` (Phase 8a,
+  CE6/Q9/CE8).** Reads an nginx, HAProxy, ingress-nginx or Envoy
+  configuration (dialect detected from the file or forced with `--from`),
+  writes `eqproxy.toml` and a Markdown report that classifies **every**
+  source directive as converted, to-review or rejected. Two properties are
+  enforced in code, not promised: a directive that produces no
+  classification fails the conversion (the report prints walked vs
+  classified), and the generated TOML is parsed and semantically validated
+  with the product's own parser and validator before it is written. Exit
+  `0` = clean, `2` = valid file with rejected directives named in the
+  report, `1` = nothing written. The Python reference migrator stays in the
+  maintainer tree as a reference only. Verified over a four-source corpus, a
+  convert → validate → serve real traffic journey with the binary, and a
+  libFuzzer target (20 000 runs, 0 crashes):
+  [v085-config-import](docs/evidence/v085-config-import.md).
+- **Per-server `maxconn` (B-H16, first step).** `servers[].maxconn` (HAProxy
+  `server … maxconn N`, nginx `max_conns=N`) caps the concurrent exchanges a
+  backend server accepts; `0` keeps only the listener cap. At the cap the
+  slot leaves rotation like a drained one and its load moves to the
+  siblings; when every slot is capped the request fails with an explicit
+  `503` (or waits in the backend's bounded queue if `maxqueue > 0`). Validation refuses a cap above 1 000 000 and a
+  cap on a `weight = 0` slot. Both dialects translate it in the converter.
+  Verified with a balancer unit test and an E2E that holds one exchange on
+  a `maxconn = 1` server (200 → 503 → 200 once released):
+  [v085-config-import](docs/evidence/v085-config-import.md).
 - **Hot TLS secrets both directions and the multi-instance drift runbook
   (B-E9/B-H10 fin, D10 detection; ADR-0035).** No SDS client: files plus
   the existing reload action (`SIGHUP` / `POST /api/v1/certificates/reload`)

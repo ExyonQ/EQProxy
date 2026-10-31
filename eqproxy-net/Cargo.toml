@@ -7,7 +7,7 @@ authors.workspace = true
 description = "EQProxy dataplane: listeners, connections and bounded TCP proxy"
 
 [dependencies]
-eqproxy-core = { path = "../eqproxy-core", version = "0.8.0" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.8.5" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 # Admin plane (v0.8): status JSON and Prometheus text.

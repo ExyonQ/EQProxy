@@ -17,9 +17,9 @@ clap = { workspace = true }
 mimalloc = { version = "0.1", default-features = false }
 rlimit = { workspace = true }
 tokio = { workspace = true }
-eqproxy-core = { path = "../eqproxy-core", version = "0.8.0" }
-eqproxy-config = { path = "../eqproxy-config", version = "0.8.0" }
-eqproxy-net = { path = "../eqproxy-net", version = "0.8.0" }
+eqproxy-core = { path = "../eqproxy-core", version = "0.8.5" }
+eqproxy-config = { path = "../eqproxy-config", version = "0.8.5" }
+eqproxy-net = { path = "../eqproxy-net", version = "0.8.5" }
 
 [lints]
 workspace = true

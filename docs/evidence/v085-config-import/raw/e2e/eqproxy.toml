@@ -1,0 +1,16 @@
+# Generado por `eqproxy config import`.
+# Revise el informe de conversión antes de usarlo en producción.
+schema_version = 1
+
+[backend.app]
+server = "127.0.0.1:62350"
+
+[listener.web__sin_server_name]
+listen = "0.0.0.0:62351"
+mode = "http"
+backend = "app"
+
+[[listener.web__sin_server_name.rules]]
+name = "server (sin server_name) location /"
+use_backend = "app"
+path_prefix = "/"

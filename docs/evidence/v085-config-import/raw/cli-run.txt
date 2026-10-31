@@ -1,0 +1,18 @@
+# eqproxy config import — corpus v0.8.5 (árbol ad0050a + import maxconn)
+eqproxy 0.8.0
+$ eqproxy config import --input raw/haproxy.cfg --output raw/haproxy.eqproxy.toml --report raw/haproxy.report.md
+import: docs/evidence/v085-config-import/raw/haproxy.cfg (haproxy) → docs/evidence/v085-config-import/raw/haproxy.eqproxy.toml: 41 converted, 30 to review, 7 rejected
+  the generated file is valid; 7 directive(s) have no EQProxy equivalent yet (see the report)
+exit=2
+$ eqproxy config import --input raw/nginx.conf --output raw/nginx.eqproxy.toml --report raw/nginx.report.md
+import: docs/evidence/v085-config-import/raw/nginx.conf (nginx) → docs/evidence/v085-config-import/raw/nginx.eqproxy.toml: 18 converted, 30 to review, 5 rejected
+  the generated file is valid; 5 directive(s) have no EQProxy equivalent yet (see the report)
+exit=2
+$ eqproxy config import --input raw/ingress-nginx.yaml --output raw/ingress-nginx.eqproxy.toml --report raw/ingress-nginx.report.md
+import: docs/evidence/v085-config-import/raw/ingress-nginx.yaml (ingress) → docs/evidence/v085-config-import/raw/ingress-nginx.eqproxy.toml: 23 converted, 22 to review, 2 rejected
+  the generated file is valid; 2 directive(s) have no EQProxy equivalent yet (see the report)
+exit=2
+$ eqproxy config import --input raw/envoy.yaml --output raw/envoy.eqproxy.toml --report raw/envoy.report.md
+import: docs/evidence/v085-config-import/raw/envoy.yaml (envoy) → docs/evidence/v085-config-import/raw/envoy.eqproxy.toml: 16 converted, 19 to review, 3 rejected
+  the generated file is valid; 3 directive(s) have no EQProxy equivalent yet (see the report)
+exit=2

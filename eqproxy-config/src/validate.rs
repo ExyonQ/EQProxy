@@ -14,8 +14,8 @@ use crate::find_line;
 use crate::schema::{
     Config, ForwardedHeaders, HealthCheckKind, ListenerMode, MAX_ADMIN_ACL_UIDS, MAX_AUTH_USERS,
     MAX_LOCAL_RESPONSE_BYTES, MAX_MAP_RELOAD_INTERVAL, MAX_METRICS_SERIES, MAX_QUEUE, MAX_RETRIES,
-    MAX_RULES, MAX_SECTIONS, MAX_SERVER_PRIORITY, MAX_SERVER_WEIGHT, MAX_SPLIT_TARGETS,
-    MIN_ADMIN_TOKEN_BYTES, MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
+    MAX_RULES, MAX_SECTIONS, MAX_SERVER_MAXCONN, MAX_SERVER_PRIORITY, MAX_SERVER_WEIGHT,
+    MAX_SPLIT_TARGETS, MIN_ADMIN_TOKEN_BYTES, MIN_MAP_RELOAD_INTERVAL, SCHEMA_VERSION,
 };
 
 /// Result of validating a full configuration.
@@ -1618,6 +1618,27 @@ pub fn check(config: &Config, source: &str, file: &Path) -> CheckResult {
                     &section,
                 );
             }
+            if entry.maxconn > MAX_SERVER_MAXCONN {
+                err(
+                    field(&format!("servers[{idx}].maxconn")),
+                    format!(
+                        "maxconn = {} out of range (maximum {MAX_SERVER_MAXCONN})",
+                        entry.maxconn
+                    ),
+                    "maxconn = 100 (range 0..=1000000; 0 = only the listener maxconn applies)"
+                        .to_owned(),
+                    &section,
+                );
+            }
+            if entry.maxconn > 0 && weight == 0 {
+                err(
+                    field(&format!("servers[{idx}].maxconn")),
+                    "maxconn on a drained server (weight = 0) can never be reached: the slot is never selected"
+                        .to_owned(),
+                    "drop `maxconn` or give the server a weight above 0".to_owned(),
+                    &section,
+                );
+            }
             if entry.priority > MAX_SERVER_PRIORITY {
                 err(
                     field(&format!("servers[{idx}].priority")),
@@ -2023,6 +2044,44 @@ mod tests {
         }
         let long = format!("{}.example.com", "a".repeat(64));
         assert!(sni_name_problem(&long).is_some_and(|p| p.contains("63")));
+    }
+
+    #[test]
+    fn per_server_maxconn_is_bounded_and_meaningless_on_a_drained_slot() {
+        // B-H16 `server … maxconn`: the ceiling is a resource budget, and a
+        // cap on a `weight = 0` slot can never be reached — both are errors
+        // with the field and the fix named, not silent passes.
+        let over = check_source(
+            "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", maxconn = 1000001 }]\n",
+        );
+        assert!(
+            over.errors
+                .iter()
+                .any(|err| err.cause.contains("maxconn = 1000001 out of range")),
+            "an over-budget cap must be refused: {:?}",
+            over.errors
+        );
+
+        let drained = check_source(
+            "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", weight = 0, maxconn = 10 }]\n",
+        );
+        assert!(
+            drained
+                .errors
+                .iter()
+                .any(|err| err.cause.contains("drained server")),
+            "a cap on a drained slot must be refused: {:?}",
+            drained.errors
+        );
+
+        let valid = check_source(
+            "schema_version = 1\n\n[listener.web]\nlisten = \"127.0.0.1:8080\"\nbackend = \"api\"\n\n[backend.api]\nservers = [{ addr = \"127.0.0.1:9000\", maxconn = 10 }]\n",
+        );
+        assert!(
+            valid.is_valid(),
+            "a bounded cap is valid: {:?}",
+            valid.errors
+        );
     }
 
     fn check_source(source: &str) -> CheckResult {

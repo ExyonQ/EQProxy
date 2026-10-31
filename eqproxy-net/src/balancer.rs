@@ -212,6 +212,13 @@ pub struct ResolvedServer {
     /// Failover order among backups (EQProxy extension, 0..=255): higher
     /// serves first; only the first operational rung is used at a time.
     pub priority: u32,
+    /// Concurrent exchanges this server accepts (B-H16: HAProxy
+    /// `server … maxconn`). `0` = no per-server cap. At the cap the slot is
+    /// skipped by the selection — like a drained one — and its load moves to
+    /// the siblings; with every slot capped the request fails explicitly
+    /// (`no_available_server`), or waits in the backend's bounded queue when
+    /// one is configured (`maxqueue > 0`, B-H7).
+    pub maxconn: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +241,8 @@ struct ServerState {
     consecutive_rises: u32,
     /// Exchanges in flight on this server (the leastconn load metric).
     active: u32,
+    /// Per-server concurrency cap, `0` = none (B-H16).
+    maxconn: u32,
     /// When the server last became operational: slow-start ramp base.
     up_since: Instant,
 }
@@ -376,6 +385,7 @@ impl Balancer {
                 weight: s.weight,
                 backup: s.backup,
                 priority: s.priority,
+                maxconn: s.maxconn,
                 up: true,
                 current_weight: 0,
                 consecutive_fails: 0,
@@ -688,6 +698,9 @@ impl Balancer {
             state[idx].addr.is_some()
                 && state[idx].up
                 && state[idx].weight > 0
+                // B-H16 `server … maxconn`: a saturated slot leaves rotation
+                // like a drained one, so the next sibling takes the load.
+                && (state[idx].maxconn == 0 || state[idx].active < state[idx].maxconn)
                 && self.mode_of(&state[idx]) == ServerMode::Ready
                 && !state[idx].addr.is_some_and(|a| exclude.contains(&a))
         };
@@ -869,6 +882,7 @@ mod tests {
             weight,
             backup: false,
             priority: 0,
+            maxconn: 0,
         }
     }
 
@@ -882,6 +896,7 @@ mod tests {
             weight,
             backup: true,
             priority,
+            maxconn: 0,
         }
     }
 
@@ -889,6 +904,7 @@ mod tests {
         ResolvedServer {
             backup: false,
             priority: 0,
+            maxconn: 0,
             addr: ServerAddr::Name {
                 host: host.to_owned(),
                 port,
@@ -947,12 +963,14 @@ mod tests {
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
                 ResolvedServer {
                     addr: b.into(),
                     weight: 1,
                     backup: false,
                     priority: 0,
+                    maxconn: 0,
                 },
             ],
             3,
@@ -1316,6 +1334,48 @@ mod tests {
             "wire name"
         );
         assert_eq!(ServerMode::parse("maint"), None, "no aliases");
+    }
+
+    #[test]
+    fn maxconn_slot_leaves_rotation_until_its_exchange_ends() {
+        // B-H16 `server … maxconn 1` on the first slot: while it holds an
+        // exchange, selection moves to the sibling instead of piling a second
+        // exchange onto it. With both capped and busy, `pick` is `None` (the
+        // caller rejects explicitly with `no_available_server`).
+        let capped = |port: u16, maxconn: u32| ResolvedServer {
+            addr: ServerAddr::Ip(ip(port)),
+            weight: 1,
+            backup: false,
+            priority: 0,
+            maxconn,
+        };
+        let balancer = Balancer::new(vec![capped(9000, 1), capped(9001, 1)], 1, 1);
+
+        let (first, guard) = balancer.pick_tracked(&[]).expect("first pick");
+        assert_eq!(first.port(), 9000, "config order picks the first slot");
+        assert_eq!(balancer.active_count(first), 1);
+
+        let second_pick = balancer.pick().expect("sibling takes the load");
+        assert_eq!(
+            second_pick.port(),
+            9001,
+            "a saturated server must not take a second exchange"
+        );
+
+        // Fill the sibling too: no slot can take the exchange.
+        let _second_guard = balancer.pick_tracked(&[]).expect("second pick").1;
+        assert_eq!(
+            balancer.pick(),
+            None,
+            "every slot at its cap means no available server, not a queue"
+        );
+
+        drop(guard);
+        assert_eq!(
+            balancer.pick().map(|addr| addr.port()),
+            Some(9000),
+            "the frees slot rejoins rotation at exchange end"
+        );
     }
 
     #[test]
