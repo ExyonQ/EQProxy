@@ -1,0 +1,20 @@
+=== date ===
+2026-10-31T06:47:40Z
+
+=== digests of the published tags (index) ===
+ghcr.io/exyonq/eqproxy:0.8.5 -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625
+ghcr.io/exyonq/eqproxy:latest -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625
+=== architectures ===
+linux/amd64 sha256:9c1741e8412eb6a5c51385d525814dfb454731c197dcc48ba114f774f787a224
+linux/arm64 sha256:8ec5cdb35c83878e06d98a9dcc9e7d90c2b08677ed54be476d2bd10bffaec2ae
+
+=== docker hub mirror ===
+sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625=== docker pull (default platform) ===
+8a72631378fb: Pull complete
+Digest: sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625
+Status: Downloaded newer image for ghcr.io/exyonq/eqproxy:0.8.5
+ghcr.io/exyonq/eqproxy:0.8.5
+
+=== --version on the published tag, both platforms ===
+linux/amd64 -> eqproxy 0.8.5
+linux/arm64 -> eqproxy 0.8.5

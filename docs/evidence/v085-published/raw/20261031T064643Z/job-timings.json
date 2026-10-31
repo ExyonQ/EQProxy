@@ -1,0 +1,6 @@
+{"completed_at":"2026-10-31T03:54:20Z","conclusion":"success","name":"Line gates pass before any build","started_at":"2026-10-31T03:46:51Z"}
+{"completed_at":"2026-10-31T04:01:52Z","conclusion":"success","name":"Binaries darwin (build + E2E verify)","started_at":"2026-10-31T03:54:23Z"}
+{"completed_at":"2026-10-31T05:35:29Z","conclusion":"success","name":"Binaries linux (build + E2E verify) + SBOM","started_at":"2026-10-31T03:54:23Z"}
+{"completed_at":"2026-10-31T06:44:30Z","conclusion":"success","name":"Multi-arch image (build + Scout both archs + E2E + promote)","started_at":"2026-10-31T05:35:32Z"}
+{"completed_at":"2026-10-31T06:44:46Z","conclusion":"success","name":"GitHub release (binaries + source tarball + SHA256SUMS + SBOM + Scout)","started_at":"2026-10-31T06:44:33Z"}
+{"completed_at":"2026-10-31T06:45:04Z","conclusion":"success","name":"Docker Hub page (rendered, published and read back) / Render, publish and read back the page","started_at":"2026-10-31T06:44:48Z"}

@@ -4,12 +4,15 @@ Language: **English**.
 
 **What this page answers:** what must be true before the `v0.8.5` tag is
 pushed, what the pipeline does with it, and how the published artifacts are
-verified afterwards. It is a procedure: the local gates of §2 were run on the
-cut commit (`fmt`, `clippy`, the 652-test suite, the release build, the
-citation and probe gates with their self-tests, and the `uid-skips`
-self-test); the two `uid-skips` verdicts need the suite transcripts the `guard`
-job produces, and every publication step (§4 onward) is **NOT EXECUTED** until
-the owner authorizes the tag push.
+verified afterwards.It is a procedure, and it has been executed for `v0.8.5`: the local gates of
+§2 were run on the cut commit (`fmt`, `clippy`, the suite, the release build,
+the citation and probe gates with their self-tests); the `guard` job supplied
+the two `uid-skips` verdicts from its own suite transcripts; §4 and §5 were
+completed on 2026-10-31 (tag `v0.8.5`, release run
+[41165822327](https://github.com/ExyonQ/EQProxy/actions/runs/41165822327),
+2 h 58 min, six jobs green). The artifact gate is recorded with its digests,
+Scout readings, checksums and re-pull transcripts in
+[v085-published](evidence/v085-published.md).
 
 - Version: **0.8.5** (`Cargo.toml` `[workspace.package] version`).
 - Release notes: [CHANGELOG.md](../CHANGELOG.md) section `## [v0.8.5] — 2026-10-31`,
@@ -123,8 +126,10 @@ digest that was scanned, not a rebuild.
 
 ## 5. After publication — the artifact gate
 
-This is the gate that closes the version: **NOT EXECUTED** until the tag run
-finishes. Every line is a check with its expected result.
+This is the gate that closes the version. It ran after the tag run finished
+(2026-10-31) and every line returned its expected result; the outputs are in
+[v085-published](evidence/v085-published.md). Every line is a check with its
+expected result.
 
 ```console
 $ gh run list --workflow release.yml --limit 1        # the tag run: success, every job

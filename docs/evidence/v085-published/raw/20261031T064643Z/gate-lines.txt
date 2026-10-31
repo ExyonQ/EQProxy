@@ -1,0 +1,65 @@
+# v0.8.5 release run 41165822327 — gate lines extracted from the job logs
+# Full logs: https://github.com/ExyonQ/EQProxy/actions/runs/41165822327
+
+## guard: version pin and uid-skips verdicts
+2026-10-31T03:47:04.3613332Z suite health probes: 18 found, 2 sub-second or unproven, 2 declared in short-health-probes.txt
+2026-10-31T03:47:04.3613827Z ok: every suite health probe has 1 s of timeout or a declared reason
+2026-10-31T03:47:04.4014037Z self-test ok: undeclared, missing, duplicated and malformed input all rejected
+2026-10-31T03:48:40.4640499Z test grpc::tests::outbound_request_keeps_a_declared_length_only ... ok
+2026-10-31T03:48:40.4670880Z test health::tests::head_check_never_waits_for_the_declared_body ... ok
+2026-10-31T03:48:40.4704865Z test http2::tests::declared_length_is_kept_and_frame_headers_are_rebuilt ... ok
+2026-10-31T03:48:40.6301068Z test panel::tests::forms_are_decoded_and_only_a_declared_form_media_type_is_read ... ok
+2026-10-31T03:48:42.6767603Z test head_keeps_its_declared_length_and_the_session_stays_usable ... ok
+2026-10-31T03:49:44.1005279Z test declared_body_over_the_cap_is_refused_before_the_dial ... ok
+2026-10-31T03:50:28.8501628Z uid-gated skips in an unprivileged run: 0 printed
+2026-10-31T03:50:28.8502009Z ok: the unprivileged run printed no uid-gated skip
+2026-10-31T03:52:23.0356218Z test grpc::tests::outbound_request_keeps_a_declared_length_only ... ok
+
+## image: candidate digest, Scout, promotion, re-pull
+2026-10-31T06:42:20.6218689Z ^[[36;1mecho "candidate index: $REF@sha256:$DIGEST"^[[0m
+2026-10-31T06:42:21.2270144Z candidate index: ghcr.io/exyonq/eqproxy:0.8.5-candidate@sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625
+2026-10-31T06:42:26.3076138Z ^[[36;1m    echo "Scanned candidate index: \`sha256:${DIGEST}\`"^[[0m
+2026-10-31T06:42:26.3079977Z ^[[36;1m  echo "scout: no critical or high vulnerability on linux/$arch"^[[0m
+2026-10-31T06:42:31.0263546Z    vulnerabilities │    0C     0H     0M     0L                 
+2026-10-31T06:42:31.0270208Z scout: no critical or high vulnerability on linux/amd64
+2026-10-31T06:42:35.9000938Z    vulnerabilities │    0C     0H     0M     0L                 
+2026-10-31T06:42:35.9006764Z scout: no critical or high vulnerability on linux/arm64
+2026-10-31T06:43:31.8412318Z #1 1.296 pushing sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 to ghcr.io/exyonq/eqproxy:0.8.5
+2026-10-31T06:43:32.3509293Z #1 1.806 pushing sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 to ghcr.io/exyonq/eqproxy:latest
+2026-10-31T06:43:38.0603881Z #1 4.643 pushing sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 to docker.io/exyonq/eqproxy:0.8.5
+2026-10-31T06:43:39.6369150Z #1 6.219 pushing sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 to docker.io/exyonq/eqproxy:latest
+2026-10-31T06:43:41.2701244Z ^[[36;1m  echo "$ref -> sha256:$INDEX (scanned)"^[[0m
+2026-10-31T06:43:41.8427248Z ghcr.io/exyonq/eqproxy:0.8.5 -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 (scanned)
+2026-10-31T06:43:42.4419101Z exyonq/eqproxy:0.8.5 -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 (scanned)
+2026-10-31T06:43:43.0133018Z ghcr.io/exyonq/eqproxy:0.8.5-candidate -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 (scanned)
+2026-10-31T06:43:43.6039572Z ghcr.io/exyonq/eqproxy:latest -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 (scanned)
+2026-10-31T06:43:44.1865683Z exyonq/eqproxy:latest -> sha256:bf1a06cd82338754e2cfae17fd297c6f2699fc83b889ba71549aec7ad0cae625 (scanned)
+2026-10-31T06:43:44.7762878Z ^[[36;1m  log "published $ref linux/$arch: version, digest, h2 gate, config apply and live traffic OK"^[[0m
+2026-10-31T06:43:44.8737783Z ==> re-pull ghcr.io/exyonq/eqproxy:0.8.5 (linux/amd64)
+2026-10-31T06:43:45.4652233Z ==> re-pull ghcr.io/exyonq/eqproxy@sha256:9c1741e8412eb6a5c51385d525814dfb454731c197dcc48ba114f774f787a224 (linux/amd64)
+2026-10-31T06:43:46.6353244Z ==> re-pull ghcr.io/exyonq/eqproxy:0.8.5 (linux/amd64): live proxied traffic
+2026-10-31T06:43:53.1774609Z ==> published ghcr.io/exyonq/eqproxy:0.8.5 linux/amd64: version, digest, h2 gate, config apply and live traffic OK
+2026-10-31T06:43:53.1775801Z ==> re-pull ghcr.io/exyonq/eqproxy:0.8.5 (linux/arm64)
+2026-10-31T06:43:53.7649083Z ==> re-pull ghcr.io/exyonq/eqproxy@sha256:8ec5cdb35c83878e06d98a9dcc9e7d90c2b08677ed54be476d2bd10bffaec2ae (linux/arm64)
+2026-10-31T06:43:55.3988445Z ==> re-pull ghcr.io/exyonq/eqproxy:0.8.5 (linux/arm64): live proxied traffic
+2026-10-31T06:44:01.9341997Z ==> published ghcr.io/exyonq/eqproxy:0.8.5 linux/arm64: version, digest, h2 gate, config apply and live traffic OK
+2026-10-31T06:44:01.9342553Z ==> re-pull exyonq/eqproxy:0.8.5 (linux/amd64)
+2026-10-31T06:44:02.5227724Z ==> re-pull exyonq/eqproxy@sha256:9c1741e8412eb6a5c51385d525814dfb454731c197dcc48ba114f774f787a224 (linux/amd64)
+2026-10-31T06:44:03.8368998Z ==> re-pull exyonq/eqproxy:0.8.5 (linux/amd64): live proxied traffic
+2026-10-31T06:44:10.3653542Z ==> published exyonq/eqproxy:0.8.5 linux/amd64: version, digest, h2 gate, config apply and live traffic OK
+2026-10-31T06:44:10.3654306Z ==> re-pull exyonq/eqproxy:0.8.5 (linux/arm64)
+2026-10-31T06:44:10.9581648Z ==> re-pull exyonq/eqproxy@sha256:8ec5cdb35c83878e06d98a9dcc9e7d90c2b08677ed54be476d2bd10bffaec2ae (linux/arm64)
+2026-10-31T06:44:12.5635801Z ==> re-pull exyonq/eqproxy:0.8.5 (linux/arm64): live proxied traffic
+2026-10-31T06:44:19.1285465Z ==> published exyonq/eqproxy:0.8.5 linux/arm64: version, digest, h2 gate, config apply and live traffic OK
+
+## release: source export, SHA256SUMS
+2026-10-31T06:44:38.1731848Z ^[[36;1mecho "==> dist/$SRC: $(wc -l < "$LIST" | tr -d ' ') entries, $(wc -c < "dist/$SRC" | tr -d ' ') bytes, version $VERSION"^[[0m
+2026-10-31T06:44:38.4916202Z ==> exporting 6e938ae as dist/eqproxy-0.8.5-src.tar.gz
+2026-10-31T06:44:38.5952323Z ==> dist/eqproxy-0.8.5-src.tar.gz: 2666 entries, 3237944 bytes, version 0.8.5
+2026-10-31T06:44:38.5998171Z ^[[36;1mecho "==> writing SHA256SUMS (only after every artifact passed)"^[[0m
+2026-10-31T06:44:38.6126816Z ==> writing SHA256SUMS (only after every artifact passed)
+2026-10-31T06:44:38.7566172Z eqproxy-darwin-amd64: OK
+2026-10-31T06:44:38.7805214Z eqproxy-darwin-arm64: OK
+2026-10-31T06:44:38.8111643Z eqproxy-linux-amd64: OK
+2026-10-31T06:44:38.8369504Z eqproxy-linux-arm64: OK
+2026-10-31T06:44:38.8396717Z eqproxy-0.8.5-src.tar.gz: OK

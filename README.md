@@ -6,11 +6,17 @@ Reverse proxy and load balancer written in Rust, targeting progressive
 functional parity with the reference proxy together with verifiable improvements in
 diagnostics, configuration, administration, extensibility and security.
 
-> **Status: v0.8.0 (2026-10-27) — operable at scale: an administration HTTP
-> API with roles, audit and a server-rendered web panel, hot configuration
-> without a control plane, per-server failover (`priority` ladders,
-> `allbackups` pools, `drain`/`maintenance`) and opt-in metrics, each with
-> published raw evidence.**
+> **Status: v0.8.5 (2026-10-31) — extensions, conversion and no debt in the
+> 0.8.x line: request-filter plugins as WASM with deny-by-default capabilities
+> (no WASI, no network, no filesystem to grant), a per-listener HTTP response
+> cache with `Vary`, ETag/304 revalidation and cache-lock, per-listener message
+> limits and stream buffers, hot TLS secrets in both directions, per-server
+> `maxconn`, and the official `eqproxy config import` converter for nginx,
+> HAProxy, ingress-nginx and Envoy — plus the v0.8 administration HTTP API with
+> roles, audit and a server-rendered web panel, hot configuration without a
+> control plane, per-server failover (`priority` ladders, `allbackups` pools,
+> `drain`/`maintenance`) and opt-in metrics, each with published raw
+> evidence.**
 > A real TCP and HTTP/1.1 proxy (crates
 > `eqproxy-core/config/net/cli`) with **typed routing rules per listener** —
 > host/path/method/header/cookie/map/IP
@@ -114,8 +120,11 @@ diagnostics, configuration, administration, extensibility and security.
 > [maintenance window](docs/evidence/v08-maintenance.md),
 > [priority ladder](docs/evidence/v08-priority.md) and
 > [backup pool](docs/evidence/v08-allbackups.md).
-> Release v0.8.0 (binaries for darwin/linux amd64+arm64 and multi-arch
-> image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
+> Release v0.8.5 (tag `v0.8.5`, release run 41165822327 green on all six
+> jobs, image index `sha256:bf1a06cd…` scanned 0 critical / 0 high on both
+> architectures and promoted unchanged to `:0.8.5` and `:latest` on GHCR and
+> Docker Hub — [artifact gate](docs/evidence/v085-published.md); binaries for
+> darwin/linux amd64+arm64 and multi-arch image, see Install). Performance vs 3.4.6 on netcup-bench (amd64, medians
 > of 5): the v0.6 HTTP/1.1 scenarios S-H1-04 (10 listeners, 100 backends,
 > 20 rules) **18 207 vs 15 957 rps** (p95 4.45 vs 5.92 ms) and S-H1-05
 > (500 backends + health checks) **15 624 vs 3 466 rps** (p95 5.16 vs
@@ -129,19 +138,26 @@ diagnostics, configuration, administration, extensibility and security.
 > [offload](docs/evidence/v07-h3-profile.md),
 > [close fix](docs/evidence/v07-h3-close.md)).
 >
-> **Scope honesty:** v0.8.0 is not declared production ready (Phase 9 gate
-> pending). Its gate is met: 14/14 boxes of the v0.8 roadmap — the
-> route×role authorization matrix with the dataplane serving when the admin
-> task dies, a backend applied under traffic in under a second, and the
-> metrics budget refusing what exceeds it. The latest 24-hour soak remains
+> **Scope honesty:** v0.8.5 is not declared production ready (Phase 9 gate
+> pending). Its own gate is met: 22/22 boxes of the v0.8.5 roadmap, including
+> the artifact gate — tag == `Cargo.toml`, every binary and both image
+> architectures built with `1.99.1`, the scanned digest promoted unchanged, and
+> the published image re-pulled and replayed
+> ([published](docs/evidence/v085-published.md)). It keeps the v0.8
+> administration guarantees: the route×role authorization matrix with the
+> dataplane serving when the admin task dies, a backend applied under traffic
+> in under a second, and the metrics budget refusing what exceeds it. The
+> latest 24-hour soak remains
 > the v0.7 gRPC bidi run **PASS** (2026-10-23: 86 400 s, 4 267 messages, 0 broken
 > streams, 0 failed probes), and HTTP/3 interop with two independent clients
 > (`aioquic` 1.2.0 and `quic-go` 0.64.1) is unchanged. HTTP/3 stays **experimental**:
 > browsers and `curl` over h3 are unverified and the QUIC adversarial tests
 > of THREAT_MODEL T19 are not executed. Outside this version by design and
-> listed in the [CHANGELOG](CHANGELOG.md): the reference filters that only
-> exist as WASM (v0.8.5, so ecosystem extension stays WASM-only) and maps
-> consumed through `equals` matching only.
+> listed in the [CHANGELOG](CHANGELOG.md): FastCGI, uwsgi and scgi
+> ([ADR-0032](docs/adr/0032-fastcgi-uwsgi-scgi-decision.md)), the cache's
+> `stale-while-revalidate` / `stale-if-error`
+> ([ADR-0034](docs/adr/0034-http-response-cache.md)), and maps consumed through
+> `equals` matching only.
 > The v0.6 24h soak gate **passed** on
 > netcup-bench (2026-10-18: 17.28M requests, 0 errors, steady RSS
 > 8.86 MiB / peak 9.32 MiB, clean SIGINT shutdown; budgets in
@@ -156,10 +172,10 @@ cargo run -p eqproxy-cli -- config validate --config eqproxy.toml.example
 cargo run -p eqproxy-cli -- run --config eqproxy.toml.example
 ```
 
-## Install from release v0.8.0
+## Install from release v0.8.5
 
 Binaries and checksums live on the
-[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.8.0).
+[release page](https://github.com/ExyonQ/EQProxy/releases/tag/v0.8.5).
 
 Every release carries **four prebuilt binaries**: `eqproxy-darwin-arm64`,
 `eqproxy-darwin-amd64`, `eqproxy-linux-arm64` and `eqproxy-linux-amd64`. The
@@ -177,8 +193,8 @@ Building from them is `cargo build --release --locked` with nothing else.
 # Pick your platform artifact:
 #   eqproxy-darwin-arm64 | eqproxy-darwin-amd64
 #   eqproxy-linux-arm64  | eqproxy-linux-amd64   (static, musl)
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.8.0/eqproxy-linux-amd64
-curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.8.0/SHA256SUMS.txt
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.8.5/eqproxy-linux-amd64
+curl -sSLO https://github.com/ExyonQ/EQProxy/releases/download/v0.8.5/SHA256SUMS.txt
 shasum -a 256 -c SHA256SUMS.txt --ignore-missing   # Linux: sha256sum -c --ignore-missing SHA256SUMS.txt
 chmod +x eqproxy-linux-amd64
 ./eqproxy-linux-amd64 --version
@@ -199,9 +215,9 @@ EOF
 Docker (linux/amd64 + linux/arm64, Wolfi base), same digests on both registries:
 
 ```bash
-docker pull exyonq/eqproxy:0.8.0           # Docker Hub (docs + examples on the repo page)
-docker pull ghcr.io/exyonq/eqproxy:0.8.0   # GitHub Container Registry
-docker run --rm exyonq/eqproxy:0.8.0 --version
+docker pull exyonq/eqproxy:0.8.5           # Docker Hub (docs + examples on the repo page)
+docker pull ghcr.io/exyonq/eqproxy:0.8.5   # GitHub Container Registry
+docker run --rm exyonq/eqproxy:0.8.5 --version
 ```
 
 ## Documentation

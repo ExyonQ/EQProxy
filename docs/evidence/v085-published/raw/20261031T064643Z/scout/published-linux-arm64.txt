@@ -1,0 +1,27 @@
+    i New version 1.29.0 available (installed version is 1.25.0) at https://github.com/docker/scout-cli
+    ✓ SBOM obtained from attestation, 69 packages found
+    ✓ Provenance obtained from attestation
+    ✓ No vulnerable package detected
+
+
+## Overview
+
+                   │               Analyzed Image               
+───────────────────┼────────────────────────────────────────────
+ Target            │  ghcr.io/exyonq/eqproxy:0.8.5              
+   digest          │  8ec5cdb35c83                              
+   platform        │ linux/arm64                                
+   provenance      │ https://github.com/ExyonQ/EQProxy          
+                   │  https://github.com/ExyonQ/EQProxy/blob/6e938ae98f20e7e59beff2f8c78083d22e080c16  
+   vulnerabilities │    0C     0H     0M     0L                 
+   size            │ 18 MB                                      
+   packages        │ 69                                         
+                   │                                            
+ Base image        │  cgr.dev/chainguard/wolfi-base:latest      
+                   │  360896efb075                              
+
+
+## Packages and Vulnerabilities
+
+  No vulnerable packages detected
+
